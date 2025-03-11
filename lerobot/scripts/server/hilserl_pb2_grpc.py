@@ -36,14 +36,29 @@ class LearnerServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.SendTransition = channel.unary_unary(
-                '/hil_serl.LearnerService/SendTransition',
-                request_serializer=hilserl__pb2.Transition.SerializeToString,
-                response_deserializer=hilserl__pb2.Empty.FromString,
-                _registered_method=True)
         self.SendInteractionMessage = channel.unary_unary(
                 '/hil_serl.LearnerService/SendInteractionMessage',
                 request_serializer=hilserl__pb2.InteractionMessage.SerializeToString,
+                response_deserializer=hilserl__pb2.Empty.FromString,
+                _registered_method=True)
+        self.StreamParameters = channel.unary_stream(
+                '/hil_serl.LearnerService/StreamParameters',
+                request_serializer=hilserl__pb2.Empty.SerializeToString,
+                response_deserializer=hilserl__pb2.Parameters.FromString,
+                _registered_method=True)
+        self.SendTransitions = channel.stream_unary(
+                '/hil_serl.LearnerService/SendTransitions',
+                request_serializer=hilserl__pb2.Transition.SerializeToString,
+                response_deserializer=hilserl__pb2.Empty.FromString,
+                _registered_method=True)
+        self.SendInteractions = channel.stream_unary(
+                '/hil_serl.LearnerService/SendInteractions',
+                request_serializer=hilserl__pb2.InteractionMessage.SerializeToString,
+                response_deserializer=hilserl__pb2.Empty.FromString,
+                _registered_method=True)
+        self.Ready = channel.unary_unary(
+                '/hil_serl.LearnerService/Ready',
+                request_serializer=hilserl__pb2.Empty.SerializeToString,
                 response_deserializer=hilserl__pb2.Empty.FromString,
                 _registered_method=True)
 
@@ -53,14 +68,32 @@ class LearnerServiceServicer(object):
     The Learner implements this service.
     """
 
-    def SendTransition(self, request, context):
+    def SendInteractionMessage(self, request, context):
         """Actor -> Learner to store transitions
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def SendInteractionMessage(self, request, context):
+    def StreamParameters(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SendTransitions(self, request_iterator, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SendInteractions(self, request_iterator, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Ready(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -69,14 +102,29 @@ class LearnerServiceServicer(object):
 
 def add_LearnerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'SendTransition': grpc.unary_unary_rpc_method_handler(
-                    servicer.SendTransition,
-                    request_deserializer=hilserl__pb2.Transition.FromString,
-                    response_serializer=hilserl__pb2.Empty.SerializeToString,
-            ),
             'SendInteractionMessage': grpc.unary_unary_rpc_method_handler(
                     servicer.SendInteractionMessage,
                     request_deserializer=hilserl__pb2.InteractionMessage.FromString,
+                    response_serializer=hilserl__pb2.Empty.SerializeToString,
+            ),
+            'StreamParameters': grpc.unary_stream_rpc_method_handler(
+                    servicer.StreamParameters,
+                    request_deserializer=hilserl__pb2.Empty.FromString,
+                    response_serializer=hilserl__pb2.Parameters.SerializeToString,
+            ),
+            'SendTransitions': grpc.stream_unary_rpc_method_handler(
+                    servicer.SendTransitions,
+                    request_deserializer=hilserl__pb2.Transition.FromString,
+                    response_serializer=hilserl__pb2.Empty.SerializeToString,
+            ),
+            'SendInteractions': grpc.stream_unary_rpc_method_handler(
+                    servicer.SendInteractions,
+                    request_deserializer=hilserl__pb2.InteractionMessage.FromString,
+                    response_serializer=hilserl__pb2.Empty.SerializeToString,
+            ),
+            'Ready': grpc.unary_unary_rpc_method_handler(
+                    servicer.Ready,
+                    request_deserializer=hilserl__pb2.Empty.FromString,
                     response_serializer=hilserl__pb2.Empty.SerializeToString,
             ),
     }
@@ -91,33 +139,6 @@ class LearnerService(object):
     """LearnerService: the Actor calls this to push transitions.
     The Learner implements this service.
     """
-
-    @staticmethod
-    def SendTransition(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/hil_serl.LearnerService/SendTransition',
-            hilserl__pb2.Transition.SerializeToString,
-            hilserl__pb2.Empty.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
 
     @staticmethod
     def SendInteractionMessage(request,
@@ -146,76 +167,8 @@ class LearnerService(object):
             metadata,
             _registered_method=True)
 
-
-class ActorServiceStub(object):
-    """ActorService: the Learner calls this to push parameters.
-    The Actor implements this service.
-    """
-
-    def __init__(self, channel):
-        """Constructor.
-
-        Args:
-            channel: A grpc.Channel.
-        """
-        self.StreamTransition = channel.unary_stream(
-                '/hil_serl.ActorService/StreamTransition',
-                request_serializer=hilserl__pb2.Empty.SerializeToString,
-                response_deserializer=hilserl__pb2.ActorInformation.FromString,
-                _registered_method=True)
-        self.SendParameters = channel.unary_unary(
-                '/hil_serl.ActorService/SendParameters',
-                request_serializer=hilserl__pb2.Parameters.SerializeToString,
-                response_deserializer=hilserl__pb2.Empty.FromString,
-                _registered_method=True)
-
-
-class ActorServiceServicer(object):
-    """ActorService: the Learner calls this to push parameters.
-    The Actor implements this service.
-    """
-
-    def StreamTransition(self, request, context):
-        """Learner -> Actor to send new parameters
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def SendParameters(self, request, context):
-        """Missing associated documentation comment in .proto file."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-
-def add_ActorServiceServicer_to_server(servicer, server):
-    rpc_method_handlers = {
-            'StreamTransition': grpc.unary_stream_rpc_method_handler(
-                    servicer.StreamTransition,
-                    request_deserializer=hilserl__pb2.Empty.FromString,
-                    response_serializer=hilserl__pb2.ActorInformation.SerializeToString,
-            ),
-            'SendParameters': grpc.unary_unary_rpc_method_handler(
-                    servicer.SendParameters,
-                    request_deserializer=hilserl__pb2.Parameters.FromString,
-                    response_serializer=hilserl__pb2.Empty.SerializeToString,
-            ),
-    }
-    generic_handler = grpc.method_handlers_generic_handler(
-            'hil_serl.ActorService', rpc_method_handlers)
-    server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('hil_serl.ActorService', rpc_method_handlers)
-
-
- # This class is part of an EXPERIMENTAL API.
-class ActorService(object):
-    """ActorService: the Learner calls this to push parameters.
-    The Actor implements this service.
-    """
-
     @staticmethod
-    def StreamTransition(request,
+    def StreamParameters(request,
             target,
             options=(),
             channel_credentials=None,
@@ -228,9 +181,9 @@ class ActorService(object):
         return grpc.experimental.unary_stream(
             request,
             target,
-            '/hil_serl.ActorService/StreamTransition',
+            '/hil_serl.LearnerService/StreamParameters',
             hilserl__pb2.Empty.SerializeToString,
-            hilserl__pb2.ActorInformation.FromString,
+            hilserl__pb2.Parameters.FromString,
             options,
             channel_credentials,
             insecure,
@@ -242,7 +195,61 @@ class ActorService(object):
             _registered_method=True)
 
     @staticmethod
-    def SendParameters(request,
+    def SendTransitions(request_iterator,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.stream_unary(
+            request_iterator,
+            target,
+            '/hil_serl.LearnerService/SendTransitions',
+            hilserl__pb2.Transition.SerializeToString,
+            hilserl__pb2.Empty.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SendInteractions(request_iterator,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.stream_unary(
+            request_iterator,
+            target,
+            '/hil_serl.LearnerService/SendInteractions',
+            hilserl__pb2.InteractionMessage.SerializeToString,
+            hilserl__pb2.Empty.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Ready(request,
             target,
             options=(),
             channel_credentials=None,
@@ -255,8 +262,8 @@ class ActorService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/hil_serl.ActorService/SendParameters',
-            hilserl__pb2.Parameters.SerializeToString,
+            '/hil_serl.LearnerService/Ready',
+            hilserl__pb2.Empty.SerializeToString,
             hilserl__pb2.Empty.FromString,
             options,
             channel_credentials,

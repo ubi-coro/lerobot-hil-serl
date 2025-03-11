@@ -22,37 +22,34 @@ package hil_serl;
 // The Learner implements this service.
 service LearnerService {
   // Actor -> Learner to store transitions
-  rpc SendTransition(Transition) returns (Empty);
-  rpc SendInteractionMessage(InteractionMessage) returns (Empty);  
+  rpc SendInteractionMessage(InteractionMessage) returns (Empty);
+  rpc StreamParameters(Empty) returns (stream Parameters);
+  rpc SendTransitions(stream Transition) returns (Empty);
+  rpc SendInteractions(stream InteractionMessage) returns (Empty);
+  rpc Ready(Empty) returns (Empty);
 }
 
-// ActorService: the Learner calls this to push parameters.
-// The Actor implements this service.
-service ActorService {
-  // Learner -> Actor to send new parameters
-  rpc StreamTransition(Empty) returns (stream ActorInformation) {};
-  rpc SendParameters(Parameters) returns (Empty);
-}
-
-
-message ActorInformation {
-    oneof data {
-        Transition transition = 1;
-        InteractionMessage interaction_message = 2;
-    }
+enum TransferState {
+    TRANSFER_UNKNOWN = 0;
+    TRANSFER_BEGIN = 1;
+    TRANSFER_MIDDLE = 2;
+    TRANSFER_END = 3;
 }
 
 // Messages
 message Transition {
-  bytes transition_bytes = 1;
+  TransferState transfer_state = 1;
+  bytes data = 2;
 }
 
 message Parameters {
-  bytes parameter_bytes = 1;
+  TransferState transfer_state = 1;
+  bytes data = 2;
 }
 
 message InteractionMessage {
-  bytes interaction_message_bytes = 1; 
+  TransferState transfer_state = 1;
+  bytes data = 2;
 }
 
 message Empty {}

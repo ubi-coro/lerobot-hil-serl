@@ -17,10 +17,12 @@
 
 # TODO: (1) better device management
 
+from copy import deepcopy
 from typing import Callable, Optional, Tuple
 
 import einops
 import numpy as np
+from tensordict import from_modules
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
@@ -57,7 +59,9 @@ class SACPolicy(
                 config.input_normalization_params
             )
             self.normalize_inputs = Normalize(
-                config.input_shapes, config.input_normalization_modes, input_normalization_params
+                config.input_shapes,
+                config.input_normalization_modes,
+                input_normalization_params,
             )
         else:
             self.normalize_inputs = nn.Identity()
@@ -80,15 +84,16 @@ class SACPolicy(
             encoder_critic = SACObservationEncoder(config, self.normalize_inputs)
             encoder_actor: SACObservationEncoder = encoder_critic
         else:
-            encoder_critic = SACObservationEncoder(config)
-            encoder_actor = SACObservationEncoder(config)
+            encoder_critic = SACObservationEncoder(config, self.normalize_inputs)
+            encoder_actor = SACObservationEncoder(config, self.normalize_inputs)
 
         self.critic_ensemble = CriticEnsemble(
             encoder=encoder_critic,
-            network_list=nn.ModuleList(
+            ensemble=Ensemble(
                 [
-                    MLP(
-                        input_dim=encoder_critic.output_dim + config.output_shapes["action"][0],
+                    CriticHead(
+                        input_dim=encoder_critic.output_dim
+                        + config.output_shapes["action"][0],
                         **config.critic_network_kwargs,
                     )
                     for _ in range(config.num_critics)
@@ -99,10 +104,11 @@ class SACPolicy(
 
         self.critic_target = CriticEnsemble(
             encoder=encoder_critic,
-            network_list=nn.ModuleList(
+            ensemble=Ensemble(
                 [
-                    MLP(
-                        input_dim=encoder_critic.output_dim + config.output_shapes["action"][0],
+                    CriticHead(
+                        input_dim=encoder_critic.output_dim
+                        + config.output_shapes["action"][0],
                         **config.critic_network_kwargs,
                     )
                     for _ in range(config.num_critics)
@@ -113,15 +119,22 @@ class SACPolicy(
 
         self.critic_target.load_state_dict(self.critic_ensemble.state_dict())
 
+        self.critic_ensemble = torch.compile(self.critic_ensemble)
+        self.critic_target = torch.compile(self.critic_target)
+
         self.actor = Policy(
             encoder=encoder_actor,
-            network=MLP(input_dim=encoder_actor.output_dim, **config.actor_network_kwargs),
+            network=MLP(
+                input_dim=encoder_actor.output_dim, **config.actor_network_kwargs
+            ),
             action_dim=config.output_shapes["action"][0],
             encoder_is_shared=config.shared_encoder,
             **config.policy_kwargs,
         )
         if config.target_entropy is None:
-            config.target_entropy = -np.prod(config.output_shapes["action"][0]) / 2  # (-dim(A)/2)
+            config.target_entropy = (
+                -np.prod(config.output_shapes["action"][0]) / 2
+            )  # (-dim(A)/2)
 
         # TODO (azouitine): Handle the case where the temparameter is a fixed
         # TODO (michel-aractingi): Put the log_alpha in cuda by default because otherwise
@@ -148,7 +161,11 @@ class SACPolicy(
         return actions
 
     def critic_forward(
-        self, observations: dict[str, Tensor], actions: Tensor, use_target: bool = False
+        self,
+        observations: dict[str, Tensor],
+        actions: Tensor,
+        use_target: bool = False,
+        observation_features: Tensor | None = None,
     ) -> Tensor:
         """Forward pass through a critic network ensemble
 
@@ -161,28 +178,44 @@ class SACPolicy(
             Tensor of Q-values from all critics
         """
         critics = self.critic_target if use_target else self.critic_ensemble
-        q_values = critics(observations, actions)
+        q_values = critics(observations, actions, observation_features)
         return q_values
 
     def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor | float]: ...
     def update_target_networks(self):
         """Update target networks with exponential moving average"""
         for target_param, param in zip(
-            self.critic_target.parameters(), self.critic_ensemble.parameters(), strict=False
+            self.critic_target.parameters(),
+            self.critic_ensemble.parameters(),
+            strict=False,
         ):
             target_param.data.copy_(
                 param.data * self.config.critic_target_update_weight
                 + target_param.data * (1.0 - self.config.critic_target_update_weight)
             )
 
-    def compute_loss_critic(self, observations, actions, rewards, next_observations, done) -> Tensor:
+    def compute_loss_critic(
+        self,
+        observations,
+        actions,
+        rewards,
+        next_observations,
+        done,
+        observation_features: Tensor | None = None,
+        next_observation_features: Tensor | None = None,
+    ) -> Tensor:
         temperature = self.log_alpha.exp().item()
         with torch.no_grad():
-            next_action_preds, next_log_probs, _ = self.actor(next_observations)
+            next_action_preds, next_log_probs, _ = self.actor(
+                next_observations, next_observation_features
+            )
 
             # 2- compute q targets
             q_targets = self.critic_forward(
-                observations=next_observations, actions=next_action_preds, use_target=True
+                observations=next_observations,
+                actions=next_action_preds,
+                use_target=True,
+                observation_features=next_observation_features,
             )
 
             # subsample critics to prevent overfitting if use high UTD (update to date)
@@ -199,7 +232,12 @@ class SACPolicy(
             td_target = rewards + (1 - done) * self.config.discount * min_q
 
         # 3- compute predicted qs
-        q_preds = self.critic_forward(observations, actions, use_target=False)
+        q_preds = self.critic_forward(
+            observations,
+            actions,
+            use_target=False,
+            observation_features=observation_features,
+        )
 
         # 4- Calculate loss
         # Compute state-action value loss (TD loss) for all of the Q functions in the ensemble.
@@ -214,20 +252,31 @@ class SACPolicy(
         ).sum()
         return critics_loss
 
-    def compute_loss_temperature(self, observations) -> Tensor:
+    def compute_loss_temperature(
+        self, observations, observation_features: Tensor | None = None
+    ) -> Tensor:
         """Compute the temperature loss"""
         # calculate temperature loss
         with torch.no_grad():
-            _, log_probs, _ = self.actor(observations)
-        temperature_loss = (-self.log_alpha.exp() * (log_probs + self.config.target_entropy)).mean()
+            _, log_probs, _ = self.actor(observations, observation_features)
+        temperature_loss = (
+            -self.log_alpha.exp() * (log_probs + self.config.target_entropy)
+        ).mean()
         return temperature_loss
 
-    def compute_loss_actor(self, observations) -> Tensor:
+    def compute_loss_actor(
+        self, observations, observation_features: Tensor | None = None
+    ) -> Tensor:
         temperature = self.log_alpha.exp().item()
 
-        actions_pi, log_probs, _ = self.actor(observations)
+        actions_pi, log_probs, _ = self.actor(observations, observation_features)
 
-        q_preds = self.critic_forward(observations, actions_pi, use_target=False)
+        q_preds = self.critic_forward(
+            observations,
+            actions_pi,
+            use_target=False,
+            observation_features=observation_features,
+        )
         min_q_preds = q_preds.min(dim=0)[0]
 
         actor_loss = ((temperature * log_probs) - min_q_preds).mean()
@@ -254,7 +303,11 @@ class MLP(nn.Module):
         if dropout_rate is not None and dropout_rate > 0:
             layers.append(nn.Dropout(p=dropout_rate))
         layers.append(nn.LayerNorm(hidden_dims[0]))
-        layers.append(activations if isinstance(activations, nn.Module) else getattr(nn, activations)())
+        layers.append(
+            activations
+            if isinstance(activations, nn.Module)
+            else getattr(nn, activations)()
+        )
 
         # Rest of the layers
         for i in range(1, len(hidden_dims)):
@@ -265,13 +318,44 @@ class MLP(nn.Module):
                     layers.append(nn.Dropout(p=dropout_rate))
                 layers.append(nn.LayerNorm(hidden_dims[i]))
                 layers.append(
-                    activations if isinstance(activations, nn.Module) else getattr(nn, activations)()
+                    activations
+                    if isinstance(activations, nn.Module)
+                    else getattr(nn, activations)()
                 )
 
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+
+class CriticHead(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: list[int],
+        activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.SiLU(),
+        activate_final: bool = False,
+        dropout_rate: Optional[float] = None,
+        init_final: Optional[float] = None,
+    ):
+        super().__init__()
+        self.net = MLP(
+            input_dim=input_dim,
+            hidden_dims=hidden_dims,
+            activations=activations,
+            activate_final=activate_final,
+            dropout_rate=dropout_rate,
+        )
+        self.output_layer = nn.Linear(in_features=hidden_dims[-1], out_features=1)
+        if init_final is not None:
+            nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
+            nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
+        else:
+            orthogonal_init()(self.output_layer.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.output_layer(self.net(x))
 
 
 class CriticEnsemble(nn.Module):
@@ -316,13 +400,13 @@ class CriticEnsemble(nn.Module):
     def __init__(
         self,
         encoder: Optional[nn.Module],
-        network_list: nn.ModuleList,
+        ensemble: "Ensemble[CriticHead]",
         output_normalization: nn.Module,
         init_final: Optional[float] = None,
     ):
         super().__init__()
         self.encoder = encoder
-        self.network_list = network_list
+        self.ensemble = ensemble
         self.init_final = init_final
         self.output_normalization = output_normalization
 
@@ -330,36 +414,13 @@ class CriticEnsemble(nn.Module):
         # Handle the case where a part of the encoder if frozen
         if self.encoder is not None:
             self.parameters_to_optimize += list(self.encoder.parameters_to_optimize)
-
-        self.parameters_to_optimize += list(self.network_list.parameters())
-        # Find the last Linear layer's output dimension
-        for layer in reversed(network_list[0].net):
-            if isinstance(layer, nn.Linear):
-                out_features = layer.out_features
-                break
-
-        # Output layer
-        self.output_layers = []
-        if init_final is not None:
-            for _ in network_list:
-                output_layer = nn.Linear(out_features, 1)
-                nn.init.uniform_(output_layer.weight, -init_final, init_final)
-                nn.init.uniform_(output_layer.bias, -init_final, init_final)
-                self.output_layers.append(output_layer)
-        else:
-            self.output_layers = []
-            for _ in network_list:
-                output_layer = nn.Linear(out_features, 1)
-                orthogonal_init()(output_layer.weight)
-                self.output_layers.append(output_layer)
-
-        self.output_layers = nn.ModuleList(self.output_layers)
-        self.parameters_to_optimize += list(self.output_layers.parameters())
+        self.parameters_to_optimize += list(self.ensemble.parameters())
 
     def forward(
         self,
         observations: dict[str, torch.Tensor],
         actions: torch.Tensor,
+        observation_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         device = get_device_from_parameters(self)
         # Move each tensor in observations to device
@@ -370,15 +431,15 @@ class CriticEnsemble(nn.Module):
         actions = self.output_normalization(actions)["action"]
         actions = actions.to(device)
 
-        obs_enc = observations if self.encoder is None else self.encoder(observations)
+        obs_enc = (
+            observation_features
+            if observation_features is not None
+            else (observations if self.encoder is None else self.encoder(observations))
+        )
 
         inputs = torch.cat([obs_enc, actions], dim=-1)
-        list_q_values = []
-        for network, output_layer in zip(self.network_list, self.output_layers, strict=False):
-            x = network(inputs)
-            value = output_layer(x)
-            list_q_values.append(value.squeeze(-1))
-        return torch.stack(list_q_values)
+        q_values = self.ensemble(inputs)  # [num_critics, B, 1]
+        return q_values.squeeze(-1)  # [num_critics, B]
 
 
 class Policy(nn.Module):
@@ -435,9 +496,14 @@ class Policy(nn.Module):
     def forward(
         self,
         observations: torch.Tensor,
+        observation_features: torch.Tensor | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Encode observations if encoder exists
-        obs_enc = observations if self.encoder is None else self.encoder(observations)
+        obs_enc = (
+            observation_features
+            if observation_features is not None
+            else (observations if self.encoder is None else self.encoder(observations))
+        )
 
         # Get network outputs
         outputs = self.network(obs_enc)
@@ -446,11 +512,15 @@ class Policy(nn.Module):
         # Compute standard deviations
         if self.fixed_std is None:
             log_std = self.std_layer(outputs)
-            assert not torch.isnan(log_std).any(), "[ERROR] log_std became NaN after std_layer!"
+            assert not torch.isnan(
+                log_std
+            ).any(), "[ERROR] log_std became NaN after std_layer!"
 
             if self.use_tanh_squash:
                 log_std = torch.tanh(log_std)
-                log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (log_std + 1.0)
+                log_std = self.log_std_min + 0.5 * (
+                    self.log_std_max - self.log_std_min
+                ) * (log_std + 1.0)
             else:
                 log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
         else:
@@ -463,7 +533,9 @@ class Policy(nn.Module):
 
         if self.use_tanh_squash:
             actions = torch.tanh(x_t)
-            log_probs -= torch.log((1 - actions.pow(2)) + 1e-6)  # Adjust log-probs for Tanh
+            log_probs -= torch.log(
+                (1 - actions.pow(2)) + 1e-6
+            )  # Adjust log-probs for Tanh
         else:
             actions = x_t  # No Tanh; raw Gaussian sample
 
@@ -510,11 +582,15 @@ class SACObservationEncoder(nn.Module):
                 freeze_image_encoder(self.image_enc_layers)
             else:
                 self.parameters_to_optimize += list(self.image_enc_layers.parameters())
+            self.all_image_keys = [
+                k for k in config.input_shapes if k.startswith("observation.image")
+            ]
 
         if "observation.state" in config.input_shapes:
             self.state_enc_layers = nn.Sequential(
                 nn.Linear(
-                    in_features=config.input_shapes["observation.state"][0], out_features=config.latent_dim
+                    in_features=config.input_shapes["observation.state"][0],
+                    out_features=config.latent_dim,
                 ),
                 nn.LayerNorm(normalized_shape=config.latent_dim),
                 nn.Tanh(),
@@ -535,7 +611,9 @@ class SACObservationEncoder(nn.Module):
             self.aggregation_size += config.latent_dim
             self.parameters_to_optimize += list(self.env_state_enc_layers.parameters())
 
-        self.aggregation_layer = nn.Linear(in_features=self.aggregation_size, out_features=config.latent_dim)
+        self.aggregation_layer = nn.Linear(
+            in_features=self.aggregation_size, out_features=config.latent_dim
+        )
         self.parameters_to_optimize += list(self.aggregation_layer.parameters())
 
     def forward(self, obs_dict: dict[str, Tensor]) -> Tensor:
@@ -546,16 +624,21 @@ class SACObservationEncoder(nn.Module):
         """
         feat = []
         obs_dict = self.input_normalization(obs_dict)
-        # Concatenate all images along the channel dimension.
-        image_keys = [k for k in obs_dict if k.startswith("observation.image")]
-        for image_key in image_keys:
-            enc_feat = self.image_enc_layers(obs_dict[image_key])
+        # Batch all images along the batch dimension, then encode them.
+        if len(self.all_image_keys) > 0:
+            images_batched = torch.cat(
+                [obs_dict[key] for key in self.all_image_keys], dim=0
+            )
+            images_batched = self.image_enc_layers(images_batched)
+            embeddings_chunks = torch.chunk(
+                images_batched, dim=0, chunks=len(self.all_image_keys)
+            )
+            feat.extend(embeddings_chunks)
 
-            # if not self.has_pretrained_vision_encoder:
-            #     enc_feat = flatten_forward_unflatten(self.image_enc_layers, obs_dict[image_key])
-            feat.append(enc_feat)
         if "observation.environment_state" in self.config.input_shapes:
-            feat.append(self.env_state_enc_layers(obs_dict["observation.environment_state"]))
+            feat.append(
+                self.env_state_enc_layers(obs_dict["observation.environment_state"])
+            )
         if "observation.state" in self.config.input_shapes:
             feat.append(self.state_enc_layers(obs_dict["observation.state"]))
 
@@ -623,7 +706,9 @@ class PretrainedImageEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        self.image_enc_layers, self.image_enc_out_shape = self._load_pretrained_vision_encoder(config)
+        self.image_enc_layers, self.image_enc_out_shape = (
+            self._load_pretrained_vision_encoder(config)
+        )
         self.image_enc_proj = nn.Sequential(
             nn.Linear(np.prod(self.image_enc_out_shape), config.latent_dim),
             nn.LayerNorm(config.latent_dim),
@@ -634,15 +719,21 @@ class PretrainedImageEncoder(nn.Module):
         """Set up CNN encoder"""
         from transformers import AutoModel
 
-        self.image_enc_layers = AutoModel.from_pretrained(config.vision_encoder_name, trust_remote_code=True)
+        self.image_enc_layers = AutoModel.from_pretrained(
+            config.vision_encoder_name, trust_remote_code=True
+        )
         # self.image_enc_layers.pooler = Identity()
 
         if hasattr(self.image_enc_layers.config, "hidden_sizes"):
-            self.image_enc_out_shape = self.image_enc_layers.config.hidden_sizes[-1]  # Last channel dimension
+            self.image_enc_out_shape = self.image_enc_layers.config.hidden_sizes[
+                -1
+            ]  # Last channel dimension
         elif hasattr(self.image_enc_layers, "fc"):
             self.image_enc_out_shape = self.image_enc_layers.fc.in_features
         else:
-            raise ValueError("Unsupported vision encoder architecture, make sure you are using a CNN")
+            raise ValueError(
+                "Unsupported vision encoder architecture, make sure you are using a CNN"
+            )
         return self.image_enc_layers, self.image_enc_out_shape
 
     def forward(self, x):
@@ -665,16 +756,48 @@ def orthogonal_init():
 
 class Identity(nn.Module):
     def __init__(self):
-        super(Identity, self).__init__()
+        super().__init__()
 
     def forward(self, x):
         return x
 
 
+class Ensemble(nn.Module):
+    """
+    Vectorized ensemble of modules.
+    """
+
+    def __init__(self, modules, **kwargs):
+        super().__init__()
+        # combine_state_for_ensemble causes graph breaks
+        self.params = from_modules(*modules, as_module=True)
+        with self.params[0].data.to("meta").to_module(modules[0]):
+            self.module = deepcopy(modules[0])
+        self._repr = str(modules[0])
+        self._n = len(modules)
+
+    def __len__(self):
+        return self._n
+
+    def _call(self, params, *args, **kwargs):
+        with params.to_module(self.module):
+            return self.module(*args, **kwargs)
+
+    def forward(self, *args, **kwargs):
+        return torch.vmap(self._call, (0, None), randomness="different")(
+            self.params, *args, **kwargs
+        )
+
+    def __repr__(self):
+        return f"Vectorized {len(self)}x " + self._repr
+
+
 # TODO (azouitine): I think in our case this function is not usefull we should remove it
 # after some investigation
 # borrowed from tdmpc
-def flatten_forward_unflatten(fn: Callable[[Tensor], Tensor], image_tensor: Tensor) -> Tensor:
+def flatten_forward_unflatten(
+    fn: Callable[[Tensor], Tensor], image_tensor: Tensor
+) -> Tensor:
     """Helper to temporarily flatten extra dims at the start of the image tensor.
 
     Args:
@@ -700,7 +823,9 @@ def _convert_normalization_params_to_tensor(normalization_params: dict) -> dict:
         for key, value in inner_dict.items():
             converted_params[outer_key][key] = torch.tensor(value)
             if "image" in outer_key:
-                converted_params[outer_key][key] = converted_params[outer_key][key].view(3, 1, 1)
+                converted_params[outer_key][key] = converted_params[outer_key][
+                    key
+                ].view(3, 1, 1)
 
     return converted_params
 
@@ -711,46 +836,68 @@ if __name__ == "__main__":
 
     config = SACConfig()
     config.num_critics = 10
-    encoder = SACObservationEncoder(config)
-    actor_encoder = SACObservationEncoder(config)
-    encoder = torch.compile(encoder)
+    config.vision_encoder_name = None
+    encoder = SACObservationEncoder(config, nn.Identity())
+    # actor_encoder = SACObservationEncoder(config)
+    # encoder = torch.compile(encoder)
     critic_ensemble = CriticEnsemble(
         encoder=encoder,
-        network_list=nn.ModuleList(
+        ensemble=Ensemble(
             [
-                MLP(
+                CriticHead(
                     input_dim=encoder.output_dim + config.output_shapes["action"][0],
                     **config.critic_network_kwargs,
                 )
                 for _ in range(config.num_critics)
             ]
         ),
+        output_normalization=nn.Identity(),
     )
-    actor = Policy(
-        encoder=actor_encoder,
-        network=MLP(input_dim=actor_encoder.output_dim, **config.actor_network_kwargs),
-        action_dim=config.output_shapes["action"][0],
-        encoder_is_shared=config.shared_encoder,
-        **config.policy_kwargs,
-    )
-    encoder = encoder.to("cuda:0")
-    critic_ensemble = torch.compile(critic_ensemble)
+    # actor = Policy(
+    #     encoder=actor_encoder,
+    #     network=MLP(input_dim=actor_encoder.output_dim, **config.actor_network_kwargs),
+    #     action_dim=config.output_shapes["action"][0],
+    #     encoder_is_shared=config.shared_encoder,
+    #     **config.policy_kwargs,
+    # )
+    # encoder = encoder.to("cuda:0")
+    # critic_ensemble = torch.compile(critic_ensemble)
     critic_ensemble = critic_ensemble.to("cuda:0")
-    actor = torch.compile(actor)
-    actor = actor.to("cuda:0")
+    # actor = torch.compile(actor)
+    # actor = actor.to("cuda:0")
     obs_dict = {
-        "observation.image": torch.randn(1, 3, 84, 84),
-        "observation.state": torch.randn(1, 4),
+        "observation.image": torch.randn(8, 3, 84, 84),
+        "observation.state": torch.randn(8, 4),
     }
-    actions = torch.randn(1, 2).to("cuda:0")
-    obs_dict = {k: v.to("cuda:0") for k, v in obs_dict.items()}
-    print("compiling...")
-    # q_value = critic_ensemble(obs_dict, actions)
-    action = actor(obs_dict)
-    print("compiled")
+    actions = torch.randn(8, 2).to("cuda:0")
+    # obs_dict = {k: v.to("cuda:0") for k, v in obs_dict.items()}
+    # print("compiling...")
+    q_value = critic_ensemble(obs_dict, actions)
+    print(q_value.size())
+    # action = actor(obs_dict)
+    # print("compiled")
+    # start = time.perf_counter()
+    # for _ in range(1000):
+    #     # features = encoder(obs_dict)
+    #     action = actor(obs_dict)
+    #     # q_value = critic_ensemble(obs_dict, actions)
+    # print("Time taken:", time.perf_counter() - start)
+    # Compare the performance of the ensemble vs a for loop of 16 MLPs
+    ensemble = Ensemble([CriticHead(256, [256, 256]) for _ in range(2)])
+    ensemble = ensemble.to("cuda:0")
+    critic = CriticHead(256, [256, 256])
+    critic = critic.to("cuda:0")
+    data_ensemble = torch.randn(8, 256).to("cuda:0")
+    ensemble = torch.compile(ensemble)
+    # critic = torch.compile(critic)
+    print(ensemble(data_ensemble).size())
+    print(critic(data_ensemble).size())
     start = time.perf_counter()
     for _ in range(1000):
-        # features = encoder(obs_dict)
-        action = actor(obs_dict)
-        # q_value = critic_ensemble(obs_dict, actions)
+        ensemble(data_ensemble)
+    print("Time taken:", time.perf_counter() - start)
+    start = time.perf_counter()
+    for _ in range(1000):
+        for i in range(2):
+            critic(data_ensemble)
     print("Time taken:", time.perf_counter() - start)
