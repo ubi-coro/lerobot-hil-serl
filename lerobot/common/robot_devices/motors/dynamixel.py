@@ -440,7 +440,7 @@ class DynamixelMotorsBus:
         return values
 
     def apply_calibration(
-        self, values: np.ndarray | list, motor_names: list[str] | None
+        self, values: np.ndarray | list, motor_names: list[str] | None, is_velocity: bool = False
     ):
         """Convert from unsigned int32 joint position range [0, 2**32[ to the universal float32 nominal degree range ]-180.0, 180.0[ with
         a "zero position" at 0 degree.
@@ -454,6 +454,11 @@ class DynamixelMotorsBus:
         or anticlockwise by moving to 52638. The position in the original range is arbitrary and might change a lot between each motor.
         To harmonize between motors of the same model, different robots, or even models of different brands, we propose to work
         in the centered nominal degree range ]-180, 180[.
+
+        :param values: List or np.ndarray of joint values (position or velocity).
+        :param motor_names: List of motor names corresponding to the values.
+        :param is_velocity: Boolean indicating whether to calibrate velocities (default is False).
+        :return: Calibrated position (in degrees) or velocity (in degrees per second).
         """
         if motor_names is None:
             motor_names = self.motor_names
@@ -477,16 +482,25 @@ class DynamixelMotorsBus:
                 if drive_mode:
                     values[i] *= -1
 
-                # Convert from range [-2**31, 2**31] to
-                # nominal range [-resolution//2, resolution//2] (e.g. [-2048, 2048])
-                values[i] += homing_offset
+                if drive_mode:
+                    values[i] *= -1  # Adjust for motor rotation direction
 
-                # Convert from range [-resolution//2, resolution//2] to
-                # universal float32 centered degree range [-180, 180]
-                # (e.g. 2048 / (4096 // 2) * 180 = 180)
-                values[i] = values[i] / (resolution // 2) * HALF_TURN_DEGREE
+                if is_velocity:
+                    # Convert from range [-resolution//2, resolution//2] to
+                    # universal float32 centered degree range [-180, 180]
+                    # (e.g. 2048 / (4096 // 2) * 180 = 180)
+                    values[i] = values[i] / (resolution // 2) * HALF_TURN_DEGREE  # Scale velocity
+                else:
+                    # Convert from range [-2**31, 2**31] to
+                    # nominal range [-resolution//2, resolution//2] (e.g. [-2048, 2048])
+                    values[i] += homing_offset
 
-                if (values[i] < LOWER_BOUND_DEGREE) or (values[i] > UPPER_BOUND_DEGREE):
+                    # Convert from range [-resolution//2, resolution//2] to
+                    # universal float32 centered degree range [-180, 180]
+                    # (e.g. 2048 / (4096 // 2) * 180 = 180)
+                    values[i] = values[i] / (resolution // 2) * HALF_TURN_DEGREE
+
+                    if (values[i] < LOWER_BOUND_DEGREE) or (values[i] > UPPER_BOUND_DEGREE):
                     raise JointOutOfRangeError(
                         f"Wrong motor position range detected for {name}. "
                         f"Expected to be in nominal range of [-{HALF_TURN_DEGREE}, {HALF_TURN_DEGREE}] degrees (a full rotation), "
@@ -500,19 +514,23 @@ class DynamixelMotorsBus:
                 start_pos = self.calibration["start_pos"][calib_idx]
                 end_pos = self.calibration["end_pos"][calib_idx]
 
-                # Rescale the present position to a nominal range [0, 100] %,
-                # useful for joints with linear motions like Aloha gripper
-                values[i] = (values[i] - start_pos) / (end_pos - start_pos) * 100
+                if is_velocity:
+                    # Linear velocity scaling (assuming direct relation)
+                    values[i] = values[i] / (end_pos - start_pos) * 100  # Convert to % per second
+                else:
+                    # Rescale the present position to a nominal range [0, 100] %,
+                    # useful for joints with linear motions like Aloha gripper
+                    values[i] = (values[i] - start_pos) / (end_pos - start_pos) * 100
 
-                if (values[i] < LOWER_BOUND_LINEAR) or (values[i] > UPPER_BOUND_LINEAR):
-                    raise JointOutOfRangeError(
-                        f"Wrong motor position range detected for {name}. "
-                        f"Expected to be in nominal range of [0, 100] % (a full linear translation), "
-                        f"with a maximum range of [{LOWER_BOUND_LINEAR}, {UPPER_BOUND_LINEAR}] % to account for some imprecision during calibration, "
-                        f"but present value is {values[i]} %. "
-                        "This might be due to a cable connection issue creating an artificial jump in motor values. "
-                        "You need to recalibrate by running: `python lerobot/scripts/control_robot.py calibrate`"
-                    )
+                    if (values[i] < LOWER_BOUND_LINEAR) or (values[i] > UPPER_BOUND_LINEAR):
+                        raise JointOutOfRangeError(
+                            f"Wrong motor position range detected for {name}. "
+                            f"Expected to be in nominal range of [0, 100] % (a full linear translation), "
+                            f"with a maximum range of [{LOWER_BOUND_LINEAR}, {UPPER_BOUND_LINEAR}] % to account for some imprecision during calibration, "
+                            f"but present value is {values[i]} %. "
+                            "This might be due to a cable connection issue creating an artificial jump in motor values. "
+                            "You need to recalibrate by running: `python lerobot/scripts/control_robot.py calibrate`"
+                        )
 
         return values
 
@@ -633,7 +651,7 @@ class DynamixelMotorsBus:
                 self.calibration["homing_offset"][calib_idx] += resolution * factor
 
     def revert_calibration(
-        self, values: np.ndarray | list, motor_names: list[str] | None
+        self, values: np.ndarray | list, motor_names: list[str] | None, is_velocity: bool = False
     ):
         """Inverse of `apply_calibration`."""
         if motor_names is None:
@@ -649,13 +667,17 @@ class DynamixelMotorsBus:
                 _, model = self.motors[name]
                 resolution = self.model_resolution[model]
 
-                # Convert from nominal 0-centered degree range [-180, 180] to
-                # 0-centered resolution range (e.g. [-2048, 2048] for resolution=4096)
-                values[i] = values[i] / HALF_TURN_DEGREE * (resolution // 2)
+                if is_velocity:
+                    # Convert velocity from degrees per second back to raw motor units
+                    values[i] = values[i] / HALF_TURN_DEGREE * (resolution // 2)
+                else:
+                    # Convert from nominal 0-centered degree range [-180, 180] to
+                    # 0-centered resolution range (e.g. [-2048, 2048] for resolution=4096)
+                    values[i] = values[i] / HALF_TURN_DEGREE * (resolution // 2)
 
-                # Substract the homing offsets to come back to actual motor range of values
-                # which can be arbitrary.
-                values[i] -= homing_offset
+                    # Substract the homing offsets to come back to actual motor range of values
+                    # which can be arbitrary.
+                    values[i] -= homing_offset
 
                 # Remove drive mode, which is the rotation direction of the motor, to come back to
                 # actual motor rotation direction which can be arbitrary.
@@ -666,9 +688,13 @@ class DynamixelMotorsBus:
                 start_pos = self.calibration["start_pos"][calib_idx]
                 end_pos = self.calibration["end_pos"][calib_idx]
 
-                # Convert from nominal lnear range of [0, 100] % to
-                # actual motor range of values which can be arbitrary.
-                values[i] = values[i] / 100 * (end_pos - start_pos) + start_pos
+                if is_velocity:
+                    # Convert velocity percentage per second back to motor velocity units
+                    values[i] = values[i] / 100 * (end_pos - start_pos)
+                else:
+                    # Convert from nominal lnear range of [0, 100] % to
+                    # actual motor range of values which can be arbitrary.
+                    values[i] = values[i] / 100 * (end_pos - start_pos) + start_pos
 
         values = np.round(values).astype(np.int32)
         return values

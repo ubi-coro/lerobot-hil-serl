@@ -99,23 +99,23 @@ class InterbotixBus(MotorsBus):
     def set_calibration(self, calibration):
         self.bus.set_calibration(calibration)
 
-    def apply_calibration(self, values, joint_names=None):
+    def apply_calibration(self, values, joint_names=None, is_velocity: bool = False):
         if joint_names is None:
             joint_names = self.joint_names
 
         assert len(values) == len(joint_names), \
             f"InterbotixBus: number of values ({len(values)}) must match number of joints ({len(joint_names)})"
 
-        return self.bus.apply_calibration_autocorrect(self, values, joint_names)
+        return self.bus.apply_calibration_autocorrect(self, values, joint_names, is_velocity)
 
-    def revert_calibration(self, values, joint_names=None):
+    def revert_calibration(self, values, joint_names=None, is_velocity: bool = False):
         if joint_names is None:
             joint_names = self.joint_names
 
         assert len(values) == len(joint_names), \
             f"InterbotixBus: number of values ({len(values)}) must match number of joints ({len(joint_names)})"
 
-        return self.bus.revert_calibration(self, values, joint_names)
+        return self.bus.revert_calibration(self, values, joint_names, is_velocity)
 
     def set_trajectory_time(self, moving_time, accel_time):
         self.bot.arm.set_trajectory_time(moving_time, accel_time)
@@ -126,6 +126,12 @@ class InterbotixBus(MotorsBus):
         qpos = self.apply_calibration(qpos, joint_names=self.ARM_GROUP)
         gripper_pos = self.get_gripper_position()
         return qpos + [gripper_pos]
+
+    def get_joint_velocities(self):
+        qvel = self.bot.get_joint_velocities()
+        qvel = self.apply_calibration(qvel, joint_names=self.ARM_GROUP, is_velocity=True)
+        gripper_vel = self.get_gripper_velocity()
+        return qvel + [gripper_vel]
 
     def set_joint_positions(self, goal_pos):
         goal_pos = self.apply_calibration(values=goal_pos[:6], joint_names=self.ARM_GROUP)
@@ -138,23 +144,51 @@ class InterbotixBus(MotorsBus):
         gripper_pos = self.apply_calibration([gripper_pos], joint_names=["gripper"])[0]
         return gripper_pos
 
+    def get_gripper_velocity(self):
+        gripper_vel = self.bot.core.robot.robot_get_single_joint_state("gripper").velocity
+        gripper_vel = self.apply_calibration([gripper_vel], joint_names=["gripper"], is_velocity=True)[0]
+        return gripper_vel
+
     def set_gripper_position(self, goal_pos):
         gripper_pos = self.revert_calibration([goal_pos], joint_names=["gripper"])[0]
         self.bot.core.write_joint_command(name="gripper", cmd=gripper_pos)
 
     ### ee pose
+    def get_ee_pose(self):
+        ee_pose = self.bot.get_ee_pose()
+        gripper_pos = self.get_gripper_position()
+        return ee_pose + [gripper_pos]
+
+    def get_ee_velocity(self):
+        """
+        Compute the end-effector velocity given joint velocities.
+
+        :param arm: Instance of InterbotixArmXSInterface
+        :return: A 6x1 numpy array representing the end-effector velocity [linear; angular] in the space frame.
+        """
+        # Get joint positions and velocities
+        qpos = self.bot.get_joint_positions()
+        qvel = self.bot.get_joint_velocities()
+
+        # Compute the space Jacobian
+        J_space = mr.JacobianSpace(self.bot.robot_des.Slist, qpos)
+
+        # Convert joint velocities to end-effector velocity
+        ee_vel = np.dot(J_space, qvel)
+        gripper_vel = self.get_gripper_velocity()
+        return ee_vel.tolist()  + [gripper_vel]
+
     def set_ee_pose(self, goal_pose: list, initial_guess: list = None, blocking: bool = False):
         """
             :param goal_pose: a list with seven elements corresponding to [x, y, z, pitch, roll, yaw, gripper_pos] in the space frame
         """
         x, y, z, roll, pitch, yaw = goal_pose[:6]
-        self.bot.set_ee_pose_components(x, y, z, roll, pitch, yaw, initial_guess=initial_guess[:6], blocking=blocking)
+        theta_list, success = self.bot.set_ee_pose_components(x, y, z, roll, pitch, yaw, initial_guess=initial_guess[:6], blocking=blocking)
         self.set_gripper_position(goal_pose[6])
 
-    def get_ee_pose(self):
-        ee_pose = self.bot.get_ee_pose()
-        gripper_pos = self.get_gripper_position()
-        return ee_pose + [gripper_pos]
+        if not success:
+            ...
+        return theta_list
 
     def fk(self, joint_positions):
         return mr.FKinSpace(self.bot.arm.robot_des.M, self.bot.arm.robot_des.Slist, joint_positions[:6])

@@ -43,21 +43,6 @@ leader_arms:
       wrist_rotate: [8, xl430-w250]
       gripper: [9, xc430-w150]
 
-follower_arms:
-  right:
-    _target_: lerobot.common.robot_devices.motors.dynamixel.DynamixelMotorsBus
-    port: /dev/ttyDXL_puppet_right
-    motors:
-      # name: [index, model]
-      waist: [1, xm540-w270]
-      shoulder: [2, xm540-w270]
-      shoulder_shadow: [3, xm540-w270]
-      elbow: [4, xm540-w270]
-      elbow_shadow: [5, xm540-w270]
-      forearm_roll: [6, xm540-w270]
-      wrist_angle: [7, xm540-w270]
-      wrist_rotate: [8, xm430-w350]
-      gripper: [9, xm430-w350]
 
 # Troubleshooting: If one of your IntelRealSense cameras freeze during
 # data recording due to bandwidth limit, you might need to plug the camera

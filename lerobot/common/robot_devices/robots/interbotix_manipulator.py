@@ -37,6 +37,7 @@ class InterbotixManipulatorRobotConfig:
     leader_arms: dict[str, MotorsBus] = field(default_factory=lambda: {})
     follower_arms: dict[str, MotorsBus] = field(default_factory=lambda: {})
     cameras: dict[str, Camera] = field(default_factory=lambda: {})
+    botas: dict[str, object] = field(default_factory=lambda: {})
 
     # Optionally limit the magnitude of the relative positional target vector for safety purposes.
     # Set this to a positive scalar to have the same value for all motors, or a list that is the same length
@@ -362,9 +363,7 @@ class InterbotixManipulatorRobot(ManipulatorRobot):
             before_lread_t = time.perf_counter()
             leader_pos[name] = self.leader_arms[name].get_joint_positions()
             leader_pos[name] = torch.from_numpy(leader_pos[name])
-            self.logs[f"read_leader_{name}_pos_dt_s"] = (
-                time.perf_counter() - before_lread_t
-            )
+            self.logs[f"read_leader_{name}_pos_dt_s"] = (time.perf_counter() - before_lread_t)
 
         # Read follower position
         follower_ee_pose = {}
@@ -372,9 +371,15 @@ class InterbotixManipulatorRobot(ManipulatorRobot):
             before_fread_t = time.perf_counter()
             follower_ee_pose[name] = self.follower_arms[name].get_ee_pose()
             follower_ee_pose[name] = torch.from_numpy(follower_ee_pose[name])
-            self.logs[f"read_follower_{name}_pos_dt_s"] = (
-                time.perf_counter() - before_fread_t
-            )
+            self.logs[f"read_follower_{name}_pos_dt_s"] = (time.perf_counter() - before_fread_t)
+
+        # Read follower velocity
+        follower_ee_vel = {}
+        for name in self.follower_arms:
+            before_fread_t = time.perf_counter()
+            follower_ee_vel[name] = self.follower_arms[name].get_ee_velocity()
+            follower_ee_vel[name] = torch.from_numpy(follower_ee_vel[name])
+            self.logs[f"read_follower_{name}_vel_dt_s"] = (time.perf_counter() - before_fread_t)
 
         # Send goal position to the follower
         follower_ee_goal_pose = {}
@@ -400,7 +405,8 @@ class InterbotixManipulatorRobot(ManipulatorRobot):
 
             goal_ee_pose = goal_ee_pose.numpy().astype(np.int32)
             follower_ee_goal_pose[name] = goal_ee_pose
-            self.follower_arms[name].set_ee_pose(goal_ee_pose)
+            ik_solution = self.follower_arms[name].set_ee_pose(goal_ee_pose, initial_guess=self.previous_ik_solution[name])
+            self.previous_ik_solution[name] = ik_solution
             self.logs[f"write_follower_{name}_goal_pos_dt_s"] = (
                 time.perf_counter() - before_fwrite_t
             )
@@ -409,66 +415,62 @@ class InterbotixManipulatorRobot(ManipulatorRobot):
         if not record_data:
             return
 
-        # TODO(rcadene): Add velocity and other info
-        # Create state by concatenating follower current position
-        state = []
-        for name in self.follower_arms:
-            if name in follower_ee_pose:
-                state.append(self.follower_ee_pose[name])
-        state = torch.cat(state)
-
         # Create action by concatenating follower goal position
+        action_dict = {}
         action = []
         for name in self.follower_arms:
             if name in follower_ee_goal_pose:
                 action.append(self.follower_ee_goal_pose[name])
         action = torch.cat(action)
-
-        # Capture images from cameras
-        images = {}
-        for name in self.cameras:
-            before_camread_t = time.perf_counter()
-            images[name] = self.cameras[name].async_read()
-            images[name] = torch.from_numpy(images[name])
-            self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs[
-                "delta_timestamp_s"
-            ]
-            self.logs[f"async_read_camera_{name}_dt_s"] = (
-                time.perf_counter() - before_camread_t
-            )
-
-        # Populate output dictionaries
-        obs_dict, action_dict = {}, {}
-        obs_dict["observation.state"] = state
         action_dict["action"] = action
-        for name in self.cameras:
-            obs_dict[f"observation.images.{name}"] = images[name]
+
+        obs_dict = self.capture_observation(follower_ee_pose=follower_ee_pose, follower_ee_vel=follower_ee_vel)
 
         return obs_dict, action_dict
 
-    def capture_observation(self):
+    def capture_observation(
+            self,
+            follower_ee_pose: dict[str, torch.Tensor] | None = None,
+            follower_ee_vel: dict[str, torch.Tensor] | None = None
+    ):
         """The returned observations do not have a batch dimension."""
         if not self.is_connected:
             raise RobotDeviceNotConnectedError(
                 "ManipulatorRobot is not connected. You need to run `robot.connect()`."
             )
 
-        # Read follower position
-        follower_ee_pose = {}
-        for name in self.follower_arms:
-            before_fread_t = time.perf_counter()
-            follower_ee_pose[name] = self.follower_arms[name].get_ee_pose()
-            follower_ee_pose[name] = torch.from_numpy(follower_ee_pose[name])
-            self.logs[f"read_follower_{name}_pos_dt_s"] = (
-                time.perf_counter() - before_fread_t
-            )
+        if follower_ee_pose is None:
+            # Read follower position
+            follower_ee_pose = {}
+            for name in self.follower_arms:
+                before_fread_t = time.perf_counter()
+                follower_ee_pose[name] = self.follower_arms[name].get_ee_pose()
+                follower_ee_pose[name] = torch.from_numpy(follower_ee_pose[name])
+                self.logs[f"read_follower_{name}_pos_dt_s"] = (
+                    time.perf_counter() - before_fread_t
+                )
+
+        if follower_ee_vel is None:
+            # Read follower velocity
+            follower_ee_vel = {}
+            for name in self.follower_arms:
+                before_fread_t = time.perf_counter()
+                follower_ee_vel[name] = self.follower_arms[name].get_ee_velocity()
+                follower_ee_vel[name] = torch.from_numpy(follower_ee_vel[name])
+                self.logs[f"read_follower_{name}_vel_dt_s"] = (
+                    time.perf_counter() - before_fread_t
+                )
 
         # Create state by concatenating follower current position
-        state = []
+        tcp_pose = []
+        tcp_vel = []
         for name in self.follower_arms:
             if name in follower_ee_pose:
-                state.append(follower_ee_pose[name])
-        state = torch.cat(state)
+                tcp_pose.append(follower_ee_pose[name])
+            if name in follower_ee_vel:
+                tcp_vel.append(follower_ee_vel[name])
+        tcp_pose = torch.cat(tcp_pose)
+        tcp_vel = torch.cat(tcp_vel)
 
         # Capture images from cameras
         images = {}
@@ -485,7 +487,8 @@ class InterbotixManipulatorRobot(ManipulatorRobot):
 
         # Populate output dictionnaries and format to pytorch
         obs_dict = {}
-        obs_dict["observation.state"] = state
+        obs_dict["observation.tcp_pose"] = tcp_pose
+        obs_dict["observation.tcp_vel"] = tcp_vel
         for name in self.cameras:
             obs_dict[f"observation.images.{name}"] = images[name]
         return obs_dict
@@ -510,8 +513,8 @@ class InterbotixManipulatorRobot(ManipulatorRobot):
         action_sent = []
         for name in self.follower_arms:
             # Get goal position of each follower arm by splitting the action vector
-            # x,y,z, quat, gripper
-            to_idx += 8
+            # x,y,z, r, p, y, gripper
+            to_idx += 7
             goal_ee_pose = action[from_idx:to_idx]  # absolute, not delta values
             from_idx = to_idx
 
@@ -536,7 +539,8 @@ class InterbotixManipulatorRobot(ManipulatorRobot):
             # Send goal position to each follower
             goal_ee_pose = goal_ee_pose.numpy().astype(np.int32)
 
-            self.follower_arms[name].set_ee_pose(goal_ee_pose)
+            ik_solution = self.follower_arms[name].set_ee_pose(goal_ee_pose, initial_guess=self.previous_ik_solution[name])
+            self.previous_ik_solution[name] = ik_solution
 
         return torch.cat(action_sent)
 

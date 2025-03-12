@@ -9,10 +9,12 @@ import gymnasium as gym
 import numpy as np
 import torch
 import torchvision.transforms.functional as F  # noqa: N812
+from scipy.spatial.transform import Rotation as R
 
 from lerobot.common.envs.utils import preprocess_observation
 from lerobot.common.robot_devices.control_utils import busy_wait, is_headless
 from lerobot.common.robot_devices.robots.factory import make_robot
+from lerobot.common.robot_devices.robots.utils import construct_adjoint_matrix, construct_homogeneous_matrix
 from lerobot.common.utils.utils import init_hydra_config, log_say
 
 logging.basicConfig(level=logging.INFO)
@@ -29,13 +31,15 @@ class HILSerlRobotEnv(gym.Env):
     The environment can switch between executing actions from a policy or using teleoperated actions (human intervention) during
     each step. When teleoperation is used, the override action is captured and returned in the `info` dict along with a flag
     `is_intervention`.
+
+    Now works with ee poses and multiple arms at the same time
     """
 
     def __init__(
         self,
         robot,
         use_delta_action_space: bool = True,
-        delta: float | None = None,
+        delta_action_scale: list[float] | None = None,
         display_cameras: bool = False,
     ):
         """
@@ -54,6 +58,9 @@ class HILSerlRobotEnv(gym.Env):
         """
         super().__init__()
 
+        assert not use_delta_action_space or delta_action_scale is not None, "Specify delta_action_scale if a delta action space is used"
+        assert delta_action_scale is None or len(delta_action_scale) == 3, "delta_action_scale must be None or a 3-sequence"
+
         self.robot = robot
         self.display_cameras = display_cameras
 
@@ -61,15 +68,18 @@ class HILSerlRobotEnv(gym.Env):
         if not self.robot.is_connected:
             self.robot.connect()
 
-        self.initial_follower_position = robot.capture_observation()['observation.state']
+        self.init_pose = robot.capture_observation()['observation.state']
+        self.current_pose = copy(self.init_pose)
+        self.next_pose = copy(self.init_pose)
+        self.num_follower = len(self.init_pose) / 7  # (x,y,z,r,p,y,gripper)
 
         # Episode tracking.
         self.current_step = 0
         self.episode_data = None
 
-        self.delta = delta
+        self.delta_action_scale = delta_action_scale
+        self.delta = np.array(self.num_follower * [delta_action_scale[0]] * 3 + delta_action_scale[1] * 3 + [delta_action_scale[2]])
         self.use_delta_action_space = use_delta_action_space
-        self.current_joint_positions = copy(self.initial_follower_position)
 
         # Retrieve the size of the joint position interval bound.
         self.relative_bound_high = torch.Tensor(self.robot.config.abs_pose_limit_high)
@@ -166,8 +176,9 @@ class HILSerlRobotEnv(gym.Env):
         # Reset episode tracking variables.
         self.current_step = 0
         self.episode_data = None
+        self.current_pose = observation['observation.state']
 
-        return observation, {"initial_position": self.initial_follower_position}
+        return observation, {"initial_position": self.init_pose}
 
     def step(
         self, action: Tuple[np.ndarray, bool]
@@ -201,48 +212,30 @@ class HILSerlRobotEnv(gym.Env):
         """
         policy_action, intervention_bool = action
         teleop_action = None
-        self.current_joint_positions = self.robot.follower_arms["main"].read(
-            "Present_Position"
-        )
+
+
         if isinstance(policy_action, torch.Tensor):
             policy_action = policy_action.cpu().numpy()
-            policy_action = np.clip(
-                policy_action, self.action_space[0].low, self.action_space[0].high
-            )
+            policy_action = np.clip(policy_action, self.action_space[0].low, self.action_space[0].high)
+
         if not intervention_bool:
+            self.next_pose = copy(self.current_pose)
+
             if self.use_delta_action_space:
-                target_joint_positions = (
-                    self.current_joint_positions + self.delta * policy_action
-        )
+                self.next_pose = self.apply_delta_action(policy_action)
             else:
-                target_joint_positions = policy_action
-            self.robot.send_action(torch.from_numpy(target_joint_positions))
+                self.next_pose = policy_action
+
+            self.robot.send_action(torch.from_numpy(self.next_pose))
             observation = self.robot.capture_observation()
         else:
             observation, teleop_action = self.robot.teleop_step(record_data=True)
-            teleop_action = teleop_action[
-                "action"
-            ]  # Convert tensor to appropriate format
+            teleop_action = teleop_action["action"]  # Convert tensor to appropriate format
 
             # When applying the delta action space, convert teleop absolute values to relative differences.
             if self.use_delta_action_space:
-                teleop_action = (
-                    teleop_action - self.current_joint_positions
-                ) / self.delta
-                if torch.any(teleop_action < -self.relative_bounds_size) and torch.any(
-                    teleop_action > self.relative_bounds_size
-                ):
-                    logging.debug(
-                        f"Relative teleop delta exceeded bounds {self.relative_bounds_size}, teleop_action {teleop_action}\n"
-                        f"lower bounds condition {teleop_action < -self.relative_bounds_size}\n"
-                        f"upper bounds condition {teleop_action > self.relative_bounds_size}"
-                    )
+                teleop_action = self.revert_delta_action(teleop_action)
 
-                    teleop_action = torch.clamp(
-                        teleop_action,
-                        -self.relative_bounds_size,
-                        self.relative_bounds_size,
-                    )
             # NOTE: To mimic the shape of a neural network output, we add a batch dimension to the teleop action.
             if teleop_action.dim() == 1:
                 teleop_action = teleop_action.unsqueeze(0)
@@ -289,6 +282,67 @@ class HILSerlRobotEnv(gym.Env):
         if self.robot.is_connected:
             self.robot.disconnect()
 
+    def revert_delta_action(self, action):
+        """
+        Convert an absolute teleop action back into a delta action relative to the current pose.
+        """
+        from_idx = 0
+        to_idx = 0
+        delta_action = []
+        for i in range(len(self.num_follower)):
+            to_idx += 7
+            single_action = action[from_idx:to_idx]
+            from_idx = to_idx
+
+            single_action = torch.from_numpy(single_action) if not isinstance(action, torch.Tensor) else action
+
+            # Compute the delta for position
+            delta_pos = (single_action[:3] - self.current_pose[:3]) / self.delta_action_scale[0]
+
+            # Compute the delta for rotation using quaternions
+            current_rot = R.from_euler("xyz", self.current_pose[3:6])
+            target_rot = R.from_euler("xyz", single_action[3:6])
+            delta_rot = (target_rot * current_rot.inv()).as_euler("xyz") / self.delta_action_scale[1]
+
+            # Compute the delta for gripper
+            delta_gripper = single_action[6] / self.delta_action_scale[2]
+
+            # Concat to 7 element action
+            single_delta_action = torch.concat([torch.tensor(delta_pos), torch.tensor(delta_rot), torch.tensor([delta_gripper])])
+
+            # Compare against bounds and clamp if necessary
+            if torch.any(single_delta_action < -self.relative_bounds_size) or torch.any(single_delta_action > self.relative_bounds_size):
+                logging.debug(
+                        f"Relative teleop delta exceeded for arm no. {i}, bounds {self.relative_bounds_size}, teleop_action {single_delta_action}\n"
+                        f"lower bounds condition {single_delta_action < -self.relative_bounds_size}\n"
+                        f"upper bounds condition {single_delta_action > self.relative_bounds_size}"
+                    )
+
+                single_delta_action = torch.clamp(
+                        single_delta_action,
+                        -self.relative_bounds_size,
+                        self.relative_bounds_size,
+                    )
+
+            # Concatenate to form the final delta action
+            delta_action.append(single_delta_action)
+
+        delta_action = torch.cat(delta_action)
+        return delta_action
+
+    def apply_delta_action(self, action):
+        from_idx = 0
+        next_pose = copy(self.current_pose)
+        for _ in range(len(self.num_follower)):
+            next_pose = copy(self.current_pose)
+            next_pose[from_idx:from_idx+3] = self.current_pose[from_idx:from_idx+3] + action[from_idx:from_idx+3] * self.delta_action_scale[0]
+            next_pose[from_idx+3:from_idx+6] = (
+                R.from_euler("xyz", action[from_idx+3:from_idx+6] * self.delta_action_scale[1])
+                * R.from_euler("xyz", self.current_pose[from_idx+3:from_idx+6])
+            )
+            next_pose[from_idx+6] = action[from_idx+6] * self.delta_action_scale[2]
+        return next_pose
+
 
 class ActionRepeatWrapper(gym.Wrapper):
     def __init__(self, env, nb_repeat: int = 1):
@@ -306,7 +360,7 @@ class ActionRepeatWrapper(gym.Wrapper):
 class RewardWrapper(gym.Wrapper):
     def __init__(self, env, reward_classifier, device: torch.device = "cuda"):
         """
-        Wrapper to add reward prediction to the environment, it use a trained classifer.
+        Wrapper to add reward prediction to the environment, it uses a trained classifer.
 
         Args:
             env: The environment to wrap
@@ -338,8 +392,6 @@ class RewardWrapper(gym.Wrapper):
             )
         info["Reward classifer frequency"] = 1 / (time.perf_counter() - start_time)
 
-        # logging.info(f"Reward: {reward}")
-
         if reward == 1.0:
             terminated = True
         return observation, reward, terminated, truncated, info
@@ -348,7 +400,7 @@ class RewardWrapper(gym.Wrapper):
         return self.env.reset(seed=seed, options=options)
 
 
-class JointMaskingActionSpace(gym.Wrapper):
+class MaskingActionSpace(gym.Wrapper):
     def __init__(self, env, mask):
         """
         Wrapper to mask out dimensions of the action space.
@@ -359,11 +411,10 @@ class JointMaskingActionSpace(gym.Wrapper):
         """
         super().__init__(env)
 
-        # Validate mask matches action space
-
         # Keep only dimensions where mask is 1
         self.active_dims = np.where(mask)[0]
 
+        # Create new action space with masked dimensions
         if isinstance(env.action_space, gym.spaces.Box):
             if len(mask) != env.action_space.shape[0]:
                 raise ValueError("Mask length must match action space dimensions")
@@ -385,9 +436,8 @@ class JointMaskingActionSpace(gym.Wrapper):
             self.action_space = gym.spaces.Tuple(
                 (action_space_masked, env.action_space[1])
             )
-            # Create new action space with masked dimensions
 
-    def action(self, action):
+    def mask_action(self, action):
         """
         Convert masked action back to full action space.
 
@@ -419,7 +469,7 @@ class JointMaskingActionSpace(gym.Wrapper):
             return full_action
 
     def step(self, action):
-        action = self.action(action)
+        action = self.mask_action(action)
         obs, reward, terminated, truncated, info = self.env.step(action)
         if "action_intervention" in info and info["action_intervention"] is not None:
             if info["action_intervention"].dim() == 1:
@@ -720,7 +770,7 @@ class ResetWrapper(gym.Wrapper):
         return super().reset(seed=seed, options=options)
 
 
-class BatchCompitableWrapper(gym.ObservationWrapper):
+class BatchCompatibleWrapper(gym.ObservationWrapper):
     def __init__(self, env):
         super().__init__(env)
 
@@ -735,7 +785,102 @@ class BatchCompitableWrapper(gym.ObservationWrapper):
         return observation
 
 
-# TODO: REMOVE TH
+class RelativeFrameWrapper(gym.ObservationWrapper):
+    """
+    This wrapper transforms the observation and action to be expressed in the end-effector frame.
+    Optionally, it can transform the tcp_pose into a relative frame defined as the reset pose.
+
+    This wrapper is expected to be used on top of the base Franka environment, which has the following
+    observation space:
+    {
+        "state": spaces.Dict(
+            {
+                "tcp_pose": spaces.Box(-np.inf, np.inf, shape=(7,)), # xyz + quat
+                ......
+            }
+        ),
+        ......
+    }, and at least 6 DoF action space with (x, y, z, rx, ry, rz, ...)
+    """
+
+    def __init__(self, env, include_relative_pose=True):
+        super().__init__(env)
+        self.adjoint_matrix = np.zeros((6, 6))
+
+        self.include_relative_pose = include_relative_pose
+        if self.include_relative_pose:
+            # Homogeneous transformation matrix from reset pose's relative frame to base frame
+            self.T_r_o_inv = np.zeros((4, 4))
+
+    def step(self, action: np.ndarray):
+        # action is assumed to be (x, y, z, rx, ry, rz, gripper)
+        # Transform action from end-effector frame to base frame
+        transformed_action = self.transform_action(action)
+        obs, reward, done, truncated, info = self.env.step(transformed_action)
+        info['original_state_obs'] = copy.deepcopy({"tcp_pose": obs["observation.tcp_pose"], "tcp_vel": obs["observation.tcp_vel"]})
+
+        # this is to convert the spacemouse intervention action
+        if info["is_intervention"]:
+            info["action_intervention"] = self.transform_action_inv(info["action_intervention"])
+
+        # Update adjoint matrix
+        self.adjoint_matrix = construct_adjoint_matrix(obs["observation.tcp_pose"])
+
+        # Transform observation to spatial frame
+        transformed_obs = self.transform_observation(obs)
+        return transformed_obs, reward, done, truncated, info
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        info['original_state_obs'] = copy.deepcopy({"tcp_pose": obs["observation.tcp_pose"], "tcp_vel": obs["observation.tcp_vel"]})
+
+        # Update adjoint matrix
+        self.adjoint_matrix = construct_adjoint_matrix(obs["observation.tcp_pose"])
+        if self.include_relative_pose:
+            # Update transformation matrix from the reset pose's relative frame to base frame
+            self.T_r_o_inv = np.linalg.inv(
+                construct_homogeneous_matrix(obs["observation.tcp_pose"])
+            )
+
+        # Transform observation to spatial frame
+        return self.transform_observation(obs), info
+
+    def transform_observation(self, obs):
+        """
+        Transform observations from spatial(base) frame into body(end-effector) frame
+        using the adjoint matrix
+        """
+        adjoint_inv = np.linalg.inv(self.adjoint_matrix)
+        obs["observation.tcp_vel"] = adjoint_inv @ obs["observation.tcp_vel"]
+
+        if self.include_relative_pose:
+            T_b_o = construct_homogeneous_matrix(obs["observation.tcp_vel"])
+            T_b_r = self.T_r_o_inv @ T_b_o
+
+            # Reconstruct transformed tcp_pose vector
+            p_b_r = T_b_r[:3, 3]
+            theta_b_r = R.from_matrix(T_b_r[:3, :3]).as_euler("xyz")
+            obs["observation.tcp_vel"] = np.concatenate((p_b_r, theta_b_r))
+
+        return obs
+
+    def transform_action(self, action: np.ndarray):
+        """
+        Transform action from body(end-effector) frame into into spatial(base) frame
+        using the adjoint matrix.
+        """
+        action = np.array(action)  # in case action is a jax read-only array
+        action[:6] = self.adjoint_matrix @ action[:6]
+        return action
+
+    def transform_action_inv(self, action: np.ndarray):
+        """
+        Transform action from spatial(base) frame into body(end-effector) frame
+        using the adjoint matrix.
+        """
+        action = np.array(action)
+        action[:6] = np.linalg.inv(self.adjoint_matrix) @ action[:6]
+        return action
 
 
 def make_robot_env(
@@ -756,15 +901,6 @@ def make_robot_env(
     Returns:
         A vectorized gym environment with all the necessary wrappers applied.
     """
-    if "maniskill" in cfg.env.name:
-        from lerobot.scripts.server.maniskill_manipulator import make_maniskill
-
-        logging.warning("WE SHOULD REMOVE THE MANISKILL BEFORE THE MERGE INTO MAIN")
-        env = make_maniskill(
-            cfg=cfg,
-            n_envs=1,
-        )
-        return env
     # Create base environment
     env = HILSerlRobotEnv(
         robot=robot,
@@ -772,6 +908,9 @@ def make_robot_env(
         delta=cfg.env.wrapper.delta_action,
         use_delta_action_space=cfg.env.wrapper.use_relative_joint_positions,
     )
+    
+    # transform to relative frame
+    env = RelativeFrameWrapper(env)
 
     # Add observation and image processing
     env = ConvertToLeRobotObservation(env=env, device=cfg.device)
@@ -791,10 +930,10 @@ def make_robot_env(
     env = ResetWrapper(
         env=env, reset_fn=None, reset_time_s=cfg.env.wrapper.reset_time_s
     )
-    env = JointMaskingActionSpace(
+    env = MaskingActionSpace(
         env=env, mask=cfg.env.wrapper.joint_masking_action_space
     )
-    env = BatchCompitableWrapper(env=env)
+    env = BatchCompatibleWrapper(env=env)
 
     return env
 
