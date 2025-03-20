@@ -1,5 +1,6 @@
 import argparse
 import sys
+from typing import Type
 
 import logging
 import time
@@ -19,7 +20,7 @@ from lerobot.common.robot_devices.control_utils import (
 from lerobot.common.robot_devices.robots.factory import make_robot
 from lerobot.common.utils.utils import init_hydra_config, log_say
 
-from lerobot.scripts.server.kinematics import RobotKinematics
+from lerobot.scripts.server.kinematics import AlohaKinematics, RobotKinematics
 
 logging.basicConfig(level=logging.INFO)
 
@@ -821,13 +822,13 @@ class BatchCompitableWrapper(gym.ObservationWrapper):
 
 
 class EEActionWrapper(gym.ActionWrapper):
-    def __init__(self, env, ee_action_space_params=None):
+    def __init__(self, env, ee_action_space_params=None, kinematics: Type[RobotKinematics] = RobotKinematics):
         super().__init__(env)
         self.ee_action_space_params = ee_action_space_params
 
         # Initialize kinematics instance for the appropriate robot type
         robot_type = getattr(env.unwrapped.robot.config, "robot_type", "so100")
-        self.kinematics = RobotKinematics(robot_type)
+        self.kinematics = kinematics(robot_type)
         self.fk_function = self.kinematics.fk_gripper_tip
 
         action_space_bounds = np.array(
@@ -879,7 +880,7 @@ class EEActionWrapper(gym.ActionWrapper):
 
 
 class EEObservationWrapper(gym.ObservationWrapper):
-    def __init__(self, env, ee_pose_limits):
+    def __init__(self, env, ee_pose_limits, kinematics: Type[RobotKinematics] = RobotKinematics):
         super().__init__(env)
 
         # Extend observation space to include end effector pose
@@ -894,7 +895,7 @@ class EEObservationWrapper(gym.ObservationWrapper):
 
         # Initialize kinematics instance for the appropriate robot type
         robot_type = getattr(env.unwrapped.robot.config, "robot_type", "so100")
-        self.kinematics = RobotKinematics(robot_type)
+        self.kinematics = kinematics(robot_type)
         self.fk_function = self.kinematics.fk_gripper_tip
 
     def observation(self, observation):
@@ -1144,12 +1145,17 @@ def make_robot_env(
         and cfg.env.wrapper.ee_action_space_params is None,
     )
 
+    if cfg.robot.robot_type.lower().startswith('aloha'):
+        kinematics = AlohaKinematics
+    else:
+        kinematics = RobotKinematics
+
     # Add observation and image processing
     if cfg.env.wrapper.add_joint_velocity_to_observation:
         env = AddJointVelocityToObservation(env=env, fps=cfg.fps)
     if cfg.env.wrapper.add_ee_pose_to_observation:
         env = EEObservationWrapper(
-            env=env, ee_pose_limits=cfg.env.wrapper.ee_action_space_params.bounds
+            env=env, ee_pose_limits=cfg.env.wrapper.ee_action_space_params.bounds, kinematics=kinematics
         )
 
     env = ConvertToLeRobotObservation(env=env, device=cfg.env.device)
@@ -1168,7 +1174,7 @@ def make_robot_env(
     )
     if cfg.env.wrapper.ee_action_space_params is not None:
         env = EEActionWrapper(
-            env=env, ee_action_space_params=cfg.env.wrapper.ee_action_space_params
+            env=env, ee_action_space_params=cfg.env.wrapper.ee_action_space_params, kinematics=kinematics
         )
     if (
         cfg.env.wrapper.ee_action_space_params is not None

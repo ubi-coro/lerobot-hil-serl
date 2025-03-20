@@ -1,3 +1,4 @@
+import modern_robotics as mr
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -443,6 +444,51 @@ class RobotKinematics:
             if np.linalg.norm(error) < 5e-3:
                 return current_joint_state
         return current_joint_state
+
+
+class AlohaKinematics(RobotKinematics):
+
+    ROBOT_DESC = {
+        "aloha": {
+            "M": np.array([]),
+            "Slist": np.array([])
+        },
+        "aloha-tip": {
+            "M": np.array([]),
+            "Slist" : np.array([])
+        },
+        "aloha-bota": {
+            "M": np.array([]),
+            "Slist": np.array([])
+        }
+    }
+
+    def __init__(self, robot_type):
+        assert robot_type in self.ROBOT_DESC, f"AlohaKinematics: Unkown robot_type {robot_type}"
+        self.gripper_desc = self.ROBOT_DESC[robot_type]
+
+        if robot_type + '-tip' in self.ROBOT_DESC:
+            self.gripper_tip_desc = self.ROBOT_DESC[robot_type + '-tip']
+        else:
+            self.gripper_tip_desc = self.ROBOT_DESC[robot_type]
+
+    def prepare_joints(self, robot_pos_deg):
+        # filter shadows
+        mask = bool([0, 1, 0])
+        robot_pos_deg = robot_pos_deg[mask]
+
+        # modern_robotics fk needs radians
+        rotated_pos_rad = robot_pos_deg / 180.0 * np.pi
+
+        return rotated_pos_rad
+
+    def fk_gripper(self, robot_pos_deg):
+        """Forward kinematics for the gripper frame."""
+        return mr.FKinSpace(self.gripper_desc["M"], self.gripper_desc["SList"], self.prepare_joints(robot_pos_deg))
+
+    def fk_gripper_tip(self, robot_pos_deg):
+        """Forward kinematics for the gripper tip frame."""
+        return mr.FKinSpace(self.gripper_desc["M"], self.gripper_desc["SList"], self.prepare_joints(robot_pos_deg))
 
 
 if __name__ == "__main__":
