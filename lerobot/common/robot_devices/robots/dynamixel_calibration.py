@@ -79,6 +79,12 @@ def run_arm_calibration(arm: MotorsBus, robot_type: str, arm_name: str, arm_type
     # Joints with rotational motions are expressed in degrees in nominal range of [-180, 180]
     calib_mode = [CalibrationMode.DEGREE.name] * len(arm.motor_names)
 
+    # Drive mode indicates if the motor rotation direction should be inverted (=1) or not (=0).
+    drive_mode = np.array([0] * len(arm.motor_names))
+
+    # Effective zero position
+    homing_offset = np.array([0] * len(arm.motor_names))
+
     if robot_type.lower().startswith('aloha'):
         # Read current positions from the motors.
         present_position = np.array(arm.read("Present_Position"), dtype=np.float64)
@@ -88,15 +94,10 @@ def run_arm_calibration(arm: MotorsBus, robot_type: str, arm_name: str, arm_type
 
         for i, motor in enumerate(arm.motor_names):
             if motor != "gripper":
-                # todo: handle shadows correctly
-                is_shadow = [0, 1, 0, 1, 0, 0, 0, 0]
-
                 # Convert motor positions from steps (0–4096) to degrees (0° to 360°)
                 zero_pos[i] = 0.0
-                if is_shadow[i]:
-                    rotated_pos[i] = -4096.0 / 4  # quarter turn
-                else:
-                    rotated_pos[i] = 4096.0 / 4  # quarter turn
+                rotated_pos[i] = 4096.0 / 4  # quarter turn
+                homing_offset[i] = -2048.0  # to match 'value_of_zero_radian_position' in the dynamixel_sdk
             else:
                 # For the gripper, use a linear calibration.
                 calib_mode[i] = CalibrationMode.LINEAR.name
@@ -117,6 +118,14 @@ def run_arm_calibration(arm: MotorsBus, robot_type: str, arm_name: str, arm_type
                 # Store the closed value as start_pos and the open value as end_pos.
                 zero_pos[i] = closed_value
                 rotated_pos[i] = open_value
+
+                # Re-compute homing offset to take into account drive mode
+                rotated_drived_pos = apply_drive_mode(rotated_pos[i], drive_mode[i])
+                rotated_nearest_pos = compute_nearest_rounded_position(
+                    np.array([rotated_drived_pos]), [arm.motor_models[i]]
+                )[0]
+                homing_offset[i] = rotated_target_pos[i] - rotated_nearest_pos
+
     else:
         print("\nMove arm to zero position")
         print(
@@ -153,15 +162,15 @@ def run_arm_calibration(arm: MotorsBus, robot_type: str, arm_name: str, arm_type
         input("Press Enter to continue...")
         print()
 
-    # Drive mode indicates if the motor rotation direction should be inverted (=1) or not (=0).
-    drive_mode = (rotated_pos < zero_pos).astype(np.int32)
+        # Drive mode indicates if the motor rotation direction should be inverted (=1) or not (=0).
+        drive_mode = (rotated_pos < zero_pos).astype(np.int32)
 
-    # Re-compute homing offset to take into account drive mode
-    rotated_drived_pos = apply_drive_mode(rotated_pos, drive_mode)
-    rotated_nearest_pos = compute_nearest_rounded_position(
-        rotated_drived_pos, arm.motor_models
-    )
-    homing_offset = rotated_target_pos - rotated_nearest_pos
+        # Re-compute homing offset to take into account drive mode
+        rotated_drived_pos = apply_drive_mode(rotated_pos, drive_mode)
+        rotated_nearest_pos = compute_nearest_rounded_position(
+            rotated_drived_pos, arm.motor_models
+        )
+        homing_offset = rotated_target_pos - rotated_nearest_pos
 
     calib_data = {
         "homing_offset": homing_offset.tolist(),

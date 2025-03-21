@@ -72,6 +72,11 @@ class ManipulatorRobotConfig:
     # gripper is not put in torque mode.
     gripper_open_degree: float | None = None
 
+    # The duration of the velocity-based time profile
+    # Higher values lead to smoother motions, but increase lag.
+    # Only applicable to aloha
+    moving_time: float = 0.1
+
     joint_position_relative_bounds: dict[np.ndarray] | None = None
 
     def __setattr__(self, prop: str, val):
@@ -480,11 +485,20 @@ class ManipulatorRobot:
                 elbow_idx = arm.read("ID", "elbow")
                 arm.write("Secondary_ID", elbow_idx, "elbow_shadow")
 
+        def set_drive_mode_(arm):
+            # set the drive mode to time-based profile to set moving time via velocity profiles
+            drive_mode = arm.read('Drive_Mode')
+            for i in range(len(arm.motor_names)):
+                drive_mode[i] |= 1 << 2  # set third bit to enable time-based profiles
+            arm.write('Drive_Mode', drive_mode)
+
         for name in self.follower_arms:
             set_shadow_(self.follower_arms[name])
+            set_drive_mode_(self.follower_arms[name])
 
         for name in self.leader_arms:
             set_shadow_(self.leader_arms[name])
+            set_drive_mode_(self.follower_arms[name])
 
         for name in self.follower_arms:
             # Set a velocity limit of 131 as advised by Trossen Robotics
@@ -495,15 +509,11 @@ class ManipulatorRobot:
             # you could end up with a servo with a position 0 or 4095 at a crucial point See [
             # https://emanual.robotis.com/docs/en/dxl/x/x_series/#operating-mode11]
             all_motors_except_gripper = [
-                name
-                for name in self.follower_arms[name].motor_names
-                if name != "gripper"
+                name for name in self.follower_arms[name].motor_names if name != "gripper"
             ]
             if len(all_motors_except_gripper) > 0:
                 # 4 corresponds to Extended Position on Aloha motors
-                self.follower_arms[name].write(
-                    "Operating_Mode", 4, all_motors_except_gripper
-                )
+                self.follower_arms[name].write("Operating_Mode", 4, all_motors_except_gripper)
 
             # Use 'position control current based' for follower gripper to be limited by the limit of the current.
             # It can grasp an object without forcing too much even tho,
@@ -513,6 +523,13 @@ class ManipulatorRobot:
 
             # Note: We can't enable torque on the leader gripper since "xc430-w150" doesn't have
             # a Current Controlled Position mode.
+
+        # set time profile after setting operation mode
+        for name in self.follower_arms:
+            self.follower_arms[name].write("Profile_Velocity", int(self.config.moving_time * 1000))
+
+        for name in self.leader_arms:
+            self.leader_arms[name].write("Profile_Velocity", int(self.config.moving_time * 1000))
 
         if self.config.gripper_open_degree is not None:
             warnings.warn(

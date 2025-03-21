@@ -1,3 +1,4 @@
+import logging
 import modern_robotics as mr
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -25,10 +26,10 @@ def screw_axis_to_transform(S, theta):
         w_hat = skew_symmetric(S_w)
         R = np.eye(3) + np.sin(theta) * w_hat + (1 - np.cos(theta)) * w_hat @ w_hat
         t = (
-            np.eye(3) * theta
-            + (1 - np.cos(theta)) * w_hat
-            + (theta - np.sin(theta)) * w_hat @ w_hat
-        ) @ S_v
+                    np.eye(3) * theta
+                    + (1 - np.cos(theta)) * w_hat
+                    + (theta - np.sin(theta)) * w_hat @ w_hat
+            ) @ S_v
         T = np.eye(4)
         T[:3, :3] = R
         T[:3, 3] = t
@@ -286,75 +287,75 @@ class RobotKinematics:
         """Forward kinematics for the shoulder frame."""
         robot_pos_rad = robot_pos_deg / 180 * np.pi
         return (
-            self.X_WoBo
-            @ screw_axis_to_transform(self.S_BS, robot_pos_rad[0])
-            @ self.X_SoSc
-            @ self.X_BS
+                self.X_WoBo
+                @ screw_axis_to_transform(self.S_BS, robot_pos_rad[0])
+                @ self.X_SoSc
+                @ self.X_BS
         )
 
     def fk_humerus(self, robot_pos_deg):
         """Forward kinematics for the humerus frame."""
         robot_pos_rad = robot_pos_deg / 180 * np.pi
         return (
-            self.X_WoBo
-            @ screw_axis_to_transform(self.S_BS, robot_pos_rad[0])
-            @ screw_axis_to_transform(self.S_BH, robot_pos_rad[1])
-            @ self.X_HoHc
-            @ self.X_BH
+                self.X_WoBo
+                @ screw_axis_to_transform(self.S_BS, robot_pos_rad[0])
+                @ screw_axis_to_transform(self.S_BH, robot_pos_rad[1])
+                @ self.X_HoHc
+                @ self.X_BH
         )
 
     def fk_forearm(self, robot_pos_deg):
         """Forward kinematics for the forearm frame."""
         robot_pos_rad = robot_pos_deg / 180 * np.pi
         return (
-            self.X_WoBo
-            @ screw_axis_to_transform(self.S_BS, robot_pos_rad[0])
-            @ screw_axis_to_transform(self.S_BH, robot_pos_rad[1])
-            @ screw_axis_to_transform(self.S_BF, robot_pos_rad[2])
-            @ self.X_FoFc
-            @ self.X_BF
+                self.X_WoBo
+                @ screw_axis_to_transform(self.S_BS, robot_pos_rad[0])
+                @ screw_axis_to_transform(self.S_BH, robot_pos_rad[1])
+                @ screw_axis_to_transform(self.S_BF, robot_pos_rad[2])
+                @ self.X_FoFc
+                @ self.X_BF
         )
 
     def fk_wrist(self, robot_pos_deg):
         """Forward kinematics for the wrist frame."""
         robot_pos_rad = robot_pos_deg / 180 * np.pi
         return (
-            self.X_WoBo
-            @ screw_axis_to_transform(self.S_BS, robot_pos_rad[0])
-            @ screw_axis_to_transform(self.S_BH, robot_pos_rad[1])
-            @ screw_axis_to_transform(self.S_BF, robot_pos_rad[2])
-            @ screw_axis_to_transform(self.S_BR, robot_pos_rad[3])
-            @ self.X_RoRc
-            @ self.X_BR
-            @ self.wrist_X0
+                self.X_WoBo
+                @ screw_axis_to_transform(self.S_BS, robot_pos_rad[0])
+                @ screw_axis_to_transform(self.S_BH, robot_pos_rad[1])
+                @ screw_axis_to_transform(self.S_BF, robot_pos_rad[2])
+                @ screw_axis_to_transform(self.S_BR, robot_pos_rad[3])
+                @ self.X_RoRc
+                @ self.X_BR
+                @ self.wrist_X0
         )
 
     def fk_gripper(self, robot_pos_deg):
         """Forward kinematics for the gripper frame."""
         robot_pos_rad = robot_pos_deg / 180 * np.pi
         return (
-            self.X_WoBo
-            @ screw_axis_to_transform(self.S_BS, robot_pos_rad[0])
-            @ screw_axis_to_transform(self.S_BH, robot_pos_rad[1])
-            @ screw_axis_to_transform(self.S_BF, robot_pos_rad[2])
-            @ screw_axis_to_transform(self.S_BR, robot_pos_rad[3])
-            @ screw_axis_to_transform(self.S_BG, robot_pos_rad[4])
-            @ self._fk_gripper_post
+                self.X_WoBo
+                @ screw_axis_to_transform(self.S_BS, robot_pos_rad[0])
+                @ screw_axis_to_transform(self.S_BH, robot_pos_rad[1])
+                @ screw_axis_to_transform(self.S_BF, robot_pos_rad[2])
+                @ screw_axis_to_transform(self.S_BR, robot_pos_rad[3])
+                @ screw_axis_to_transform(self.S_BG, robot_pos_rad[4])
+                @ self._fk_gripper_post
         )
 
     def fk_gripper_tip(self, robot_pos_deg):
         """Forward kinematics for the gripper tip frame."""
         robot_pos_rad = robot_pos_deg / 180 * np.pi
         return (
-            self.X_WoBo
-            @ screw_axis_to_transform(self.S_BS, robot_pos_rad[0])
-            @ screw_axis_to_transform(self.S_BH, robot_pos_rad[1])
-            @ screw_axis_to_transform(self.S_BF, robot_pos_rad[2])
-            @ screw_axis_to_transform(self.S_BR, robot_pos_rad[3])
-            @ screw_axis_to_transform(self.S_BG, robot_pos_rad[4])
-            @ self.X_GoGt
-            @ self.X_BoGo
-            @ self.gripper_X0
+                self.X_WoBo
+                @ screw_axis_to_transform(self.S_BS, robot_pos_rad[0])
+                @ screw_axis_to_transform(self.S_BH, robot_pos_rad[1])
+                @ screw_axis_to_transform(self.S_BF, robot_pos_rad[2])
+                @ screw_axis_to_transform(self.S_BR, robot_pos_rad[3])
+                @ screw_axis_to_transform(self.S_BG, robot_pos_rad[4])
+                @ self.X_GoGt
+                @ self.X_BoGo
+                @ self.gripper_X0
         )
 
     def compute_jacobian(self, robot_pos_deg, fk_func=None):
@@ -376,11 +377,11 @@ class RobotKinematics:
             delta *= 0
             delta[el_ix] = eps / 2
             Sdot = (
-                pose_difference_se3(
-                    fk_func(robot_pos_deg[:-1] + delta),
-                    fk_func(robot_pos_deg[:-1] - delta),
-                )
-                / eps
+                    pose_difference_se3(
+                        fk_func(robot_pos_deg[:-1] + delta),
+                        fk_func(robot_pos_deg[:-1] - delta),
+                    )
+                    / eps
             )
             jac[:, el_ix] = Sdot
         return jac
@@ -404,14 +405,14 @@ class RobotKinematics:
             delta *= 0
             delta[el_ix] = eps / 2
             Sdot = (
-                fk_func(robot_pos_deg[:-1] + delta)[:3, 3]
-                - fk_func(robot_pos_deg[:-1] - delta)[:3, 3]
-            ) / eps
+                           fk_func(robot_pos_deg[:-1] + delta)[:3, 3]
+                           - fk_func(robot_pos_deg[:-1] - delta)[:3, 3]
+                   ) / eps
             jac[:, el_ix] = Sdot
         return jac
 
     def ik(
-        self, current_joint_state, desired_ee_pose, position_only=True, fk_func=None
+            self, current_joint_state, desired_ee_pose, position_only=True, fk_func=None
     ):
         """Inverse kinematics using gradient descent.
 
@@ -446,53 +447,146 @@ class RobotKinematics:
         return current_joint_state
 
 
-class AlohaKinematics(RobotKinematics):
-
+class MRKinematics(RobotKinematics):
     ROBOT_DESC = {
         "aloha": {
-            "M": np.array([]),
-            "Slist": np.array([])
+            "M": np.array([[1.0, 0.0, 0.0, 0.536494],
+                           [0.0, 1.0, 0.0, 0.0],
+                           [0.0, 0.0, 1.0, 0.42705],
+                           [0.0, 0.0, 0.0, 1.0]]),
+            "Slist": np.array([[0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                               [0.0, 1.0, 0.0, -0.12705, 0.0, 0.0],
+                               [0.0, 1.0, 0.0, -0.42705, 0.0, 0.05955],
+                               [1.0, 0.0, 0.0, 0.0, 0.42705, 0.0],
+                               [0.0, 1.0, 0.0, -0.42705, 0.0, 0.35955],
+                               [1.0, 0.0, 0.0, 0.0, 0.42705, 0.0]]).T
         },
-        "aloha-tip": {
-            "M": np.array([]),
-            "Slist" : np.array([])
+        "aloha-leader": {
+            "M": np.array([[1.0, 0.0, 0.0, 0.458325],
+                           [0.0, 1.0, 0.0, 0.0],
+                           [0.0, 0.0, 1.0, 0.36065],
+                           [0.0, 0.0, 0.0, 1.0]]),
+            "Slist": np.array([[0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                               [0.0, 1.0, 0.0, -0.11065, 0.0, 0.0],
+                               [0.0, 1.0, 0.0, -0.36065, 0.0, 0.04975],
+                               [1.0, 0.0, 0.0, 0.0, 0.36065, 0.0],
+                               [0.0, 1.0, 0.0, -0.36065, 0.0, 0.29975],
+                               [1.0, 0.0, 0.0, 0.0, 0.36065, 0.0]]).T
         },
         "aloha-bota": {
-            "M": np.array([]),
-            "Slist": np.array([])
+            "M": np.array([[1.0, 0.0, 0.0, 0.576694],  # +40.2 mm due to bota extension
+                           [0.0, 1.0, 0.0, 0.0],
+                           [0.0, 0.0, 1.0, 0.42705],
+                           [0.0, 0.0, 0.0, 1.0]]),
+            "Slist": np.array([[0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                               [0.0, 1.0, 0.0, -0.12705, 0.0, 0.0],
+                               [0.0, 1.0, 0.0, -0.42705, 0.0, 0.05955],
+                               [1.0, 0.0, 0.0, 0.0, 0.42705, 0.0],
+                               [0.0, 1.0, 0.0, -0.42705, 0.0, 0.35955],
+                               [1.0, 0.0, 0.0, 0.0, 0.42705, 0.0]]).T  # never forget this tranpose
         }
     }
 
     def __init__(self, robot_type):
-        assert robot_type in self.ROBOT_DESC, f"AlohaKinematics: Unkown robot_type {robot_type}"
+        assert robot_type in self.ROBOT_DESC, f"MRKinematics.__init__: Unkown robot_type {robot_type}"
         self.gripper_desc = self.ROBOT_DESC[robot_type]
+        self.shadow_mask = np.array([0, 1, 0, 1, 0, 0, 0, 0]).astype(bool)
 
         if robot_type + '-tip' in self.ROBOT_DESC:
             self.gripper_tip_desc = self.ROBOT_DESC[robot_type + '-tip']
         else:
             self.gripper_tip_desc = self.ROBOT_DESC[robot_type]
 
-    def prepare_joints(self, robot_pos_deg):
-        # filter shadows
-        mask = bool([0, 1, 0])
-        robot_pos_deg = robot_pos_deg[mask]
+    def apply_joint_correction(self, robot_pos_deg):
+        # filter shadows and gripper
+        robot_pos_deg = robot_pos_deg[:len(self.shadow_mask)]
+        robot_pos_deg = robot_pos_deg[~self.shadow_mask]
 
         # modern_robotics fk needs radians
         rotated_pos_rad = robot_pos_deg / 180.0 * np.pi
 
         return rotated_pos_rad
 
+    def revert_joint_correction(self, rotated_pos_rad):
+        """
+        Inverts apply_joint_correction by reinserting shadow joints using the
+        next real joint's value, except the last (gripper) which remains 0.
+
+        Args:
+            rotated_pos_rad (np.ndarray): Filtered joint array (radians), as output by apply_joint_correction.
+
+        Returns:
+            robot_pos_deg (np.ndarray): Full joint array with shadows (and gripper) in degrees.
+        """
+        # Convert radians to degrees
+        robot_pos_deg_filtered = rotated_pos_rad * 180.0 / np.pi
+
+        # Initialize full array without gripper
+        full_length = len(self.shadow_mask)
+        robot_pos_deg_full = np.zeros(full_length, dtype=np.float32)
+
+        # Fill real (non-shadow) joint values
+        real_indices = np.where(~self.shadow_mask)[0]
+        robot_pos_deg_full[real_indices] = robot_pos_deg_filtered
+
+        # Fill shadows from the *next* real joint
+        for i in range(full_length):
+            if self.shadow_mask[i]:
+                robot_pos_deg_full[i] = robot_pos_deg_full[i + 1]
+
+        return robot_pos_deg_full
+
     def fk_gripper(self, robot_pos_deg):
         """Forward kinematics for the gripper frame."""
-        return mr.FKinSpace(self.gripper_desc["M"], self.gripper_desc["SList"], self.prepare_joints(robot_pos_deg))
+        return mr.FKinSpace(
+            self.gripper_desc["M"],
+            self.gripper_desc["Slist"],
+            self.apply_joint_correction(robot_pos_deg)
+        )
 
     def fk_gripper_tip(self, robot_pos_deg):
         """Forward kinematics for the gripper tip frame."""
-        return mr.FKinSpace(self.gripper_desc["M"], self.gripper_desc["SList"], self.prepare_joints(robot_pos_deg))
+        return mr.FKinSpace(
+            self.gripper_desc["M"],
+            self.gripper_desc["Slist"],
+            self.apply_joint_correction(robot_pos_deg)
+        )
+
+    def ik(self, current_joint_state, desired_ee_pose, position_only=True, gripper_pos=None, fk_func=None):
+        if fk_func is None:
+            fk_func = self.fk_gripper
+
+        if fk_func == self.fk_gripper:
+            desc = self.gripper_desc
+        elif fk_func == self.fk_gripper_tip:
+            desc = self.gripper_tip_desc
+        else:
+            raise ValueError("MRKinematics.ik: Unknown fk_func")
+
+        joint_states, success = mr.IKinSpace(
+            Slist=self.gripper_desc["Slist"],
+            M=self.gripper_desc["M"],
+            T=desired_ee_pose,
+            thetalist0=self.apply_joint_correction(current_joint_state),
+            ev=1e-3,
+            eomg=1e10 if position_only else 1e-3,
+        )
+
+        if success:
+            joint_states = self.revert_joint_correction(joint_states)
+        else:
+            joint_states = current_joint_state
+            logging.info('No valid pose could be found. Will return current position')
+
+        if gripper_pos is not None:
+            joint_states = np.append(joint_states, gripper_pos)
+
+        return joint_states
 
 
 if __name__ == "__main__":
     import time
+
 
     def run_test(robot_type):
         """Run test suite for a specific robot type."""
@@ -575,6 +669,7 @@ if __name__ == "__main__":
         print(f"  IK position accuracy: {'PASSED' if passed else 'FAILED'}")
 
         return is_consistent and jacobian_shape_ok and pos_jacobian_shape_ok and passed
+
 
     # Run tests for all robot types
     results = {}

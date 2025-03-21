@@ -13,7 +13,7 @@ robot_type: aloha
 # Specific to Aloha, LeRobot comes with default calibration files. Assuming the motors have been
 # properly assembled, no manual calibration step is expected. If you need to run manual calibration,
 # simply update this path to ".cache/calibration/aloha"
-calibration_dir: .cache/calibration/aloha_default
+calibration_dir: /home/jstranghoener/PycharmProjects/lerobot-hil-serl/.cache/calibration/aloha_mr
 
 # /!\ FOR SAFETY, READ THIS /!\
 # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
@@ -62,28 +62,6 @@ follower_arms:
 # Troubleshooting: If one of your IntelRealSense cameras freeze during
 # data recording due to bandwidth limit, you might need to plug the camera
 # on another USB hub or PCIe card.
-cameras:
-  cam_high:
-    _target_: lerobot.common.robot_devices.cameras.opencv.OpenCVCamera
-    camera_index: /dev/video6
-    fps: 30
-    width: 640
-    height: 480
-  cam_low:
-    _target_: lerobot.common.robot_devices.cameras.opencv.OpenCVCamera
-    camera_index: /dev/video0
-    fps: 30
-    width: 640
-    height: 480
-  cam_left_wrist:
-    _target_: lerobot.common.robot_devices.cameras.opencv.OpenCVCamera
-    camera_index: /dev/video2
-    fps: 30
-    width: 640
-    height: 480
-  cam_right_wrist:
-    _target_: lerobot.common.robot_devices.cameras.opencv.OpenCVCamera
-    camera_index: /dev/video4
-    fps: 30
-    width: 640
-    height: 480
+#
+# find out via ffplay <device>
+

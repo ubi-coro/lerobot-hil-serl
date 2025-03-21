@@ -1,7 +1,7 @@
 from lerobot.common.robot_devices.robots.factory import make_robot
 from lerobot.common.utils.utils import init_hydra_config
 from lerobot.common.robot_devices.utils import busy_wait
-from lerobot.scripts.server.kinematics import RobotKinematics
+from lerobot.scripts.server.kinematics import RobotKinematics, MRKinematics
 import logging
 import time
 import torch
@@ -471,7 +471,7 @@ class GamepadControllerHID(InputController):
         return self.intervention_flag
 
 
-def test_forward_kinematics(robot, fps=10):
+def run_forward_kinematics(robot, fps=10):
     logging.info("Testing Forward Kinematics")
     timestep = time.perf_counter()
     while time.perf_counter() - timestep < 60.0:
@@ -484,7 +484,7 @@ def test_forward_kinematics(robot, fps=10):
         busy_wait(1 / fps - (time.perf_counter() - loop_start_time))
 
 
-def test_inverse_kinematics(robot, fps=10):
+def run_inverse_kinematics(robot, fps=10):
     logging.info("Testing Inverse Kinematics")
     timestep = time.perf_counter()
     while time.perf_counter() - timestep < 60.0:
@@ -524,32 +524,41 @@ def teleoperate_inverse_kinematics_with_leader(robot, fps=10):
 
 
 def teleoperate_delta_inverse_kinematics_with_leader(robot, fps=10):
+    from scipy.spatial.transform import Rotation as R
     logging.info("Testing Delta End-Effector Control")
-    timestep = time.perf_counter()
+
+    follower_kinematics = MRKinematics('aloha-bota')
+    fk_func_follower = follower_kinematics.fk_gripper_tip
+    leader_kinematics = MRKinematics('aloha-leader')
+    fk_func_leader = leader_kinematics.fk_gripper_tip
+
+    # warm up to get matching poses
+    start_time_s = time.perf_counter()
+    while time.perf_counter() - start_time_s < 3.0:
+        robot.teleop_step()
+        time.sleep(1.0/30)
 
     # Initial position capture
     obs = robot.capture_observation()
     joint_positions = obs["observation.state"].cpu().numpy()
-
-    fk_func = RobotKinematics.fk_gripper_tip
-
     leader_joint_positions = robot.leader_arms["main"].read("Present_Position")
-    initial_leader_ee = fk_func(leader_joint_positions)
+    initial_leader_ee = fk_func_leader(leader_joint_positions)
+    desired_ee_pos = initial_leader_ee#np.diag(np.ones(4))
 
-    desired_ee_pos = np.diag(np.ones(4))
-
-    while time.perf_counter() - timestep < 60.0:
+    print("Start EE control:")
+    start_time_s = time.perf_counter()
+    while time.perf_counter() - start_time_s < 60.0 or True:
         loop_start_time = time.perf_counter()
 
         # Get leader state for teleoperation
         leader_joint_positions = robot.leader_arms["main"].read("Present_Position")
-        leader_ee = fk_func(leader_joint_positions)
+        leader_ee = fk_func_leader(leader_joint_positions)
 
         # Get current state
         # obs = robot.capture_observation()
         # joint_positions = obs["observation.state"].cpu().numpy()
         joint_positions = robot.follower_arms["main"].read("Present_Position")
-        current_ee_pos = fk_func(joint_positions)
+        current_ee_pos = fk_func_follower(joint_positions)
 
         # Calculate delta between leader and follower end-effectors
         # Scaling factor can be adjusted for sensitivity
@@ -557,14 +566,16 @@ def teleoperate_delta_inverse_kinematics_with_leader(robot, fps=10):
         ee_delta = (leader_ee - initial_leader_ee) * scaling_factor
 
         # Apply delta to current position
-        desired_ee_pos[0, 3] = current_ee_pos[0, 3] + ee_delta[0, 3]
-        desired_ee_pos[1, 3] = current_ee_pos[1, 3] + ee_delta[1, 3]
-        desired_ee_pos[2, 3] = current_ee_pos[2, 3] + ee_delta[2, 3]
+        desired_ee_pos[0, 3] = desired_ee_pos[0, 3] + ee_delta[0, 3]
+        desired_ee_pos[1, 3] = desired_ee_pos[1, 3] + ee_delta[1, 3]
+        desired_ee_pos[2, 3] = desired_ee_pos[2, 3] + ee_delta[2, 3]
 
-        if np.any(np.abs(ee_delta[:3, 3]) > 0.01):
+        desired_ee_pos[:3,:3] += ee_delta[:3,:3]
+
+        if np.any(np.abs(ee_delta[:3, 3]) > 0.001) or True:
             # Compute joint targets via inverse kinematics
-            target_joint_state = RobotKinematics.ik(
-                joint_positions, desired_ee_pos, position_only=True, fk_func=fk_func
+            target_joint_state = follower_kinematics.ik(
+                joint_positions, desired_ee_pos, position_only=False, gripper_pos=leader_joint_positions[-1]
             )
 
             initial_leader_ee = leader_ee.copy()
@@ -574,9 +585,12 @@ def teleoperate_delta_inverse_kinematics_with_leader(robot, fps=10):
 
             # Logging
             logging.info(
-                f"Current EE: {current_ee_pos[:3,3]}, Desired EE: {desired_ee_pos[:3,3]}"
+                f"Current EE: {current_ee_pos[:3,3]}, Desired EE: {desired_ee_pos[:3,3]}, Delta EE: {ee_delta[:3,3]}"
             )
-            logging.info(f"Delta EE: {ee_delta[:3,3]}")
+            logging.info(
+                f"Current Rot: {R.from_matrix(current_ee_pos[:3, :3]).as_euler('xyz')}, "
+                f"Desired Rot: {R.from_matrix(desired_ee_pos[:3, :3]).as_euler('xyz')}"
+            )
 
         busy_wait(1 / fps - (time.perf_counter() - loop_start_time))
 
@@ -595,7 +609,7 @@ def teleoperate_delta_inverse_kinematics(
         fk_func: Forward kinematics function to use
     """
     if fk_func is None:
-        fk_func = RobotKinematics.fk_gripper_tip
+        fk_func = MRKinematics("aloha").fk_gripper_tip
 
     logging.info(
         f"Testing Delta End-Effector Control with {controller.__class__.__name__}"
@@ -707,6 +721,61 @@ def teleoperate_gym_env(env, controller, fps: int = 30):
         env.close()
 
 
+def animate_fk(robot):
+    import matplotlib.pyplot as plt
+    from collections import deque
+    from scipy.spatial.transform import Rotation as R
+    plt.ion()
+    fig = plt.figure()
+    ax_pos = fig.add_subplot(121, projection='3d')
+    ax_ori = fig.add_subplot(122, projection='3d')
+
+    pos_history = deque(maxlen=500)
+    ori_history = deque(maxlen=500)
+    kinematics = MRKinematics("aloha-leader")
+
+    while True:
+        joint_positions = robot.leader_arms["main"].read("Present_Position")
+        current_ee_pos = kinematics.fk_gripper(joint_positions)
+        print(f"x: {current_ee_pos[0, 3]:.4f}, y: {current_ee_pos[1, 3]:.4f}, z: {current_ee_pos[2, 3]:.4f},")
+        pos_history.append(current_ee_pos[:3, 3])
+
+        rot_vec = R.from_matrix(current_ee_pos[:3, :3]).as_rotvec()
+        rot_unit = rot_vec / (np.linalg.norm(rot_vec) + 1e-8)
+        ori_history.append(rot_unit)
+
+        ax_pos.cla()
+        pos_arr = np.array(pos_history)
+        ax_pos.plot(pos_arr[:, 0], pos_arr[:, 1], pos_arr[:, 2], c='b', label='Trajectory')
+        ax_pos.scatter(pos_arr[-1, 0], pos_arr[-1, 1], pos_arr[-1, 2], c='r', marker='o', s=100,
+                       label='Current position')
+        ax_pos.set_xlabel('X')
+        ax_pos.set_ylabel('Y')
+        ax_pos.set_zlabel('Z')
+        ax_pos.set_title('End-Effector Position')
+        ax_pos.legend()
+
+        ax_ori.cla()
+        ori_arr = np.array(ori_history)
+        ax_ori.plot(ori_arr[:, 0], ori_arr[:, 1], ori_arr[:, 2], c='g')
+        ax_ori.scatter(ori_arr[-1, 0], ori_arr[-1, 1], ori_arr[-1, 2], c='m', marker='o', s=100,
+                       label='Latest orientation')
+        ax_ori.set_xlim([-1, 1])
+        ax_ori.set_ylim([-1, 1])
+        ax_ori.set_zlim([-1, 1])
+        ax_ori.set_xlabel('X')
+        ax_ori.set_ylabel('Y')
+        ax_ori.set_zlabel('Z')
+        ax_ori.set_title('Orientation History (Unit Sphere)')
+        ax_ori.legend()
+
+        plt.draw()
+        plt.pause(0.005)
+
+    plt.ioff()
+    plt.show()
+
+
 def make_robot_from_config(config_path, overrides=None):
     """Helper function to create a robot from a config file."""
     if overrides is None:
@@ -728,6 +797,7 @@ if __name__ == "__main__":
             "gamepad_gym",
             "leader",
             "leader_abs",
+            "animate"
         ],
         help="Control mode to use",
     )
@@ -746,7 +816,7 @@ if __name__ == "__main__":
     # Add the rest of your existing arguments
     args = parser.parse_args()
 
-    robot = make_robot_from_config("lerobot/configs/robot/so100.yaml", [])
+    robot = make_robot_from_config("../../configs/robot/aloha-mr.yaml", [])
 
     if not robot.is_connected:
         robot.connect()
@@ -791,6 +861,9 @@ if __name__ == "__main__":
 
         elif args.mode == "leader_abs":
             teleoperate_inverse_kinematics_with_leader(robot)
+
+        elif args.mode == "animate":
+            animate_fk(robot)
 
     finally:
         if robot.is_connected:

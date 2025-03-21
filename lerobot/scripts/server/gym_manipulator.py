@@ -20,7 +20,7 @@ from lerobot.common.robot_devices.control_utils import (
 from lerobot.common.robot_devices.robots.factory import make_robot
 from lerobot.common.utils.utils import init_hydra_config, log_say
 
-from lerobot.scripts.server.kinematics import AlohaKinematics, RobotKinematics
+from lerobot.scripts.server.kinematics import MRKinematics, RobotKinematics
 
 logging.basicConfig(level=logging.INFO)
 
@@ -1146,7 +1146,7 @@ def make_robot_env(
     )
 
     if cfg.robot.robot_type.lower().startswith('aloha'):
-        kinematics = AlohaKinematics
+        kinematics = MRKinematics
     else:
         kinematics = RobotKinematics
 
