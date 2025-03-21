@@ -21,6 +21,7 @@ from lerobot.common.robot_devices.robots.factory import make_robot
 from lerobot.common.utils.utils import init_hydra_config, log_say
 
 from lerobot.scripts.server.kinematics import MRKinematics, RobotKinematics
+from tests.utils import robot_type
 
 logging.basicConfig(level=logging.INFO)
 
@@ -822,13 +823,10 @@ class BatchCompitableWrapper(gym.ObservationWrapper):
 
 
 class EEActionWrapper(gym.ActionWrapper):
-    def __init__(self, env, ee_action_space_params=None, kinematics: Type[RobotKinematics] = RobotKinematics):
+    def __init__(self, env, kinematics: RobotKinematics, ee_action_space_params=None):
         super().__init__(env)
         self.ee_action_space_params = ee_action_space_params
-
-        # Initialize kinematics instance for the appropriate robot type
-        robot_type = getattr(env.unwrapped.robot.config, "robot_type", "so100")
-        self.kinematics = kinematics(robot_type)
+        self.kinematics = kinematics
         self.fk_function = self.kinematics.fk_gripper_tip
 
         action_space_bounds = np.array(
@@ -880,7 +878,7 @@ class EEActionWrapper(gym.ActionWrapper):
 
 
 class EEObservationWrapper(gym.ObservationWrapper):
-    def __init__(self, env, ee_pose_limits, kinematics: Type[RobotKinematics] = RobotKinematics):
+    def __init__(self, env, ee_pose_limits, kinematics: RobotKinematics):
         super().__init__(env)
 
         # Extend observation space to include end effector pose
@@ -893,9 +891,7 @@ class EEObservationWrapper(gym.ObservationWrapper):
             dtype=np.float32,
         )
 
-        # Initialize kinematics instance for the appropriate robot type
-        robot_type = getattr(env.unwrapped.robot.config, "robot_type", "so100")
-        self.kinematics = kinematics(robot_type)
+        self.kinematics = kinematics
         self.fk_function = self.kinematics.fk_gripper_tip
 
     def observation(self, observation):
@@ -1145,10 +1141,12 @@ def make_robot_env(
         and cfg.env.wrapper.ee_action_space_params is None,
     )
 
+    # Initialize kinematics instance for the appropriate robot type
     if cfg.robot.robot_type.lower().startswith('aloha'):
-        kinematics = MRKinematics
+        kinematics = MRKinematics(cfg.robot.follower_model)
     else:
-        kinematics = RobotKinematics
+        robot_type = getattr(cfg.robot.config, "robot_type", "so100")
+        kinematics = RobotKinematics(robot_type)
 
     # Add observation and image processing
     if cfg.env.wrapper.add_joint_velocity_to_observation:

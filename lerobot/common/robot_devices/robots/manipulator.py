@@ -61,6 +61,11 @@ class ManipulatorRobotConfig:
     follower_arms: dict[str, MotorsBus] = field(default_factory=lambda: {})
     cameras: dict[str, Camera] = field(default_factory=lambda: {})
 
+    # Specific to Aloha, the kinematic chain of leader and follower might differ. Therefore, we specify a robot model
+    # "class" for leader and follower. This is required for initializing forward and inverse kinematics
+    follower_model: str = "vx300s"
+    leader_model: str = "wx250s"
+
     # Optionally limit the magnitude of the relative positional target vector for safety purposes.
     # Set this to a positive scalar to have the same value for all motors, or a list that is the same length
     # as the number of motors in your follower arms (assumes all follower arms have the same number of

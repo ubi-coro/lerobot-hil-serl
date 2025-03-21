@@ -449,7 +449,7 @@ class RobotKinematics:
 
 class MRKinematics(RobotKinematics):
     ROBOT_DESC = {
-        "aloha": {
+        "vx300s": {
             "M": np.array([[1.0, 0.0, 0.0, 0.536494],
                            [0.0, 1.0, 0.0, 0.0],
                            [0.0, 0.0, 1.0, 0.42705],
@@ -461,7 +461,7 @@ class MRKinematics(RobotKinematics):
                                [0.0, 1.0, 0.0, -0.42705, 0.0, 0.35955],
                                [1.0, 0.0, 0.0, 0.0, 0.42705, 0.0]]).T
         },
-        "aloha-leader": {
+        "wx250s": {
             "M": np.array([[1.0, 0.0, 0.0, 0.458325],
                            [0.0, 1.0, 0.0, 0.0],
                            [0.0, 0.0, 1.0, 0.36065],
@@ -473,7 +473,7 @@ class MRKinematics(RobotKinematics):
                                [0.0, 1.0, 0.0, -0.36065, 0.0, 0.29975],
                                [1.0, 0.0, 0.0, 0.0, 0.36065, 0.0]]).T
         },
-        "aloha-bota": {
+        "vx300s-bota": {
             "M": np.array([[1.0, 0.0, 0.0, 0.576694],  # +40.2 mm due to bota extension
                            [0.0, 1.0, 0.0, 0.0],
                            [0.0, 0.0, 1.0, 0.42705],
@@ -487,15 +487,19 @@ class MRKinematics(RobotKinematics):
         }
     }
 
-    def __init__(self, robot_type):
-        assert robot_type in self.ROBOT_DESC, f"MRKinematics.__init__: Unkown robot_type {robot_type}"
-        self.gripper_desc = self.ROBOT_DESC[robot_type]
+    def __init__(self, robot_model):
+        # can also be initialized via "robot_type", which default to the standard aloha follower
+        if robot_model == "aloha":
+            robot_model = "vx300s"
+
+        assert robot_model in self.ROBOT_DESC, f"MRKinematics.__init__: Unkown robot_type {robot_type}"
+        self.gripper_desc = self.ROBOT_DESC[robot_model]
         self.shadow_mask = np.array([0, 1, 0, 1, 0, 0, 0, 0]).astype(bool)
 
-        if robot_type + '-tip' in self.ROBOT_DESC:
-            self.gripper_tip_desc = self.ROBOT_DESC[robot_type + '-tip']
+        if robot_model + '-tip' in self.ROBOT_DESC:
+            self.gripper_tip_desc = self.ROBOT_DESC[robot_model + '-tip']
         else:
-            self.gripper_tip_desc = self.ROBOT_DESC[robot_type]
+            self.gripper_tip_desc = self.ROBOT_DESC[robot_model]
 
     def apply_joint_correction(self, robot_pos_deg):
         # filter shadows and gripper

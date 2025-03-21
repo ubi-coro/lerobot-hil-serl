@@ -15,6 +15,10 @@ robot_type: aloha
 # simply update this path to ".cache/calibration/aloha"
 calibration_dir: /home/jstranghoener/PycharmProjects/lerobot-hil-serl/.cache/calibration/aloha_mr
 
+# Also specific to Aloha, the kinematic chain of leader and follower might differ. Therefore, we specify robot model
+follower_model: vx300s-bota
+leader_model: wx250s
+
 # /!\ FOR SAFETY, READ THIS /!\
 # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
 # Set this to a positive scalar to have the same value for all motors, or a list that is the same length as
