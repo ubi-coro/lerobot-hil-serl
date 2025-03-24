@@ -18,6 +18,7 @@ import torch
 from lerobot.common.robot_devices.cameras.utils import Camera
 from lerobot.common.robot_devices.motors.utils import MotorsBus
 from lerobot.common.robot_devices.robots.utils import get_arm_id
+from lerobot.common.robot_devices.sensors.bota import BotaForceTorqueSensor
 from lerobot.common.robot_devices.utils import (
     RobotDeviceAlreadyConnectedError,
     RobotDeviceNotConnectedError,
@@ -57,9 +58,11 @@ class ManipulatorRobotConfig:
 
     # Define all components of the robot
     robot_type: str = "koch"
+    fps: int = 30
     leader_arms: dict[str, MotorsBus] = field(default_factory=lambda: {})
     follower_arms: dict[str, MotorsBus] = field(default_factory=lambda: {})
     cameras: dict[str, Camera] = field(default_factory=lambda: {})
+    botas: dict[str, BotaForceTorqueSensor] = field(default_factory=lambda: {})
 
     # Specific to Aloha, the kinematic chain of leader and follower might differ. Therefore, we specify a robot model
     # "class" for leader and follower. This is required for initializing forward and inverse kinematics
@@ -249,6 +252,7 @@ class ManipulatorRobot:
         self.leader_arms = self.config.leader_arms
         self.follower_arms = self.config.follower_arms
         self.cameras = self.config.cameras
+        self.botas = self.config.botas
         self.is_connected = False
         self.logs = {}
 
@@ -279,7 +283,7 @@ class ManipulatorRobot:
             },
             "observation.state": {
                 "dtype": "float32",
-                "shape": (len(state_names),),
+                "shape": (len(state_names) + 6 * len(self.botas),),
                 "names": state_names,
             },
         }
@@ -377,6 +381,14 @@ class ManipulatorRobot:
             self.cameras[name].connect()
 
         self.is_connected = True
+
+        # Connect to botas
+        # Bota calibration might require teleoperation, so we set is_connected first
+        for name in self.botas:
+            self.botas[name].connect()
+            self.botas[name].activate_calibration(self, name, self.calibration_dir, self.config.fps)
+
+
 
     def activate_calibration(self):
         """After calibration all motors function in human interpretable ranges.

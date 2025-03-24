@@ -14,6 +14,7 @@ robot_type: aloha
 # properly assembled, no manual calibration step is expected. If you need to run manual calibration,
 # simply update this path to ".cache/calibration/aloha"
 calibration_dir: /home/jstranghoener/PycharmProjects/lerobot-hil-serl/.cache/calibration/aloha_mr
+fps: 30
 
 # Also specific to Aloha, the kinematic chain of leader and follower might differ. Therefore, we specify robot model
 follower_model: vx300s-bota
@@ -29,7 +30,7 @@ leader_model: wx250s
 # Also, everything is expected to work safely out-of-the-box, but we highly advise to
 # first try to teleoperate the grippers only (by commenting out the rest of the motors in this yaml),
 # then to gradually add more motors (by uncommenting), until you can teleoperate both arms fully
-max_relative_target: 5
+max_relative_target: 25
 
 leader_arms:
   main:
@@ -68,4 +69,15 @@ follower_arms:
 # on another USB hub or PCIe card.
 #
 # find out via ffplay <device>
+botas:
+  main:
+    _target_: lerobot.common.robot_devices.sensors.bota.BotaForceTorqueSensor
+    port: /dev/ttyACM0
+    calibration_cfg:
+      motors: [waist, shoulder, elbow, forearm_roll, wrist_angle, wrist_rotate, gripper]
+      num_epochs: 3000
+      batch_size: 64
+      n_obs_history: 2
+      t_data_collection_s: 60.0
+
 
