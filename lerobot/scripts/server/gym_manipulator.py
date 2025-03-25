@@ -1,8 +1,5 @@
 import argparse
-import sys
-import threading
 from collections import deque
-from typing import Type
 
 import matplotlib.pyplot as plt
 import logging
@@ -25,7 +22,7 @@ from lerobot.common.robot_devices.robots.factory import make_robot
 from lerobot.common.utils.utils import init_hydra_config, log_say
 
 from lerobot.scripts.server.kinematics import MRKinematics, RobotKinematics
-from tests.utils import robot_type
+from lerobot.common.robot_devices.motors.dynamixel import TorqueMode
 
 logging.basicConfig(level=logging.INFO)
 
@@ -46,9 +43,9 @@ class HILSerlRobotEnv(gym.Env):
     def __init__(
         self,
         robot,
-        use_delta_action_space: bool = True,
-        delta: float | None = None,
+        ee_action_space_params,
         display_cameras: bool = False,
+        animate_pose: bool = False
     ):
         """
         Initialize the HILSerlRobotEnv environment.
@@ -69,42 +66,42 @@ class HILSerlRobotEnv(gym.Env):
         self.robot = robot
         self.display_cameras = display_cameras
 
+        # Initialize kinematics instance for the appropriate robot type
+        if robot.config.robot_type.lower().startswith('aloha'):
+            kinematics = MRKinematics(robot.config.follower_model)
+        else:
+            kinematics = RobotKinematics(getattr(robot.config, "robot_type", "so100"))
+        self.fk = kinematics.fk_gripper_tip
+        self.ik = kinematics.ik
+        self.jacobian = kinematics.compute_jacobian
+
         # Connect to the robot if not already connected.
         if not self.robot.is_connected:
             self.robot.connect()
 
-        self.initial_follower_position = robot.follower_arms["main"].read(
-            "Present_Position"
-        )
+        self.curr_q = None
+        self.curr_tcp_pose = None
+        self.curr_tcp_vel = None
+        self.next_tcp_pose = None
+        self._update()
 
         # Episode tracking.
         self.current_step = 0
         self.episode_data = None
 
-        self.delta = delta
-        self.use_delta_action_space = use_delta_action_space
+        self.ee_action_space_params = ee_action_space_params
         self.current_joint_positions = self.robot.follower_arms["main"].read(
             "Present_Position"
         )
 
-        # Retrieve the size of the joint position interval bound.
-        self.relative_bounds_size = (
-            (
-                self.robot.config.joint_position_relative_bounds["max"]
-                - self.robot.config.joint_position_relative_bounds["min"]
-            )
-            if self.robot.config.joint_position_relative_bounds is not None
-            else None
-        )
-
-        self.robot.config.max_relative_target = (
-            self.relative_bounds_size.float()
-            if self.relative_bounds_size is not None
-            else None
-        )
-
         # Dynamically configure the observation and action spaces.
         self._setup_spaces()
+
+        # Optionally track position lag
+        self.animate_pose = animate_pose
+        if self.animate_pose:
+            self.current_history = deque(maxlen=100)
+            self.target_history = deque(maxlen=100)
 
     def _setup_spaces(self):
         """
@@ -120,63 +117,66 @@ class HILSerlRobotEnv(gym.Env):
                   or absolute, based on the configuration.
                 • ThE SECONd element is a Discrete space (with 2 values) serving as a flag for intervention (teleoperation).
         """
-        example_obs = self.robot.capture_observation()
+
 
         # Define observation spaces for images and other states.
-        image_keys = [key for key in example_obs if "image" in key]
-        observation_spaces = {
-            key: gym.spaces.Box(
-                low=0, high=255, shape=example_obs[key].shape, dtype=np.uint8
-            )
-            for key in image_keys
-        }
-        observation_spaces["observation.state"] = gym.spaces.Box(
-            low=0,
-            high=10,
-            shape=example_obs["observation.state"].shape,
-            dtype=np.float32,
-        )
+        observation_spaces = {}
+        ignore_keys = ["observation.state", "observation.joint_vel"]
+        for key, feature in self.robot.features.values():
+            if key in ignore_keys:
+                continue
 
+            if "image" in key:
+                observation_spaces[key] = gym.spaces.Box(low=0, high=255, shape=feature["shape"], dtype=np.uint8)
+            else:
+                observation_spaces[key] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=feature["shape"], dtype=np.float32)
+
+        observation_spaces["observation.tcp_pose"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32)
+        observation_spaces["observation.tcp_vel"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32)
         self.observation_space = gym.spaces.Dict(observation_spaces)
 
-        # Define the action space for joint positions along with setting an intervention flag.
-        action_dim = len(self.robot.follower_arms["main"].read("Present_Position"))
-        if self.use_delta_action_space:
-            bounds = (
-                self.relative_bounds_size
-                if self.relative_bounds_size is not None
-                else np.ones(action_dim) * 1000
-            )
-            action_space_robot = gym.spaces.Box(
-                low=-bounds,
-                high=bounds,
-                shape=(action_dim,),
-                dtype=np.float32,
-            )
-        else:
-            bounds_min = (
-                self.robot.config.joint_position_relative_bounds["min"].cpu().numpy()
-                if self.robot.config.joint_position_relative_bounds is not None
-                else np.ones(action_dim) * -1000
-            )
-            bounds_max = (
-                self.robot.config.joint_position_relative_bounds["max"].cpu().numpy()
-                if self.robot.config.joint_position_relative_bounds is not None
-                else np.ones(action_dim) * 1000
-            )
-            action_space_robot = gym.spaces.Box(
-                low=bounds_min,
-                high=bounds_max,
-                shape=(action_dim,),
+        self.action_space = gym.spaces.Box(
+                low=[-1] * 7,
+                high=[1] * 7,
+                shape=(7,),
                 dtype=np.float32,
             )
 
-        self.action_space = gym.spaces.Tuple(
-            (
-                action_space_robot,
-                gym.spaces.Discrete(2),
-            ),
+        # boundary box
+        self.xyz_bounding_box = gym.spaces.Box(
+            self.ee_action_space_params["bounds"]["min"][:3],
+            self.ee_action_space_params["bounds"]["max"][:3],
+            dtype=np.float64,
         )
+        self.rpy_bounding_box = gym.spaces.Box(
+            self.ee_action_space_params["bounds"]["min"][3:],
+            self.ee_action_space_params["bounds"]["max"][3:],
+            dtype=np.float64,
+        )
+
+    def _clip_safety_box(self, pose: np.ndarray) -> np.ndarray:
+        """Clip the pose to be within the safety box."""
+        pose[:3] = np.clip(
+            pose[:3], self.xyz_bounding_box.low, self.xyz_bounding_box.high
+        )
+        euler = R.from_quat(pose[3:]).as_euler("xyz")
+
+        # Clip first euler angle separately due to discontinuity from pi to -pi
+        sign = np.sign(euler[0])
+        euler[0] = sign * (
+            np.clip(
+                np.abs(euler[0]),
+                self.rpy_bounding_box.low[0],
+                self.rpy_bounding_box.high[0],
+            )
+        )
+
+        euler[1:] = np.clip(
+            euler[1:], self.rpy_bounding_box.low[1:], self.rpy_bounding_box.high[1:]
+        )
+        pose[3:] = R.from_euler("xyz", euler).as_quat()
+
+        return pose
 
     def reset(
         self, seed=None, options=None
@@ -197,13 +197,14 @@ class HILSerlRobotEnv(gym.Env):
         super().reset(seed=seed, options=options)
 
         # Capture the initial observation.
-        observation = self.robot.capture_observation()
+        obs = self.robot.capture_observation()
+        self._update(obs=obs)
 
         # Reset episode tracking variables.
         self.current_step = 0
         self.episode_data = None
 
-        return observation, {}
+        return obs, {}
 
     def step(
         self, action: Tuple[np.ndarray, bool]
@@ -212,7 +213,7 @@ class HILSerlRobotEnv(gym.Env):
         Execute a single step within the environment using the specified action.
 
         The provided action is a tuple comprised of:
-            • A policy action (joint position commands) that may be either in absolute values or as a delta.
+            • A policy action that specifies end-effector deltas
             • A boolean flag indicating whether teleoperation (human intervention) should be used for this step.
 
         Behavior:
@@ -222,7 +223,7 @@ class HILSerlRobotEnv(gym.Env):
 
         Args:
             action (tuple): A tuple with two elements:
-                - policy_action (np.ndarray or torch.Tensor): The commanded joint positions.
+                - policy_action (np.ndarray or torch.Tensor): The commanded end-effector delta positions.
                 - intervention_bool (bool): True if the human operator intervenes by providing a teleoperation input.
 
         Returns:
@@ -235,66 +236,63 @@ class HILSerlRobotEnv(gym.Env):
                     ◦ "action_intervention": The teleop action if intervention was used.
                     ◦ "is_intervention": Flag indicating whether teleoperation was employed.
         """
+        # policy_action looks like (dx, dy, dz, dp, dr, dy, gripper)
         policy_action, intervention_bool = action
+
         teleop_action = None
-        self.current_joint_positions = self.robot.follower_arms["main"].read(
-            "Present_Position"
-        )
-        if isinstance(policy_action, torch.Tensor):
-            policy_action = policy_action.cpu().numpy()
-            policy_action = np.clip(
-                policy_action, self.action_space[0].low, self.action_space[0].high
+        if intervention_bool:
+            # Capture leader joints, ignore max_relative_target, last joint is gripper
+            follower_joint_positions = self.leader_arms["main"].read("Present_Position")
+
+            teleop_action = self._compute_delta_action(
+                self.fk(follower_joint_positions),
+                gripper_pos=follower_joint_positions[-1]
             )
-
-        if not intervention_bool:
-            if self.use_delta_action_space:
-                target_joint_positions = (
-                    self.current_joint_positions + self.delta * policy_action
-                )
-            else:
-                target_joint_positions = policy_action
-            self.robot.send_action(torch.from_numpy(target_joint_positions))
-            observation = self.robot.capture_observation()
+            delta_action = teleop_action
         else:
-            observation, teleop_action = self.robot.teleop_step(record_data=True)
-            teleop_action = teleop_action[
-                "action"
-            ]  # Convert tensor to appropriate format
+            delta_action = policy_action
 
-            # When applying the delta action space, convert teleop absolute values to relative differences.
-            if self.use_delta_action_space:
-                teleop_action = (
-                    teleop_action - self.current_joint_positions
-                ) / self.delta
-                if self.relative_bounds_size is not None and (
-                    torch.any(teleop_action < -self.relative_bounds_size)
-                    and torch.any(teleop_action > self.relative_bounds_size)
-                ):
-                    logging.debug(
-                        f"Relative teleop delta exceeded bounds {self.relative_bounds_size}, teleop_action {teleop_action}\n"
-                        f"lower bounds condition {teleop_action < -self.relative_bounds_size}\n"
-                        f"upper bounds condition {teleop_action > self.relative_bounds_size}"
-                    )
+            # hack: map gripper pos from [-1, 1] to [0, 100]
+            delta_action[-1] = 50.0 * (delta_action[-1] + 1)
 
-                    teleop_action = torch.clamp(
-                        teleop_action,
-                        -self.relative_bounds_size,
-                        self.relative_bounds_size,
-                    )
-            # NOTE: To mimic the shape of a neural network output, we add a batch dimension to the teleop action.
-            if teleop_action.dim() == 1:
-                teleop_action = teleop_action.unsqueeze(0)
+        if isinstance(delta_action, torch.Tensor):
+            delta_action = action.cpu().numpy()
 
-        # self.render()
+        delta_action = np.clip(delta_action, self.action_space.low[0], self.action_space.high[0])
 
+        self.next_tcp_pose = self.curr_tcp_pose.copy()
+        self.next_tcp_pose[:3, 3] = self.next_tcp_pose[:3] + delta_action[3:6] * self.ee_action_space_params["xyz_step_size"]
+
+        # Get orientation from action
+        self.next_tcp_pose[:3, :3] = (
+            R.from_euler("xyz", delta_action[3:6] * self.ee_action_space_params["rot_step_size"], degrees=False),
+            * R.from_matrix(self.curr_tcp_pose[:3, :3])
+        ).as_matrix()
+
+        desired_tcp_pose = self._clip_safety_box(self.next_tcp_pose)
+        target_joint_positions = self.ik(
+            current_joint_state=self.curr_q,
+            desired_ee_pose=desired_tcp_pose,
+            fk_func=self.fk,
+            gripper_pos=delta_action[6] * self.ee_action_space_params["gripper_step_size"]
+        )
+
+        self.robot.send_action(torch.from_numpy(target_joint_positions))
+
+        obs = self.robot.capture_observation()
+        self._update(obs=obs)
         self.current_step += 1
 
         reward = 0.0
         terminated = False
         truncated = False
 
+        if self.animate_pose:
+            self.current_history.append(self.curr_tcp_pose[:3, 3])
+            self.target_history.append(desired_tcp_pose[:3, 3])
+
         return (
-            observation,
+            obs,
             reward,
             terminated,
             truncated,
@@ -317,6 +315,24 @@ class HILSerlRobotEnv(gym.Env):
             cv2.imshow(key, cv2.cvtColor(observation[key].numpy(), cv2.COLOR_RGB2BGR))
             cv2.waitKey(1)
 
+        if self.animate_pose:
+            plt.ion()
+            fig, axs = plt.subplots(3, 1, figsize=(8, 6))
+            labels = ['X', 'Y', 'Z']
+            while not self._stop_event.is_set():
+                if len(self.current_history) > 0:
+                    current_arr = np.array(self.current_history)
+                    target_arr = np.array(self.target_history)
+                    for i in range(3):
+                        axs[i].clear()
+                        axs[i].plot(current_arr[:, i], label='Current')
+                        axs[i].plot(target_arr[:, i], label='Target')
+                        axs[i].set_ylabel(labels[i])
+                        axs[i].legend()
+                    axs[2].set_xlabel('Timesteps')
+                    plt.pause(0.01)
+            plt.ioff()
+
     def close(self):
         """
         Close the environment and clean up resources by disconnecting the robot.
@@ -327,45 +343,40 @@ class HILSerlRobotEnv(gym.Env):
         if self.robot.is_connected:
             self.robot.disconnect()
 
+    def _update(self, obs=None):
+        if obs is None:
+            obs = self.robot.capture_observation()
 
-class AddJointVelocityToObservation(gym.ObservationWrapper):
-    def __init__(self, env, joint_velocity_limits=100.0, fps=30):
-        super().__init__(env)
+        self.curr_q = obs['observation.state'].detach().cpu().numpy()
+        self.curr_tcp_pose = self.fk(self.curr_q)
+        self.curr_tcp_vel = self.jacobian(self.curr_q, fk_func=self.fk) @ obs['observation.joint_vel'].detach().cpu().numpy()
 
-        # Extend observation space to include joint velocities
-        old_low = self.observation_space["observation.state"].low
-        old_high = self.observation_space["observation.state"].high
-        old_shape = self.observation_space["observation.state"].shape
+    def _compute_delta_action(self, desired_pose: np.ndarray, gripper_pos: float = None) -> np.ndarray:
+        """
+        Compute the delta action needed to move from the current end-effector pose to the desired pose.
 
-        self.last_joint_positions = np.zeros(old_shape)
+        Args:
+            current_pose (np.ndarray): 4x4 homogeneous transformation of the current pose.
+            desired_pose (np.ndarray): 4x4 homogeneous transformation of the desired pose.
 
-        new_low = np.concatenate(
-            [old_low, np.ones_like(old_low) * -joint_velocity_limits]
-        )
-        new_high = np.concatenate(
-            [old_high, np.ones_like(old_high) * joint_velocity_limits]
-        )
+        Returns:
+            np.ndarray: A 7-element vector containing:
+                [dx, dy, dz, droll, dpitch, dyaw, gripper]
+                where the first 3 elements are the translation differences,
+                the next 3 are the Euler angle differences (in radians),
+                and the last element is the gripper action.
+        """
+        # Compute the position difference
+        delta_pos = desired_pose[:3, 3] - self.curr_tcp_pose[:3, 3]
 
-        new_shape = (old_shape[0] * 2,)
+        # Compute the rotation difference
+        relative_rot = R.from_matrix(desired_pose[:3, :3]) * R.from_matrix(self.curr_tcp_pose[:3, :3]).inv()
+        # Convert the relative rotation to Euler angles (radians) using the 'xyz' convention
+        delta_rpy = relative_rot.as_euler('xyz', degrees=False)
 
-        self.observation_space["observation.state"] = gym.spaces.Box(
-            low=new_low,
-            high=new_high,
-            shape=new_shape,
-            dtype=np.float32,
-        )
-
-        self.dt = 1.0 / fps
-
-    def observation(self, observation):
-        joint_velocities = (
-            observation["observation.state"] - self.last_joint_positions
-        ) / self.dt
-        self.last_joint_positions = observation["observation.state"].clone()
-        observation["observation.state"] = torch.cat(
-            [observation["observation.state"], joint_velocities], dim=-1
-        )
-        return observation
+        # Concatenate into a single delta action vector
+        delta_action = np.concatenate([delta_pos, delta_rpy, [gripper_pos]])
+        return delta_action
 
 
 class ActionRepeatWrapper(gym.Wrapper):
@@ -654,8 +665,11 @@ class KeyboardInterfaceWrapper(gym.Wrapper):
             "reset_env": False,
             "human_intervention_step": False,
             "episode_success": False,
+            "leader_synced": False,
         }
         self.event_lock = Lock()  # Thread-safe access to events
+        self.robot = self.unwrapped.robot
+        self.leader_synced = False
         self._init_keyboard_listener()
 
     def _init_keyboard_listener(self):
@@ -708,6 +722,7 @@ class KeyboardInterfaceWrapper(gym.Wrapper):
                             ):
                                 self.events["pause_policy"] = False
                                 self.events["human_intervention_step"] = False
+                                self.events["leader_synced"] = False
                                 print("Space key pressed for a third time.")
                                 log_say(
                                     "Continuing with policy actions.", play_sounds=True
@@ -739,6 +754,12 @@ class KeyboardInterfaceWrapper(gym.Wrapper):
             pause_policy = self.events["pause_policy"]
 
         if pause_policy:
+
+            # Move the leader arm to the follower position
+            if not self.events["leader_synced"]:
+                robot.leader_arms["main"].write("Torque_Enable", TorqueMode.ENABLED.value)
+                reset_follower_position(robot.leader_arms["main"], robot.follower_arms["main"].read("Present_Position"))
+
             # Now, wait for human_intervention_step without holding the lock
             while True:
                 with self.event_lock:
@@ -746,6 +767,11 @@ class KeyboardInterfaceWrapper(gym.Wrapper):
                         is_intervention = True
                         break
                 time.sleep(0.1)  # Check more frequently if desired
+
+            # Torque the leader back off again
+            if not self.events["leader_synced"]:
+                robot.leader_arms["main"].write("Torque_Enable", TorqueMode.DISABLED.value)
+                self.events["leader_synced"] = True
 
         # Execute the step in the underlying environment
         obs, reward, terminated, truncated, info = self.env.step(
@@ -809,7 +835,7 @@ class ResetWrapper(gym.Wrapper):
         return super().reset(seed=seed, options=options)
 
 
-class BatchCompitableWrapper(gym.ObservationWrapper):
+class BatchCompatibleWrapper(gym.ObservationWrapper):
     def __init__(self, env):
         super().__init__(env)
 
@@ -824,321 +850,6 @@ class BatchCompitableWrapper(gym.ObservationWrapper):
             if "velocity" in key and observation[key].dim() == 1:
                 observation[key] = observation[key].unsqueeze(0)
         return observation
-
-
-class EEActionWrapper(gym.ActionWrapper):
-    def __init__(self, env, kinematics: RobotKinematics, ee_action_space_params=None, animate_pose=True):
-        super().__init__(env)
-        self.ee_action_space_params = ee_action_space_params
-        self.kinematics = kinematics
-        self.fk_function = self.kinematics.fk_gripper_tip
-
-        action_space_bounds = np.array(
-            [
-                ee_action_space_params["x_step_size"],
-                ee_action_space_params["y_step_size"],
-                ee_action_space_params["z_step_size"],
-            ]
-        )
-        ee_action_space = gym.spaces.Box(
-            low=-action_space_bounds,
-            high=action_space_bounds,
-            shape=(3,),
-            dtype=np.float32,
-        )
-        if isinstance(self.action_space, gym.spaces.Tuple):
-            self.action_space = gym.spaces.Tuple(
-                (ee_action_space, self.action_space[1])
-            )
-        else:
-            self.action_space = ee_action_space
-
-        self.bounds = ee_action_space_params["bounds"]
-        self.desired_ee_pos = None
-
-        self.animate_pose = animate_pose
-        if animate_pose:
-            self.current_history = deque(maxlen=100)
-            self.target_history = deque(maxlen=100)
-            self._stop_event = threading.Event()
-            self._plot_thread = threading.Thread(target=self._plot_loop)
-            self._plot_thread.daemon = True
-            self._plot_thread.start()
-
-    def _plot_loop(self):
-        plt.ion()
-        fig, axs = plt.subplots(3, 1, figsize=(8, 6))
-        labels = ['X', 'Y', 'Z']
-        while not self._stop_event.is_set():
-            if len(self.current_history) > 0:
-                current_arr = np.array(self.current_history)
-                target_arr = np.array(self.target_history)
-                for i in range(3):
-                    axs[i].clear()
-                    axs[i].plot(current_arr[:, i], label='Current')
-                    axs[i].plot(target_arr[:, i], label='Target')
-                    axs[i].set_ylabel(labels[i])
-                    axs[i].legend()
-                axs[2].set_xlabel('Timesteps')
-                plt.pause(0.01)
-        plt.ioff()
-
-    def action(self, action):
-        is_intervention = False
-        desired_ee_pos = np.eye(4)
-        if isinstance(action, tuple):
-            action, _ = action
-
-        current_joint_pos = self.unwrapped.robot.follower_arms["main"].read(
-            "Present_Position"
-        )
-
-        if self.desired_ee_pos is None:
-            self.desired_ee_pos = self.fk_function(current_joint_pos)
-
-        if isinstance(action, torch.Tensor):
-            action = action.cpu().numpy()
-        self.desired_ee_pos[:3, 3] = np.clip(
-            self.desired_ee_pos[:3, 3] + action,
-            self.bounds["min"],
-            self.bounds["max"],
-        )
-
-        target_joint_pos = self.kinematics.ik(
-            current_joint_pos,
-            self.desired_ee_pos,
-            position_only=False,
-            fk_func=self.fk_function,
-        )
-
-        if self.animate_pose:
-            current_ee_pos = self.fk_function(current_joint_pos)
-            desired_ee_after_ik = self.fk_function(target_joint_pos)
-
-            self.current_history.append(current_ee_pos[:3, 3])
-            self.target_history.append(desired_ee_after_ik[:3, 3])
-
-            print("-" * 10)
-            print("Current Joints:", current_joint_pos)
-            print("Target Joints:", target_joint_pos)
-            print("Current EE Pos:", current_ee_pos[:3, 3], "Goal EE Pos (before ik)", self.desired_ee_pos[:3, 3], "Goal EE Pos (after ik)", desired_ee_after_ik[:3, 3])
-
-        return target_joint_pos, is_intervention
-
-    def reset(self, **kwargs) -> Tuple[Any, Dict]:
-        """
-        Reset the environment and clear any pending events
-        """
-        self.desired_ee_pos = None
-        return self.env.reset(**kwargs)
-
-    def close(self):
-        self._stop_event.set()
-        self._plot_thread.join()
-
-
-class EEObservationWrapper(gym.ObservationWrapper):
-    def __init__(self, env, ee_pose_limits, kinematics: RobotKinematics):
-        super().__init__(env)
-
-        # Extend observation space to include end effector pose
-        prev_space = self.observation_space["observation.state"]
-
-        self.observation_space["observation.state"] = gym.spaces.Box(
-            low=np.concatenate([prev_space.low, ee_pose_limits["min"]]),
-            high=np.concatenate([prev_space.high, ee_pose_limits["max"]]),
-            shape=(prev_space.shape[0] + 3,),
-            dtype=np.float32,
-        )
-
-        self.kinematics = kinematics
-        self.fk_function = self.kinematics.fk_gripper_tip
-
-    def observation(self, observation):
-        current_joint_pos = self.unwrapped.robot.follower_arms["main"].read(
-            "Present_Position"
-        )
-        current_ee_pos = self.fk_function(current_joint_pos)
-        observation["observation.state"] = torch.cat(
-            [
-                observation["observation.state"],
-                torch.from_numpy(current_ee_pos[:3, 3]),
-            ],
-            dim=-1,
-        )
-        return observation
-
-
-class GamepadControlWrapper(gym.Wrapper):
-    """
-    Wrapper that allows controlling a gym environment with a gamepad.
-
-    This wrapper intercepts the step method and allows human input via gamepad
-    to override the agent's actions when desired.
-    """
-
-    def __init__(
-        self,
-        env,
-        x_step_size=1.0,
-        y_step_size=1.0,
-        z_step_size=1.0,
-        auto_reset=False,
-        input_threshold=0.001,
-    ):
-        """
-        Initialize the gamepad controller wrapper.
-
-        Args:
-            env: The environment to wrap
-            x_step_size: Base movement step size for X axis in meters
-            y_step_size: Base movement step size for Y axis in meters
-            z_step_size: Base movement step size for Z axis in meters
-            vendor_id: USB vendor ID of the gamepad (default: Logitech)
-            product_id: USB product ID of the gamepad (default: RumblePad 2)
-            auto_reset: Whether to auto reset the environment when episode ends
-            input_threshold: Minimum movement delta to consider as active input
-        """
-        super().__init__(env)
-        from lerobot.scripts.server.end_effector_control_utils import (
-            GamepadControllerHID,
-            GamepadController,
-        )
-
-        # use HidApi for macos
-        if sys.platform == "darwin":
-            self.controller = GamepadControllerHID(
-                x_step_size=x_step_size,
-                y_step_size=y_step_size,
-                z_step_size=z_step_size,
-            )
-        else:
-            self.controller = GamepadController(
-                x_step_size=x_step_size,
-                y_step_size=y_step_size,
-                z_step_size=z_step_size,
-            )
-        self.auto_reset = auto_reset
-        self.input_threshold = input_threshold
-        self.controller.start()
-
-        logging.info("Gamepad control wrapper initialized")
-        print("Gamepad controls:")
-        print("  Left analog stick: Move in X-Y plane")
-        print("  Right analog stick: Move in Z axis (up/down)")
-        print("  X/Square button: End episode (FAILURE)")
-        print("  Y/Triangle button: End episode (SUCCESS)")
-        print("  B/Circle button: Exit program")
-
-    def get_gamepad_action(self):
-        """
-        Get the current action from the gamepad if any input is active.
-
-        Returns:
-            Tuple of (is_active, action, terminate_episode, success)
-        """
-        # Update the controller to get fresh inputs
-        self.controller.update()
-
-        # Get movement deltas from the controller
-        delta_x, delta_y, delta_z = self.controller.get_deltas()
-
-        intervention_is_active = self.controller.should_intervene()
-
-        # Create action from gamepad input
-        gamepad_action = np.array([delta_x, delta_y, delta_z], dtype=np.float32)
-
-        # Check episode ending buttons
-        # We'll rely on controller.get_episode_end_status() which returns "success", "failure", or None
-        episode_end_status = self.controller.get_episode_end_status()
-        terminate_episode = episode_end_status is not None
-        success = episode_end_status == "success"
-        rerecord_episode = episode_end_status == "rerecord_episode"
-
-        return (
-            intervention_is_active,
-            gamepad_action,
-            terminate_episode,
-            success,
-            rerecord_episode,
-        )
-
-    def step(self, action):
-        """
-        Step the environment, using gamepad input to override actions when active.
-
-        Args:
-            action: Original action from agent
-
-        Returns:
-            observation, reward, terminated, truncated, info
-        """
-        # Get gamepad state and action
-        (
-            is_intervention,
-            gamepad_action,
-            terminate_episode,
-            success,
-            rerecord_episode,
-        ) = self.get_gamepad_action()
-
-        # Update episode ending state if requested
-        if terminate_episode:
-            logging.info(
-                f"Episode manually ended: {'SUCCESS' if success else 'FAILURE'}"
-            )
-
-        # Only override the action if gamepad is active
-        if is_intervention:
-            # Format according to the expected action type
-            if isinstance(self.action_space, gym.spaces.Tuple):
-                # For environments that use (action, is_intervention) tuples
-                final_action = (torch.from_numpy(gamepad_action), False)
-            else:
-                final_action = torch.from_numpy(gamepad_action)
-        else:
-            # Use the original action
-            final_action = action
-
-        # Step the environment
-        obs, reward, terminated, truncated, info = self.env.step(final_action)
-
-        # Add episode ending if requested via gamepad
-        terminated = terminated or truncated or terminate_episode
-
-        if success:
-            reward = 1.0
-            logging.info("Episode ended successfully with reward 1.0")
-
-        info["is_intervention"] = is_intervention
-        action_intervention = (
-            final_action[0] if isinstance(final_action, Tuple) else final_action
-        )
-        if isinstance(action_intervention, np.ndarray):
-            action_intervention = torch.from_numpy(action_intervention)
-        info["action_intervention"] = action_intervention
-        info["rerecord_episode"] = rerecord_episode
-
-        # If episode ended, reset the state
-        if terminated or truncated:
-            # Add success/failure information to info dict
-            info["next.success"] = success
-
-            # Auto reset if configured
-            if self.auto_reset:
-                obs, reset_info = self.reset()
-                info.update(reset_info)
-
-        return obs, reward, terminated, truncated, info
-
-    def close(self):
-        """Clean up resources when environment closes."""
-        # Stop the controller
-        if hasattr(self, "controller"):
-            self.controller.stop()
-
-        # Call the parent close method
-        return self.env.close()
 
 
 class ActionScaleWrapper(gym.ActionWrapper):
@@ -1194,29 +905,13 @@ def make_robot_env(
             n_envs=1,
         )
         return env
+
     # Create base environment
     env = HILSerlRobotEnv(
         robot=robot,
         display_cameras=cfg.env.wrapper.display_cameras,
-        delta=cfg.env.wrapper.delta_action,
-        use_delta_action_space=cfg.env.wrapper.use_relative_joint_positions
-        and cfg.env.wrapper.ee_action_space_params is None,
+        ee_action_space_params=cfg.env.ee_action_space_params
     )
-
-    # Initialize kinematics instance for the appropriate robot type
-    if robot.config.robot_type.lower().startswith('aloha'):
-        kinematics = MRKinematics(robot.config.follower_model)
-    else:
-        robot_type = getattr(robot.config, "robot_type", "so100")
-        kinematics = RobotKinematics(robot_type)
-
-    # Add observation and image processing
-    if cfg.env.wrapper.add_joint_velocity_to_observation:
-        env = AddJointVelocityToObservation(env=env, fps=cfg.fps)
-    if cfg.env.wrapper.add_ee_pose_to_observation:
-        env = EEObservationWrapper(
-            env=env, ee_pose_limits=OmegaConf.to_container(cfg.env.wrapper.ee_action_space_params.bounds), kinematics=kinematics
-        )
 
     env = ConvertToLeRobotObservation(env=env, device=cfg.env.device)
 
@@ -1229,41 +924,14 @@ def make_robot_env(
 
     # Add reward computation and control wrappers
     # env = RewardWrapper(env=env, reward_classifier=reward_classifier, device=cfg.device)
-    env = TimeLimitWrapper(
-        env=env, control_time_s=cfg.env.wrapper.control_time_s, fps=cfg.fps
-    )
-    if cfg.env.wrapper.ee_action_space_params is not None:
-        env = EEActionWrapper(
-            env=env, ee_action_space_params=OmegaConf.to_container(cfg.env.wrapper.ee_action_space_params), kinematics=kinematics
-        )
-    if (
-        cfg.env.wrapper.ee_action_space_params is not None
-        and cfg.env.wrapper.ee_action_space_params.use_gamepad
-    ):
-        # env = ActionScaleWrapper(env=env, ee_action_space_params=cfg.env.wrapper.ee_action_space_params)
-        env = GamepadControlWrapper(
-            env=env,
-            x_step_size=cfg.env.wrapper.ee_action_space_params.x_step_size,
-            y_step_size=cfg.env.wrapper.ee_action_space_params.y_step_size,
-            z_step_size=cfg.env.wrapper.ee_action_space_params.z_step_size,
-        )
-    else:
-        env = KeyboardInterfaceWrapper(env=env)
-
+    env = TimeLimitWrapper(env=env, control_time_s=cfg.env.wrapper.control_time_s, fps=cfg.fps)
+    env = KeyboardInterfaceWrapper(env=env)
     env = ResetWrapper(
         env=env,
         reset_pose=list(cfg.env.wrapper.fixed_reset_joint_positions),
         reset_time_s=cfg.env.wrapper.reset_time_s,
     )
-    if (
-        cfg.env.wrapper.ee_action_space_params is None
-        and cfg.env.wrapper.joint_masking_action_space is not None
-    ):
-        env = JointMaskingActionSpace(
-            env=env, mask=cfg.env.wrapper.joint_masking_action_space
-        )
-    env = BatchCompitableWrapper(env=env)
-
+    env = BatchCompatibleWrapper(env=env)
     return env
 
 

@@ -285,14 +285,38 @@ class ManipulatorRobot:
             },
             "observation.state": {
                 "dtype": "float32",
-                "shape": (len(state_names) + 6 * len(self.botas),),
+                "shape": (len(state_names), ),
+                "names": state_names,
+            },
+            "observation.joint_vel": {
+                "dtype": "float32",
+                "shape": (len(state_names), ),
                 "names": state_names,
             },
         }
 
     @property
+    def bota_features(self) -> dict:
+        if self.has_bota:
+            wrench_names = [f"{name}_{axis}" for name in self.botas for axis in ['x', 'y', 'z']]
+            return {
+                "observation.tcp_force": {
+                    "dtype": "float32",
+                    "shape": (len(wrench_names), ),
+                    "names": wrench_names,
+                },
+                "observation.tcp_torque": {
+                    "dtype": "float32",
+                    "shape": (len(wrench_names), ),
+                    "names": wrench_names,
+                },
+            }
+        else:
+            return {}
+
+    @property
     def features(self):
-        return {**self.motor_features, **self.camera_features}
+        return {**self.motor_features, **self.camera_features, **self.bota_features}
 
     @property
     def has_camera(self):
@@ -301,6 +325,14 @@ class ManipulatorRobot:
     @property
     def num_cameras(self):
         return len(self.cameras)
+
+    @property
+    def has_bota(self):
+        return len(self.botas) > 0
+
+    @property
+    def num_botas(self):
+        return len(self.botas)
 
     @property
     def available_arms(self):
@@ -389,8 +421,6 @@ class ManipulatorRobot:
         for name in self.botas:
             self.botas[name].connect()
             self.botas[name].activate_calibration(self, name, self.calibration_dir, self.config.fps)
-
-
 
     def activate_calibration(self):
         """After calibration all motors function in human interpretable ranges.
@@ -627,24 +657,6 @@ class ManipulatorRobot:
         if not record_data:
             return
 
-        # TODO(rcadene): Add velocity and other info
-        # Read follower position
-        follower_pos = {}
-        for name in self.follower_arms:
-            before_fread_t = time.perf_counter()
-            follower_pos[name] = self.follower_arms[name].read("Present_Position")
-            follower_pos[name] = torch.from_numpy(follower_pos[name])
-            self.logs[f"read_follower_{name}_pos_dt_s"] = (
-                time.perf_counter() - before_fread_t
-            )
-
-        # Create state by concatenating follower current position
-        state = []
-        for name in self.follower_arms:
-            if name in follower_pos:
-                state.append(follower_pos[name])
-        state = torch.cat(state)
-
         # Create action by concatenating follower goal position
         action = []
         for name in self.follower_arms:
@@ -652,26 +664,10 @@ class ManipulatorRobot:
                 action.append(follower_goal_pos[name])
         action = torch.cat(action)
 
-        # Capture images from cameras
-        images = {}
-        for name in self.cameras:
-            before_camread_t = time.perf_counter()
-            images[name] = self.cameras[name].async_read()
-            images[name] = torch.from_numpy(images[name])
-            self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs[
-                "delta_timestamp_s"
-            ]
-            self.logs[f"async_read_camera_{name}_dt_s"] = (
-                time.perf_counter() - before_camread_t
-            )
-
         # Populate output dictionnaries
-        obs_dict, action_dict = {}, {}
-        obs_dict["observation.state"] = state
+        action_dict = {}
         action_dict["action"] = action
-        for name in self.cameras:
-            obs_dict[f"observation.images.{name}"] = images[name]
-
+        obs_dict = self.capture_observation()
         return obs_dict, action_dict
 
     def capture_observation(self):
@@ -683,6 +679,7 @@ class ManipulatorRobot:
 
         # Read follower position
         follower_pos = {}
+        follower_vel = {}
         for name in self.follower_arms:
             before_fread_t = time.perf_counter()
             follower_pos[name] = self.follower_arms[name].read("Present_Position")
@@ -690,13 +687,21 @@ class ManipulatorRobot:
             self.logs[f"read_follower_{name}_pos_dt_s"] = (
                 time.perf_counter() - before_fread_t
             )
+            follower_vel[name] = self.follower_arms[name].read("Present_Velocity")
+            follower_vel[name] = torch.from_numpy(follower_vel[name])
+            self.logs[f"read_follower_{name}_vel_dt_s"] = (
+                time.perf_counter() - before_fread_t
+            )
 
         # Create state by concatenating follower current position
         state = []
+        vel = []
         for name in self.follower_arms:
             if name in follower_pos:
                 state.append(follower_pos[name])
+                vel.append(follower_vel[name])
         state = torch.cat(state)
+        vel = torch.cat(vel)
 
         # Capture images from cameras
         images = {}
@@ -711,11 +716,25 @@ class ManipulatorRobot:
                 time.perf_counter() - before_camread_t
             )
 
-        # Populate output dictionnaries and format to pytorch
+        # Populate output dictionaries and format to pytorch
         obs_dict = {}
         obs_dict["observation.state"] = state
+        obs_dict["observation.joint_vel"] = vel
         for name in self.cameras:
             obs_dict[f"observation.images.{name}"] = images[name]
+
+        # Read forces and torques
+        if self.has_bota:
+            force = []
+            torque = []
+            for name in self.botas:
+                data = self.botas[name].read()
+                force.append(torch.from_numpy(data["force"]))
+                torque.append(torch.from_numpy(data["torque"]))
+
+            obs_dict["observation.tcp_force"] = torch.cat(force)
+            obs_dict["observation.tcp_torque"] = torch.cat(torque)
+
         return obs_dict
 
     def send_action(self, action: torch.Tensor) -> torch.Tensor:

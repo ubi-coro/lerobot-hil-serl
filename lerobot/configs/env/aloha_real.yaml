@@ -38,13 +38,13 @@ env:
     fixed_reset_joint_positions: [ -0.08789062, -21.18164,    -21.00586,    62.666016,    62.578125,  -0.87890625, -39.55078,     -0.08789062,  70.09901   ]
     ee_action_space_params:
       bounds:
-        max: [ 0.50860548, 0.19284192, 0.34299497 ]
-        min: [ 0.3695873,  -0.10820799,  0.18222228 ]
+        max: [ 0.50860548, 0.19284192, 0.34299497 ]  # should be 6 vector
+        min: [ 0.3695873,  -0.10820799,  0.18222228 ]  # should be 6 vector
 
       use_gamepad: false
-      x_step_size: 0.01
-      y_step_size: 0.01
-      z_step_size: 0.01
+      xyz_step_size: 0.01
+      rot_step_size: 0.01
+      gripper_step_size: 1.0
 
   reward_classifier:
     pretrained_path: null # outputs/classifier/13-02-random-sample-resnet10-frozen/checkpoints/best/pretrained_model

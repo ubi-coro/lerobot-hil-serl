@@ -571,8 +571,8 @@ class MRKinematics(RobotKinematics):
             raise ValueError("MRKinematics.ik: Unknown fk_func")
 
         joint_states, success = mr.IKinSpace(
-            Slist=self.gripper_desc["Slist"],
-            M=self.gripper_desc["M"],
+            Slist=desc["Slist"],
+            M=desc["M"],
             T=desired_ee_pose,
             thetalist0=self.apply_joint_correction(current_joint_state),
             ev=1e-3,
