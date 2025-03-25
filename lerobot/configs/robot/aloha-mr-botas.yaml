@@ -32,12 +32,10 @@ leader_model: wx250s
 # then to gradually add more motors (by uncommenting), until you can teleoperate both arms fully
 max_relative_target: 25
 
-moving_time: null
-
 leader_arms:
   main:
     _target_: lerobot.common.robot_devices.motors.dynamixel.DynamixelMotorsBus
-    port: /dev/ttyDXL_leader_right
+    port: /dev/ttyDXL_leader_left
     motors:  # window_x
       # name: (index, model)
       waist: [1, xm430-w350]
@@ -53,7 +51,7 @@ leader_arms:
 follower_arms:
   main:
     _target_: lerobot.common.robot_devices.motors.dynamixel.DynamixelMotorsBus
-    port: /dev/ttyDXL_follower_right
+    port: /dev/ttyDXL_follower_left
     motors:
       # name: [index, model]
       waist: [1, xm540-w270]
@@ -71,18 +69,15 @@ follower_arms:
 # on another USB hub or PCIe card.
 #
 # find out via ffplay <device>
-cameras:
-  cam_low:
-    _target_: lerobot.common.robot_devices.cameras.opencv.OpenCVCamera
-    camera_index: /dev/video0
-    fps: 30
-    width: 640
-    height: 480
-  cam_right_wrist:
-    _target_: lerobot.common.robot_devices.cameras.opencv.OpenCVCamera
-    camera_index: /dev/video4
-    fps: 30
-    width: 640
-    height: 480
+botas:
+  main:
+    _target_: lerobot.common.robot_devices.sensors.bota.BotaForceTorqueSensor
+    port: /dev/ttyACM0
+    calibration_cfg:
+      motors: [waist, shoulder, elbow, forearm_roll, wrist_angle, wrist_rotate, gripper]
+      num_epochs: 3000
+      batch_size: 64
+      n_obs_history: 2
+      t_data_collection_s: 60.0
 
 

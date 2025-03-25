@@ -12,9 +12,9 @@ hydra:
     name: default
 
 seed: 13
-dataset_repo_id: aractingi/push_cube_square_light_reward_cropped_resized
+dataset_repo_id: jannick-st/push_cube
 # aractingi/push_cube_square_reward_1_cropped_resized
-dataset_root: data/aractingi/push_cube_square_light_reward_cropped_resized
+dataset_root: jannick-st/push_cube
 local_files_only: true
 train_split_proportion: 0.8
 
@@ -58,4 +58,4 @@ wandb:
 
 device: "mps"
 resume: false
-output_dir: "outputs/classifier/old_trainer_resnet10_frozen"
+output_dir: "outputs/classifier/push_cube"

@@ -201,6 +201,7 @@ def record(
     pretrained_policy_name_or_path: str | None = None,
     policy_overrides: List[str] | None = None,
     assign_rewards: bool = False,
+    use_foot_switch: bool = False,
     fps: int | None = None,
     warmup_time_s: int | float = 2,
     episode_time_s: int | float = 10,
@@ -286,7 +287,7 @@ def record(
 
     if not robot.is_connected:
         robot.connect()
-    listener, events = init_keyboard_listener(assign_rewards=assign_rewards)
+    listener, events = init_keyboard_listener(assign_rewards=assign_rewards, use_foot_switch=use_foot_switch)
 
     if reset_follower:
         initial_position = robot.follower_arms["main"].read("Present_Position")

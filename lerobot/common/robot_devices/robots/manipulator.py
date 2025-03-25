@@ -83,7 +83,7 @@ class ManipulatorRobotConfig:
     # The duration of the velocity-based time profile
     # Higher values lead to smoother motions, but increase lag.
     # Only applicable to aloha
-    moving_time: float = 0.1
+    moving_time: float | None = 0.1
 
     joint_position_relative_bounds: dict[np.ndarray] | None = None
 
@@ -105,6 +105,8 @@ class ManipulatorRobotConfig:
         if prop == "joint_position_relative_bounds" and val is not None:
             for key in val:
                 val[key] = torch.tensor(val[key])
+        if prop == "moving_time" and val is None:
+            val = 1.0 / self.fps
         super().__setattr__(prop, val)
 
     def __post_init__(self):

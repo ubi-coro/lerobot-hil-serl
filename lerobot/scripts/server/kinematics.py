@@ -560,6 +560,9 @@ class MRKinematics(RobotKinematics):
         if fk_func is None:
             fk_func = self.fk_gripper
 
+        if gripper_pos is None and len(current_joint_state) > len(self.shadow_mask):
+            gripper_pos = current_joint_state[len(self.shadow_mask)]
+
         if fk_func == self.fk_gripper:
             desc = self.gripper_desc
         elif fk_func == self.fk_gripper_tip:

@@ -129,7 +129,7 @@ def predict_action(observation, policy, device, use_amp):
     return action
 
 
-def init_keyboard_listener(assign_rewards=False):
+def init_keyboard_listener(assign_rewards=False, use_foot_switch=False):
     """
     Initializes a keyboard listener to enable early termination of an episode
     or environment reset by pressing the right arrow key ('->'). This may require
@@ -158,30 +158,48 @@ def init_keyboard_listener(assign_rewards=False):
 
     def on_press(key):
         try:
-            if key == keyboard.Key.right:
-                print("Right arrow key pressed. Exiting loop...")
-                events["exit_early"] = True
-            elif key == keyboard.Key.left:
-                print(
-                    "Left arrow key pressed. Exiting loop and rerecord the last episode..."
-                )
-                events["rerecord_episode"] = True
-                events["exit_early"] = True
-            elif key == keyboard.Key.esc:
-                print("Escape key pressed. Stopping data recording...")
-                events["stop_recording"] = True
-                events["exit_early"] = True
-            elif assign_rewards and key == keyboard.Key.space:
-                events["next.reward"] = 1 if events["next.reward"] == 0 else 0
-                print(
-                    "Space key pressed. Assigning new reward to the subsequent frames. New reward:",
-                    events["next.reward"],
-                )
+            k = key.char if hasattr(key, 'char') else key
+            print(k)
 
+            if use_foot_switch:
+                if k == 'a':
+                    print("Left pedal ('a') pressed. Exiting loop and rerecord the last episode...")
+                    events["rerecord_episode"] = True
+                    events["exit_early"] = True
+                elif k == 'b':
+                    print("Middle pedal ('b') pressed. Exiting loop...")
+                    events["exit_early"] = True
+                elif assign_rewards and k == 'c':
+                    events["next.reward"] = 1
+                    print("Right pedal ('c') pressed. Reward ON.")
+            else:
+                if k == keyboard.Key.right:
+                    print("Right arrow key pressed. Exiting loop...")
+                    events["exit_early"] = True
+                elif k == keyboard.Key.left:
+                    print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
+                    events["rerecord_episode"] = True
+                    events["exit_early"] = True
+                elif k == keyboard.Key.esc:
+                    print("Escape key pressed. Stopping data recording...")
+                    events["stop_recording"] = True
+                    events["exit_early"] = True
+                elif assign_rewards and k == keyboard.Key.space:
+                    events["next.reward"] = 1 if events["next.reward"] == 0 else 0
+                    print("Space key pressed. Toggling reward to:", events["next.reward"])
         except Exception as e:
             print(f"Error handling key press: {e}")
 
-    listener = keyboard.Listener(on_press=on_press)
+    def on_release(key):
+        try:
+            k = key.char if hasattr(key, 'char') else key
+            if use_foot_switch and assign_rewards and k == 'c':
+                events["next.reward"] = 0
+                print("Right pedal ('c') released. Reward OFF.")
+        except Exception as e:
+            print(f"Error handling key release: {e}")
+
+    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
 
     return listener, events
@@ -334,7 +352,8 @@ def control_loop(
             busy_wait(1 / fps - dt_s)
 
         dt_s = time.perf_counter() - start_loop_t
-        log_control_info(robot, dt_s, fps=fps)
+        #log_control_info(robot, dt_s, fps=fps)
+        print(robot.follower_arms["main"].read("Present_Position"))
 
         timestamp = time.perf_counter() - start_episode_t
         if events["exit_early"]:

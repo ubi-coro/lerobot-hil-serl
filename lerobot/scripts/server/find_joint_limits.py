@@ -7,7 +7,7 @@ import numpy as np
 from lerobot.common.robot_devices.control_utils import is_headless
 from lerobot.common.robot_devices.robots.factory import make_robot
 from lerobot.common.utils.utils import init_hydra_config
-from lerobot.scripts.server.kinematics import RobotKinematics
+from lerobot.scripts.server.kinematics import RobotKinematics, MRKinematics
 
 
 def find_joint_bounds(
@@ -53,6 +53,12 @@ def find_ee_bounds(
     if not robot.is_connected:
         robot.connect()
 
+    if robot.config.robot_type.lower().startswith('aloha'):
+        kinematics = MRKinematics(robot.config.follower_model)
+    else:
+        robot_type = getattr(robot.config, "robot_type", "so100")
+        kinematics = RobotKinematics(robot_type)
+
     start_episode_t = time.perf_counter()
     ee_list = []
     while True:
@@ -64,7 +70,7 @@ def find_ee_bounds(
 
         joint_positions = robot.follower_arms["main"].read("Present_Position")
         print(f"Joint positions: {joint_positions}")
-        ee_list.append(RobotKinematics.fk_gripper_tip(joint_positions)[:3, 3])
+        ee_list.append(kinematics.fk_gripper_tip(joint_positions)[:3, 3])
 
         if display_cameras and not is_headless():
             image_keys = [key for key in observation if "image" in key]

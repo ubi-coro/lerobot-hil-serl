@@ -8,16 +8,17 @@ env:
   state_dim: 18
   action_dim: 18
   fps: ${fps}
+  device: cuda
 
   wrapper:
     crop_params_dict:
-      observation.images.front: [171, 207, 116, 251]
-      observation.images.side: [232, 200, 142, 204]
-    resize_size: [128, 128]
+      observation.images.cam_low: [ 171, 207, 116, 251 ]
+      observation.images.cam_right_wrist: [ 232, 200, 142, 204 ]
+    resize_size: [ 128, 128 ]
     control_time_s: 10
     reset_follower_pos: false
     use_relative_joint_positions: true
-    reset_time_s: 5
+    reset_time_s: 2
     display_cameras: false
     delta_action: null #0.3
     joint_masking_action_space: null #[1, 1, 1, 1, 0, 0] # disable wrist and gripper
@@ -33,16 +34,17 @@ env:
     #     min: [0.139, -0.143, 0.03]
 
     # Bounds for insertcube_gamepad dataset and experiments
-    fixed_reset_joint_positions: [20.0,  90.,   90.,   75.,  -0.7910156, -0.5673759]
+    #fixed_reset_joint_positions: [  1.5820312, -25.664062 , -25.40039 ,   26.80664   , 26.63086,     0.,   63.28125   ,  3.8671875 , 70.09901  ]
+    fixed_reset_joint_positions: [ -0.08789062, -21.18164,    -21.00586,    62.666016,    62.578125,  -0.87890625, -39.55078,     -0.08789062,  70.09901   ]
     ee_action_space_params:
       bounds:
-        max: [0.25295413, 0.07498981, 0.06862044]
-        min: [0.2010096,  -0.12, 0.0433196]
+        max: [ 0.50860548, 0.19284192, 0.34299497 ]
+        min: [ 0.3695873,  -0.10820799,  0.18222228 ]
 
-      use_gamepad: true
-      x_step_size: 0.03
-      y_step_size: 0.03
-      z_step_size: 0.03
+      use_gamepad: false
+      x_step_size: 0.01
+      y_step_size: 0.01
+      z_step_size: 0.01
 
   reward_classifier:
     pretrained_path: null # outputs/classifier/13-02-random-sample-resnet10-frozen/checkpoints/best/pretrained_model

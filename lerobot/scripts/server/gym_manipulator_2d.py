@@ -827,7 +827,7 @@ class BatchCompitableWrapper(gym.ObservationWrapper):
 
 
 class EEActionWrapper(gym.ActionWrapper):
-    def __init__(self, env, kinematics: RobotKinematics, ee_action_space_params=None, animate_pose=True):
+    def __init__(self, env, kinematics: RobotKinematics, ee_action_space_params=None, animate_pose=False):
         super().__init__(env)
         self.ee_action_space_params = ee_action_space_params
         self.kinematics = kinematics
@@ -1578,9 +1578,6 @@ if __name__ == "__main__":
             episode=args.replay_episode,
         )
         exit()
-
-    # tune pid gains
-    robot.follower_arms["main"].write("Position_I_Gain", [50] * 9)
 
     env.reset()
 
