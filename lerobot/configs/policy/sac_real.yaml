@@ -65,20 +65,25 @@ policy:
 
   # Normalization / Unnormalization
   input_normalization_modes:
-    observation.images.front: mean_std
-    observation.images.side: mean_std
-    observation.state: min_max
+    observation.images.cam_low: mean_std
+    observation.images.cam_right_wrist: mean_std
+    observation.tcp_pose: min_max
+    observation.tcp_vel: min_max
   input_normalization_params:
-    observation.images.front:
+    observation.images.cam_low:
       mean: [0.485, 0.456, 0.406]
       std: [0.229, 0.224, 0.225]
-    observation.images.side:
+    observation.images.cam_right_wrist:
       mean: [0.485, 0.456, 0.406]
       std: [0.229, 0.224, 0.225]
-    observation.state:
+    observation.tcp_pose:
       # 6- joint positions, 6- joint velocities, 3- ee position
-      max: [ 52.822266,  136.14258,   142.03125,   72.1582,     22.675781,   -0.5673759, 100., 100., 100., 100., 100., 100., 0.25295413, 0.07498981, 0.06862044]
-      min: [-2.6367188,  86.572266,   89.82422,    12.392578,    -26.015625,   -0.5673759, -100., -100., -100., -100., -100., -100., 0.2010096,  -0.12, 0.0433196]
+      max: [ ]
+      min: [ ]
+    observation.tcp_vel:
+      # 6- joint positions, 6- joint velocities, 3- ee position
+      max: [ ]
+      min: [ ]
 
   output_normalization_modes:
     action: min_max

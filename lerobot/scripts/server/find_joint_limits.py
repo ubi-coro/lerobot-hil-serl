@@ -3,6 +3,7 @@ import time
 
 import cv2
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 
 from lerobot.common.robot_devices.control_utils import is_headless
 from lerobot.common.robot_devices.robots.factory import make_robot
@@ -70,7 +71,11 @@ def find_ee_bounds(
 
         joint_positions = robot.follower_arms["main"].read("Present_Position")
         print(f"Joint positions: {joint_positions}")
-        ee_list.append(kinematics.fk_gripper_tip(joint_positions)[:3, 3])
+
+        ee_pose = kinematics.fk_gripper_tip(joint_positions)
+        xyz = ee_pose[:3, 3]
+        rpy = R.from_matrix(ee_pose[:3, :3]).as_euler("xyz")
+        ee_list.append(np.concat([xyz, rpy]))
 
         if display_cameras and not is_headless():
             image_keys = [key for key in observation if "image" in key]

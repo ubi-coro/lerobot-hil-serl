@@ -44,7 +44,7 @@ env:
       use_gamepad: false
       xyz_step_size: 0.01
       rot_step_size: 0.01
-      gripper_step_size: 1.0
+      gripper_step_size: 50.0
 
   reward_classifier:
     pretrained_path: null # outputs/classifier/13-02-random-sample-resnet10-frozen/checkpoints/best/pretrained_model

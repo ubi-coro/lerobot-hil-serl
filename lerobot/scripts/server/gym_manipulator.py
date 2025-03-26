@@ -90,6 +90,11 @@ class HILSerlRobotEnv(gym.Env):
         self.episode_data = None
 
         self.ee_action_space_params = ee_action_space_params
+        self.action_scale = np.array(
+            3 * [self.ee_action_space_params["xyz_step_size"]] +
+            3 * [self.ee_action_space_params["rot_step_size"]] +
+            1 * [self.ee_action_space_params["gripper_step_size"]]
+        )
         self.current_joint_positions = self.robot.follower_arms["main"].read(
             "Present_Position"
         )
@@ -237,35 +242,33 @@ class HILSerlRobotEnv(gym.Env):
                     ◦ "is_intervention": Flag indicating whether teleoperation was employed.
         """
         # policy_action looks like (dx, dy, dz, dp, dr, dy, gripper)
-        policy_action, intervention_bool = action
+        delta_action, intervention_bool = action
 
         teleop_action = None
         if intervention_bool:
             # Capture leader joints, ignore max_relative_target, last joint is gripper
             follower_joint_positions = self.leader_arms["main"].read("Present_Position")
+            teleop_action = self._compute_delta_action(follower_joint_positions)
+            delta_action = teleop_action.copy()
 
-            teleop_action = self._compute_delta_action(
-                self.fk(follower_joint_positions),
-                gripper_pos=follower_joint_positions[-1]
-            )
-            delta_action = teleop_action
-        else:
-            delta_action = policy_action
+        delta_action = np.clip(delta_action, self.action_space.low[0], self.action_space.high[0])
 
-            # hack: map gripper pos from [-1, 1] to [0, 100]
-            delta_action[-1] = 50.0 * (delta_action[-1] + 1)
+        # from [-1, 1] to step size
+        delta_action *= self.action_scale
+
+        # Gripper from [-gripper_step_size, gripper_step_size] -> [0, 2 * gripper_step_size]
+        delta_action[6] += self.ee_action_space_params["gripper_step_size"]
 
         if isinstance(delta_action, torch.Tensor):
             delta_action = action.cpu().numpy()
 
-        delta_action = np.clip(delta_action, self.action_space.low[0], self.action_space.high[0])
-
+        # Update next pose
         self.next_tcp_pose = self.curr_tcp_pose.copy()
-        self.next_tcp_pose[:3, 3] = self.next_tcp_pose[:3] + delta_action[3:6] * self.ee_action_space_params["xyz_step_size"]
+        self.next_tcp_pose[:3, 3] = self.next_tcp_pose[:3] + delta_action[3:6]
 
         # Get orientation from action
         self.next_tcp_pose[:3, :3] = (
-            R.from_euler("xyz", delta_action[3:6] * self.ee_action_space_params["rot_step_size"], degrees=False),
+            R.from_euler("xyz", delta_action[3:6], degrees=False),
             * R.from_matrix(self.curr_tcp_pose[:3, :3])
         ).as_matrix()
 
@@ -274,7 +277,7 @@ class HILSerlRobotEnv(gym.Env):
             current_joint_state=self.curr_q,
             desired_ee_pose=desired_tcp_pose,
             fk_func=self.fk,
-            gripper_pos=delta_action[6] * self.ee_action_space_params["gripper_step_size"]
+            gripper_pos=delta_action[6]
         )
 
         self.robot.send_action(torch.from_numpy(target_joint_positions))
@@ -351,7 +354,7 @@ class HILSerlRobotEnv(gym.Env):
         self.curr_tcp_pose = self.fk(self.curr_q)
         self.curr_tcp_vel = self.jacobian(self.curr_q, fk_func=self.fk) @ obs['observation.joint_vel'].detach().cpu().numpy()
 
-    def _compute_delta_action(self, desired_pose: np.ndarray, gripper_pos: float = None) -> np.ndarray:
+    def _compute_delta_action(self, follower_joint_positions: np.ndarray) -> np.ndarray:
         """
         Compute the delta action needed to move from the current end-effector pose to the desired pose.
 
@@ -366,6 +369,8 @@ class HILSerlRobotEnv(gym.Env):
                 the next 3 are the Euler angle differences (in radians),
                 and the last element is the gripper action.
         """
+        desired_pose = self.fk(follower_joint_positions)
+
         # Compute the position difference
         delta_pos = desired_pose[:3, 3] - self.curr_tcp_pose[:3, 3]
 
@@ -376,7 +381,24 @@ class HILSerlRobotEnv(gym.Env):
 
         # Concatenate into a single delta action vector
         delta_action = np.concatenate([delta_pos, delta_rpy, [gripper_pos]])
+
+        # Gripper from [0, 2 * gripper_step_size] -> [-gripper_step_size, gripper_step_size]
+        delta_action[6] -= self.ee_action_space_params["gripper_step_size"]
+
+        # Map back to [-1, 1]
+        delta_action /= self.action_scale
+
+        # Respect bounds while preserving directions
+        delta_action[:3] = self._clip_delta_teleop_action_component(delta_action[:3])
+        delta_action[3:6] = self._clip_delta_teleop_action_component(delta_action[:3])
+        delta_action[6] = np.clip(delta_action[6], -1.0, 1.0)
+
         return delta_action
+    def _clip_delta_teleop_action_component(self, action_component):
+        max_val = np.max(np.abs(action_component))
+        if max_val > 1.0:
+            action_component /= max_val
+        return action_component
 
 
 class ActionRepeatWrapper(gym.Wrapper):
