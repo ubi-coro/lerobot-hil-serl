@@ -581,14 +581,26 @@ class MRKinematics(RobotKinematics):
 
         if success:
             joint_states = self.revert_joint_correction(joint_states)
+            if gripper_pos is not None:
+                joint_states = np.append(joint_states, gripper_pos)
         else:
             joint_states = current_joint_state
             logging.info('No valid pose could be found. Will return current position')
 
-        if gripper_pos is not None:
-            joint_states = np.append(joint_states, gripper_pos)
-
         return joint_states
+
+    def compute_jacobian(self, current_joint_state, fk_func=None):
+        if fk_func is None:
+            fk_func = self.fk_gripper
+
+        if fk_func == self.fk_gripper:
+            desc = self.gripper_desc
+        elif fk_func == self.fk_gripper_tip:
+            desc = self.gripper_tip_desc
+        else:
+            raise ValueError("MRKinematics.ik: Unknown fk_func")
+
+        return mr.JacobianSpace(Slist=desc["Slist"], thetalist=self.apply_joint_correction(current_joint_state))
 
 
 if __name__ == "__main__":

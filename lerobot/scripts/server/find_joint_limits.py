@@ -75,7 +75,7 @@ def find_ee_bounds(
         ee_pose = kinematics.fk_gripper_tip(joint_positions)
         xyz = ee_pose[:3, 3]
         rpy = R.from_matrix(ee_pose[:3, :3]).as_euler("xyz")
-        ee_list.append(np.concat([xyz, rpy]))
+        ee_list.append(np.concatenate([xyz, rpy]))
 
         if display_cameras and not is_headless():
             image_keys = [key for key in observation if "image" in key]

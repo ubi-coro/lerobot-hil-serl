@@ -17,6 +17,7 @@ from lerobot.common.robot_devices.control_utils import (
     busy_wait,
     is_headless,
     reset_follower_position,
+    reset_leader_position
 )
 from lerobot.common.robot_devices.robots.factory import make_robot
 from lerobot.common.utils.utils import init_hydra_config, log_say
@@ -45,7 +46,7 @@ class HILSerlRobotEnv(gym.Env):
         robot,
         ee_action_space_params,
         display_cameras: bool = False,
-        animate_pose: bool = False
+        display_lag: bool = True
     ):
         """
         Initialize the HILSerlRobotEnv environment.
@@ -69,8 +70,10 @@ class HILSerlRobotEnv(gym.Env):
         # Initialize kinematics instance for the appropriate robot type
         if robot.config.robot_type.lower().startswith('aloha'):
             kinematics = MRKinematics(robot.config.follower_model)
+            self.preprocess_q_dot = kinematics.apply_joint_correction  # removes shadows and converts to radian for mr
         else:
             kinematics = RobotKinematics(getattr(robot.config, "robot_type", "so100"))
+            self.preprocess_q_dot = lambda q_dot: q_dot
         self.fk = kinematics.fk_gripper_tip
         self.ik = kinematics.ik
         self.jacobian = kinematics.compute_jacobian
@@ -95,18 +98,29 @@ class HILSerlRobotEnv(gym.Env):
             3 * [self.ee_action_space_params["rot_step_size"]] +
             1 * [self.ee_action_space_params["gripper_step_size"]]
         )
-        self.current_joint_positions = self.robot.follower_arms["main"].read(
-            "Present_Position"
-        )
 
         # Dynamically configure the observation and action spaces.
         self._setup_spaces()
 
         # Optionally track position lag
-        self.animate_pose = animate_pose
-        if self.animate_pose:
+        self.display_lag = display_lag
+        if self.display_lag:
             self.current_history = deque(maxlen=100)
             self.target_history = deque(maxlen=100)
+
+            plt.ion()
+            f1, self.pos_axs = plt.subplots(3, 1, figsize=(8, 6))
+            f2, self.rot_axs = plt.subplots(3, 1, figsize=(8, 6))
+
+        # todo: calc this in the reset wrapper and use it when no reset pose is passed (+ absorb reset wrapper)
+        reset_pose = np.eye(4)
+        reset_pose[:3, :2] = (self.xyz_bounding_box.high[:2] + self.xyz_bounding_box.low[:2]) / 2
+        reset_pose[:3, 2] = self.xyz_bounding_box.high[2]
+        reset_pose[:3, :3] = R.from_euler(
+            "xyz", (self.rpy_bounding_box.high + self.rpy_bounding_box.low) / 2
+        ).as_matrix()
+        reset_joints = self.ik(current_joint_state=self.curr_q, desired_ee_pose=reset_pose, fk_func=self.fk, gripper_pos=0)
+
 
     def _setup_spaces(self):
         """
@@ -127,7 +141,7 @@ class HILSerlRobotEnv(gym.Env):
         # Define observation spaces for images and other states.
         observation_spaces = {}
         ignore_keys = ["observation.state", "observation.joint_vel"]
-        for key, feature in self.robot.features.values():
+        for key, feature in self.robot.features.items():
             if key in ignore_keys:
                 continue
 
@@ -140,48 +154,32 @@ class HILSerlRobotEnv(gym.Env):
         observation_spaces["observation.tcp_vel"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32)
         self.observation_space = gym.spaces.Dict(observation_spaces)
 
-        self.action_space = gym.spaces.Box(
-                low=[-1] * 7,
-                high=[1] * 7,
-                shape=(7,),
-                dtype=np.float32,
+        action_space_robot = gym.spaces.Box(
+            low=np.array([-1] * 7),
+            high=np.array([1] * 7),
+            shape=(7,),
+            dtype=np.float32,
             )
+        self.action_space = gym.spaces.Tuple(
+            (
+                action_space_robot,
+                gym.spaces.Discrete(2),
+            ),
+        )
 
         # boundary box
+        lower_bounds = np.array(self.ee_action_space_params["bounds"]["min"])
+        upper_bounds = np.array(self.ee_action_space_params["bounds"]["max"])
         self.xyz_bounding_box = gym.spaces.Box(
-            self.ee_action_space_params["bounds"]["min"][:3],
-            self.ee_action_space_params["bounds"]["max"][:3],
+            low=lower_bounds[:3],
+            high=upper_bounds[:3],
             dtype=np.float64,
         )
         self.rpy_bounding_box = gym.spaces.Box(
-            self.ee_action_space_params["bounds"]["min"][3:],
-            self.ee_action_space_params["bounds"]["max"][3:],
+            low=lower_bounds[3:],
+            high=upper_bounds[3:],
             dtype=np.float64,
         )
-
-    def _clip_safety_box(self, pose: np.ndarray) -> np.ndarray:
-        """Clip the pose to be within the safety box."""
-        pose[:3] = np.clip(
-            pose[:3], self.xyz_bounding_box.low, self.xyz_bounding_box.high
-        )
-        euler = R.from_quat(pose[3:]).as_euler("xyz")
-
-        # Clip first euler angle separately due to discontinuity from pi to -pi
-        sign = np.sign(euler[0])
-        euler[0] = sign * (
-            np.clip(
-                np.abs(euler[0]),
-                self.rpy_bounding_box.low[0],
-                self.rpy_bounding_box.high[0],
-            )
-        )
-
-        euler[1:] = np.clip(
-            euler[1:], self.rpy_bounding_box.low[1:], self.rpy_bounding_box.high[1:]
-        )
-        pose[3:] = R.from_euler("xyz", euler).as_quat()
-
-        return pose
 
     def reset(
         self, seed=None, options=None
@@ -241,17 +239,20 @@ class HILSerlRobotEnv(gym.Env):
                     ◦ "action_intervention": The teleop action if intervention was used.
                     ◦ "is_intervention": Flag indicating whether teleoperation was employed.
         """
+        obs = self.robot.capture_observation()
+        self._update(obs=obs)
+
         # policy_action looks like (dx, dy, dz, dp, dr, dy, gripper)
         delta_action, intervention_bool = action
 
         teleop_action = None
         if intervention_bool:
             # Capture leader joints, ignore max_relative_target, last joint is gripper
-            follower_joint_positions = self.leader_arms["main"].read("Present_Position")
-            teleop_action = self._compute_delta_action(follower_joint_positions)
+            laeder_joint_positions = self.robot.leader_arms["main"].read("Present_Position")
+            teleop_action = self._compute_delta_action(laeder_joint_positions)
             delta_action = teleop_action.copy()
 
-        delta_action = np.clip(delta_action, self.action_space.low[0], self.action_space.high[0])
+        delta_action = np.clip(delta_action, self.action_space[0].low[0], self.action_space[0].high[0])
 
         # from [-1, 1] to step size
         delta_action *= self.action_scale
@@ -259,16 +260,18 @@ class HILSerlRobotEnv(gym.Env):
         # Gripper from [-gripper_step_size, gripper_step_size] -> [0, 2 * gripper_step_size]
         delta_action[6] += self.ee_action_space_params["gripper_step_size"]
 
+        delta_action[6] = 0.0
+
         if isinstance(delta_action, torch.Tensor):
-            delta_action = action.cpu().numpy()
+            delta_action = delta_action.cpu().numpy()
 
         # Update next pose
         self.next_tcp_pose = self.curr_tcp_pose.copy()
-        self.next_tcp_pose[:3, 3] = self.next_tcp_pose[:3] + delta_action[3:6]
+        self.next_tcp_pose[:3, 3] = self.next_tcp_pose[:3, 3] + delta_action[:3]
 
         # Get orientation from action
         self.next_tcp_pose[:3, :3] = (
-            R.from_euler("xyz", delta_action[3:6], degrees=False),
+            R.from_euler("xyz", delta_action[3:6], degrees=False)
             * R.from_matrix(self.curr_tcp_pose[:3, :3])
         ).as_matrix()
 
@@ -279,20 +282,17 @@ class HILSerlRobotEnv(gym.Env):
             fk_func=self.fk,
             gripper_pos=delta_action[6]
         )
-
         self.robot.send_action(torch.from_numpy(target_joint_positions))
 
-        obs = self.robot.capture_observation()
-        self._update(obs=obs)
         self.current_step += 1
 
         reward = 0.0
         terminated = False
         truncated = False
 
-        if self.animate_pose:
-            self.current_history.append(self.curr_tcp_pose[:3, 3])
-            self.target_history.append(desired_tcp_pose[:3, 3])
+        if self.display_lag:
+            self.current_history.append(self.curr_tcp_pose)
+            self.target_history.append(desired_tcp_pose)
 
         return (
             obs,
@@ -311,30 +311,43 @@ class HILSerlRobotEnv(gym.Env):
         """
         import cv2
 
-        observation = self.robot.capture_observation()
-        image_keys = [key for key in observation if "image" in key]
+        if self.display_cameras:
+            observation = self.robot.capture_observation()
+            image_keys = [key for key in observation if "image" in key]
 
-        for key in image_keys:
-            cv2.imshow(key, cv2.cvtColor(observation[key].numpy(), cv2.COLOR_RGB2BGR))
-            cv2.waitKey(1)
+            for key in image_keys:
+                cv2.imshow(key, cv2.cvtColor(observation[key].numpy(), cv2.COLOR_RGB2BGR))
+                cv2.waitKey(1)
 
-        if self.animate_pose:
-            plt.ion()
-            fig, axs = plt.subplots(3, 1, figsize=(8, 6))
+        if self.display_lag:
             labels = ['X', 'Y', 'Z']
-            while not self._stop_event.is_set():
-                if len(self.current_history) > 0:
-                    current_arr = np.array(self.current_history)
-                    target_arr = np.array(self.target_history)
-                    for i in range(3):
-                        axs[i].clear()
-                        axs[i].plot(current_arr[:, i], label='Current')
-                        axs[i].plot(target_arr[:, i], label='Target')
-                        axs[i].set_ylabel(labels[i])
-                        axs[i].legend()
-                    axs[2].set_xlabel('Timesteps')
-                    plt.pause(0.01)
-            plt.ioff()
+            if len(self.current_history) > 0:
+                current_arr = np.array(self.current_history)
+                target_arr = np.array(self.target_history)
+                for i in range(3):
+                    self.pos_axs[i].clear()
+                    self.pos_axs[i].plot(current_arr[:, i, 3], label='Current')
+                    self.pos_axs[i].plot(target_arr[:, i, 3], label='Target')
+                    self.pos_axs[i].set_ylabel(labels[i])
+                    self.pos_axs[i].axhline(y=self.xyz_bounding_box.low[i], color='k', linestyle='--')
+                    self.pos_axs[i].axhline(y=self.xyz_bounding_box.high[i], color='k', linestyle='--')
+                    self.pos_axs[i].legend()
+                self.pos_axs[2].set_xlabel('Timesteps')
+
+            labels = ['RX', 'RY', 'RZ']
+            if len(self.current_history) > 0:
+                current_arr = R.from_matrix(np.array(self.current_history)[:, :3, :3]).as_euler("xyz")
+                target_arr = R.from_matrix(np.array(self.target_history)[:, :3, :3]).as_euler("xyz")
+                for i in range(3):
+                    self.rot_axs[i].clear()
+                    self.rot_axs[i].plot(current_arr[:, i], label='Current')
+                    self.rot_axs[i].plot(target_arr[:, i], label='Target')
+                    self.rot_axs[i].set_ylabel(labels[i])
+                    self.rot_axs[i].axhline(y=self.rpy_bounding_box.low[i], color='k', linestyle='--')
+                    self.rot_axs[i].axhline(y=self.rpy_bounding_box.high[i], color='k', linestyle='--')
+                    self.rot_axs[i].legend()
+                self.rot_axs[2].set_xlabel('Timesteps')
+                plt.pause(0.003)
 
     def close(self):
         """
@@ -345,6 +358,7 @@ class HILSerlRobotEnv(gym.Env):
         """
         if self.robot.is_connected:
             self.robot.disconnect()
+        plt.ioff()
 
     def _update(self, obs=None):
         if obs is None:
@@ -352,9 +366,35 @@ class HILSerlRobotEnv(gym.Env):
 
         self.curr_q = obs['observation.state'].detach().cpu().numpy()
         self.curr_tcp_pose = self.fk(self.curr_q)
-        self.curr_tcp_vel = self.jacobian(self.curr_q, fk_func=self.fk) @ obs['observation.joint_vel'].detach().cpu().numpy()
 
-    def _compute_delta_action(self, follower_joint_positions: np.ndarray) -> np.ndarray:
+        q_dot = self.preprocess_q_dot(obs['observation.joint_vel'].detach().cpu().numpy())
+        self.curr_tcp_vel = self.jacobian(self.curr_q, fk_func=self.fk) @ q_dot
+
+
+    def _clip_safety_box(self, pose: np.ndarray) -> np.ndarray:
+        """Clip the pose to be within the safety box."""
+        pose[:3, 3] = np.clip(
+            pose[:3, 3], self.xyz_bounding_box.low, self.xyz_bounding_box.high
+        )
+        euler = R.from_matrix(pose[:3, :3]).as_euler("xyz")
+
+        # Clip first euler angle separately due to discontinuity from pi to -pi
+        sign = np.sign(euler[0])
+        euler[0] = sign * (
+            np.clip(
+                np.abs(euler[0]),
+                self.rpy_bounding_box.low[0],
+                self.rpy_bounding_box.high[0],
+            )
+        )
+
+        euler[1:] = np.clip(
+            euler[1:], self.rpy_bounding_box.low[1:], self.rpy_bounding_box.high[1:]
+        )
+        pose[:3, :3] = R.from_euler("xyz", euler).as_matrix()
+        return pose
+
+    def _compute_delta_action(self, leader_joint_positions: np.ndarray) -> np.ndarray:
         """
         Compute the delta action needed to move from the current end-effector pose to the desired pose.
 
@@ -369,7 +409,7 @@ class HILSerlRobotEnv(gym.Env):
                 the next 3 are the Euler angle differences (in radians),
                 and the last element is the gripper action.
         """
-        desired_pose = self.fk(follower_joint_positions)
+        desired_pose = self.fk(leader_joint_positions)
 
         # Compute the position difference
         delta_pos = desired_pose[:3, 3] - self.curr_tcp_pose[:3, 3]
@@ -380,6 +420,7 @@ class HILSerlRobotEnv(gym.Env):
         delta_rpy = relative_rot.as_euler('xyz', degrees=False)
 
         # Concatenate into a single delta action vector
+        gripper_pos = leader_joint_positions[-1]
         delta_action = np.concatenate([delta_pos, delta_rpy, [gripper_pos]])
 
         # Gripper from [0, 2 * gripper_step_size] -> [-gripper_step_size, gripper_step_size]
@@ -390,10 +431,11 @@ class HILSerlRobotEnv(gym.Env):
 
         # Respect bounds while preserving directions
         delta_action[:3] = self._clip_delta_teleop_action_component(delta_action[:3])
-        delta_action[3:6] = self._clip_delta_teleop_action_component(delta_action[:3])
+        delta_action[3:6] = self._clip_delta_teleop_action_component(delta_action[3:6])
         delta_action[6] = np.clip(delta_action[6], -1.0, 1.0)
 
         return delta_action
+
     def _clip_delta_teleop_action_component(self, action_component):
         max_val = np.max(np.abs(action_component))
         if max_val > 1.0:
@@ -780,7 +822,7 @@ class KeyboardInterfaceWrapper(gym.Wrapper):
             # Move the leader arm to the follower position
             if not self.events["leader_synced"]:
                 robot.leader_arms["main"].write("Torque_Enable", TorqueMode.ENABLED.value)
-                reset_follower_position(robot.leader_arms["main"], robot.follower_arms["main"].read("Present_Position"))
+                reset_leader_position(robot, robot.follower_arms["main"].read("Present_Position"))
 
             # Now, wait for human_intervention_step without holding the lock
             while True:
@@ -932,7 +974,8 @@ def make_robot_env(
     env = HILSerlRobotEnv(
         robot=robot,
         display_cameras=cfg.env.wrapper.display_cameras,
-        ee_action_space_params=cfg.env.ee_action_space_params
+        display_lag=cfg.env.wrapper.display_lag,
+        ee_action_space_params=cfg.env.wrapper.ee_action_space_params
     )
 
     env = ConvertToLeRobotObservation(env=env, device=cfg.env.device)
@@ -1182,7 +1225,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--control-time-s",
         type=float,
-        default=20,
+        default=60,
         help="Maximum episode length in seconds",
     )
     parser.add_argument(
@@ -1282,7 +1325,7 @@ if __name__ == "__main__":
 
     # Smoothing coefficient (alpha) defines how much of the new random sample to mix in.
     # A value close to 0 makes the trajectory very smooth (slow to change), while a value close to 1 is less smooth.
-    alpha = 0.5
+    alpha = 0.25
 
     num_episode = 0
     sucesses = []
@@ -1301,6 +1344,8 @@ if __name__ == "__main__":
             sucesses.append(reward)
             env.reset()
             num_episode += 1
+
+        env.render()
 
         dt_s = time.perf_counter() - start_loop_s
         busy_wait(1 / args.fps - dt_s)

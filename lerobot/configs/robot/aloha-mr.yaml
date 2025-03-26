@@ -32,7 +32,7 @@ leader_model: wx250s
 # then to gradually add more motors (by uncommenting), until you can teleoperate both arms fully
 max_relative_target: 25
 
-moving_time: null
+moving_time: 0.2
 
 leader_arms:
   main:

@@ -393,6 +393,16 @@ def reset_follower_position(robot: Robot, target_position):
         busy_wait(0.015)
 
 
+def reset_leader_position(robot: Robot, target_position):
+    current_position = robot.leader_arms["main"].read("Present_Position")
+    trajectory = torch.from_numpy(
+        np.linspace(current_position, target_position, 50)
+    )  # NOTE: 30 is just an aribtrary number
+    for pose in trajectory:
+        robot.leader_arms["main"].write("Goal_Position", pose.numpy().astype(np.int32))
+        busy_wait(0.015)
+
+
 def stop_recording(robot, listener, display_cameras):
     robot.disconnect()
 

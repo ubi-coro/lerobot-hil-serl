@@ -371,10 +371,11 @@ class ManipulatorRobot:
 
         # We assume that at connection time, arms are in a rest position, and torque can
         # be safely disabled to run calibration and/or set robot preset configurations.
-        for name in self.follower_arms:
-            self.follower_arms[name].write("Torque_Enable", TorqueMode.DISABLED.value)
-        for name in self.leader_arms:
-            self.leader_arms[name].write("Torque_Enable", TorqueMode.DISABLED.value)
+        # I do not make this assumption!
+        #for name in self.follower_arms:
+        #    self.follower_arms[name].write("Torque_Enable", TorqueMode.DISABLED.value)
+        #for name in self.leader_arms:
+        #    self.leader_arms[name].write("Torque_Enable", TorqueMode.DISABLED.value)
 
         self.activate_calibration()
 
@@ -438,6 +439,10 @@ class ManipulatorRobot:
             else:
                 # TODO(rcadene): display a warning in __init__ if calibration file not available
                 print(f"Missing calibration file '{arm_calib_path}'")
+
+                if not arm.read("Torque_Enable") != TorqueMode.DISABLED.value:
+                    print(f"Press <enter> to disable the torque of {self.robot_type} {name} {arm_type}... ")
+                    arm.write("Torque_Enable", TorqueMode.DISABLED.value)
 
                 if self.robot_type in ["koch", "koch_bimanual", "aloha"]:
                     from lerobot.common.robot_devices.robots.dynamixel_calibration import (

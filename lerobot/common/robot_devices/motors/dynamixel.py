@@ -488,7 +488,7 @@ class DynamixelMotorsBus:
                 # (e.g. 2048 / (4096 // 2) * 180 = 180)
                 values[i] = values[i] / (resolution // 2) * HALF_TURN_DEGREE
 
-                if (values[i] < LOWER_BOUND_DEGREE) or (values[i] > UPPER_BOUND_DEGREE):
+                if not is_velocity and ( (values[i] < LOWER_BOUND_DEGREE) or (values[i] > UPPER_BOUND_DEGREE) ):
                     raise JointOutOfRangeError(
                         f"Wrong motor position range detected for {name}. "
                         f"Expected to be in nominal range of [-{HALF_TURN_DEGREE}, {HALF_TURN_DEGREE}] degrees (a full rotation), "
@@ -509,7 +509,7 @@ class DynamixelMotorsBus:
 
                 values[i] = values[i] / (end_pos - start_pos) * 100
 
-                if (values[i] < LOWER_BOUND_LINEAR) or (values[i] > UPPER_BOUND_LINEAR):
+                if not is_velocity and ( (values[i] < LOWER_BOUND_LINEAR) or (values[i] > UPPER_BOUND_LINEAR) ):
                     raise JointOutOfRangeError(
                         f"Wrong motor position range detected for {name}. "
                         f"Expected to be in nominal range of [0, 100] % (a full linear translation), "
