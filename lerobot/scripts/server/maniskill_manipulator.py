@@ -179,14 +179,15 @@ if __name__ == "__main__":
         cfg = hydra.compose(config_name="env/maniskill_example.yaml")
 
     env = make_maniskill(
-        task=cfg.env.task,
-        obs_mode=cfg.env.obs,
-        control_mode=cfg.env.control_mode,
-        render_mode=cfg.env.render_mode,
-        sensor_configs={"width": cfg.env.render_size, "height": cfg.env.render_size},
+        cfg,
+        n_envs=1
     )
 
     print("env done")
     obs, info = env.reset()
-    random_action = env.action_space.sample()
-    obs, reward, terminated, truncated, info = env.step(random_action)
+    import time
+    while True:
+        random_action = env.action_space.sample()
+        obs, reward, terminated, truncated, info = env.step(random_action)
+        env.render()
+        time.sleep(0.1)

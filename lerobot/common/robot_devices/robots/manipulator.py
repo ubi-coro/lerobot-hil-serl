@@ -387,7 +387,10 @@ class ManipulatorRobot:
         elif self.robot_type in ["so100", "moss"]:
             self.set_so100_robot_preset()
 
-        # Enable torque on all motors of the follower arms
+        # Disable torque on all leaders, enable torque on all follower arms
+        for name in self.leader_arms:
+            print(f"Deactivating torque on {name} leader arm.")
+            self.leader_arms[name].write("Torque_Enable", TorqueMode.DISABLED.value)
         for name in self.follower_arms:
             print(f"Activating torque on {name} follower arm.")
             self.follower_arms[name].write("Torque_Enable", 1)
@@ -428,6 +431,10 @@ class ManipulatorRobot:
         Rotations are expressed in degrees in nominal range of [-180, 180],
         and linear motions (like gripper of Aloha) in nominal range of [0, 100].
         """
+        if self.robot_type in ["koch", "koch_bimanual", "aloha"]:
+            from lerobot.common.robot_devices.motors.dynamixel import TorqueMode
+        elif self.robot_type in ["so100", "moss", "lekiwi"]:
+            from lerobot.common.robot_devices.motors.feetech import TorqueMode
 
         def load_or_run_calibration_(name, arm, arm_type):
             arm_id = get_arm_id(name, arm_type)
@@ -440,7 +447,7 @@ class ManipulatorRobot:
                 # TODO(rcadene): display a warning in __init__ if calibration file not available
                 print(f"Missing calibration file '{arm_calib_path}'")
 
-                if not arm.read("Torque_Enable") != TorqueMode.DISABLED.value:
+                if not all(arm.read("Torque_Enable") == TorqueMode.DISABLED.value):
                     print(f"Press <enter> to disable the torque of {self.robot_type} {name} {arm_type}... ")
                     arm.write("Torque_Enable", TorqueMode.DISABLED.value)
 

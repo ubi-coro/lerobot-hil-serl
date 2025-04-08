@@ -353,7 +353,6 @@ def control_loop(
 
         dt_s = time.perf_counter() - start_loop_t
         #log_control_info(robot, dt_s, fps=fps)
-        print(robot.follower_arms["main"].read("Present_Position"))
 
         timestamp = time.perf_counter() - start_episode_t
         if events["exit_early"]:

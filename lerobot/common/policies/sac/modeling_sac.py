@@ -119,8 +119,8 @@ class SACPolicy(
 
         self.critic_target.load_state_dict(self.critic_ensemble.state_dict())
 
-        self.critic_ensemble = torch.compile(self.critic_ensemble)
-        self.critic_target = torch.compile(self.critic_target)
+        #self.critic_ensemble = torch.compile(self.critic_ensemble)
+        #self.critic_target = torch.compile(self.critic_target)
 
         self.actor = Policy(
             encoder=encoder_actor,

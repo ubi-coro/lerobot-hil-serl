@@ -150,8 +150,7 @@ class HILSerlRobotEnv(gym.Env):
             else:
                 observation_spaces[key] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=feature["shape"], dtype=np.float32)
 
-        observation_spaces["observation.tcp_pose"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32)
-        observation_spaces["observation.tcp_vel"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32)
+        observation_spaces["observation.state"] = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32)
         self.observation_space = gym.spaces.Dict(observation_spaces)
 
         action_space_robot = gym.spaces.Box(
@@ -249,8 +248,8 @@ class HILSerlRobotEnv(gym.Env):
         if intervention_bool:
             # Capture leader joints, ignore max_relative_target, last joint is gripper
             laeder_joint_positions = self.robot.leader_arms["main"].read("Present_Position")
-            teleop_action = self._compute_delta_action(laeder_joint_positions)
-            delta_action = teleop_action.copy()
+            delta_action = self._compute_delta_action(laeder_joint_positions)
+            teleop_action = torch.from_numpy(delta_action)
 
         delta_action = np.clip(delta_action, self.action_space[0].low[0], self.action_space[0].high[0])
 
@@ -286,6 +285,14 @@ class HILSerlRobotEnv(gym.Env):
 
         self.current_step += 1
 
+        # build final observation
+        obs_out = {key: obs[key] for key in obs if "images" in key}
+        obs_out["observation.state"] = torch.from_numpy(np.concatenate([
+            self.curr_tcp_pose[:3, 3],
+            R.from_matrix(self.curr_tcp_pose[:3, :3]).as_euler("xyz"),
+            [self.curr_q[-1]]
+        ]))
+
         reward = 0.0
         terminated = False
         truncated = False
@@ -295,7 +302,7 @@ class HILSerlRobotEnv(gym.Env):
             self.target_history.append(desired_tcp_pose)
 
         return (
-            obs,
+            obs_out,
             reward,
             terminated,
             truncated,
@@ -485,7 +492,7 @@ class RewardWrapper(gym.Wrapper):
         start_time = time.perf_counter()
         with torch.inference_mode():
             reward = (
-                self.reward_classifier.predict_reward(images, threshold=0.8)
+                self.reward_classifier.predict_reward(images, threshold=0.9)
                 if self.reward_classifier is not None
                 else 0.0
             )
@@ -988,7 +995,7 @@ def make_robot_env(
         )
 
     # Add reward computation and control wrappers
-    # env = RewardWrapper(env=env, reward_classifier=reward_classifier, device=cfg.device)
+    env = RewardWrapper(env=env, reward_classifier=reward_classifier, device=cfg.device)
     env = TimeLimitWrapper(env=env, control_time_s=cfg.env.wrapper.control_time_s, fps=cfg.fps)
     env = KeyboardInterfaceWrapper(env=env)
     env = ResetWrapper(
@@ -1000,7 +1007,7 @@ def make_robot_env(
     return env
 
 
-def get_classifier(pretrained_path, config_path, device="mps"):
+def get_classifier(pretrained_path, config_path, device="cuda"):
     if pretrained_path is None or config_path is None:
         return None
 
@@ -1114,18 +1121,20 @@ def record_dataset(
             if info.get("rerecord_episode", False):
                 break
 
-            # For teleop, get action from intervention
-            if policy is None:
-                action = {
-                    "action": info["action_intervention"].cpu().squeeze(0).float()
-                }
-
             # Process observation for dataset
             obs = {k: v.cpu().squeeze(0).float() for k, v in obs.items()}
 
+            # For teleop, get action from intervention
+            if policy is None:
+                if info["action_intervention"] is None:
+                    continue
+
+                frame = {**obs, "action": info["action_intervention"].cpu().squeeze(0).float()}
+            else:
+                frame = {**obs, **action}
+
             # Add frame to dataset
-            frame = {**obs, **action}
-            frame["next.reward"] = reward
+            frame["next.reward"] = reward.cpu()
             frame["next.done"] = terminated or truncated
             dataset.add_frame(frame)
 
@@ -1270,13 +1279,13 @@ if __name__ == "__main__":
     robot_cfg = init_hydra_config(args.robot_path, args.robot_overrides)
     robot = make_robot(robot_cfg)
 
-    reward_classifier = None
-    #reward_classifier = get_classifier(
-    #    args.reward_classifier_pretrained_path, args.reward_classifier_config_file
-    #)
-    user_relative_joint_positions = True
-
     cfg = init_hydra_config(args.env_path, args.env_overrides)
+
+    reward_classifier = None
+    reward_classifier = get_classifier(
+        cfg.env.reward_classifier.pretrained_path, cfg.env.reward_classifier.config_path
+    )
+
     env = make_robot_env(
         robot,
         reward_classifier,
