@@ -53,11 +53,13 @@ class Reach1DEnv(BaseEnv):
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         with torch.device(self.device):
+            # the initialization functions where you as a user place all the objects and initialize their properties
+            # are designed to support partial resets, where you generate initial state for a subset of the environments.
+            # this is done by using the env_idx variable, which also tells you the batch size
+            b = len(env_idx)
+            # when using scene builders, you must always call .initialize on them so they can set the correct poses of objects in the prebuilt scene
+            # note that the table scene is built such that z=0 is the surface of the table.
             self.table_scene.initialize(env_idx)
-            # Initialize the robot's pose so that the goal can be reached
-            self.agent.reset()
-            initial_pose = self.target_x - 0.1  # Start slightly away from the target
-            self.agent.set_joint_positions([initial_pose])
 
     def evaluate(self):
         tcp_x = self.agent.tcp.pose.p[..., 0]
@@ -127,32 +129,22 @@ class KeyboardControlWrapper(gym.Wrapper):
         overwrite_action = [self.action]
 
         obs, reward, done, info = self.env.step(overwrite_action)
-        return obs, reward, done, info
+        return obs, reward, self.done, info
 
 
-
-# Test function to load the environment and control it with the keyboard
-def test_keyboard_control():
-    env = Reach1DEnv(target_x=0.6, render_mode="human")
-    env = KeyboardControlWrapper(env)
-    env.run()
-
-
-# Uncomment the following line to run the test
-# test_keyboard_control()
 if __name__ == "__main__":
     import time
 
     fps = 30
 
     env = Reach1DEnv(target_x=0.6, render_mode="human")
-    env = ActionMaskingWrapper(env)
-    env = KeyboardControlWrapper(env)
+    #env = ActionMaskingWrapper(env)
+    #env = KeyboardControlWrapper(env)
 
     done = False
     while not done:
         action = np.zeros(env.action_space.shape)
-        obs, reward, done, info = env.step(action)
+        obs, reward, done, _, info = env.step(action)
         env.render()
         time.sleep(1 / fps) # Control the frame rate
 
