@@ -11,9 +11,9 @@ env:
   action_dim: 7
   fps: ${fps}
   obs: rgb
-  render_mode: rgb_array
+  render_mode: human
   render_size: 64
-  device: cuda
+  device: cpu
 
   reward_classifier:
     pretrained_path: null

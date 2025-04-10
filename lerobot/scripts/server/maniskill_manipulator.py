@@ -138,6 +138,7 @@ def make_maniskill(
         obs_mode=cfg.env.obs,
         control_mode=cfg.env.control_mode,
         render_mode=cfg.env.render_mode,
+        render_backend='sapien_cpu',
         sensor_configs={"width": cfg.env.image_size, "height": cfg.env.image_size},
         num_envs=n_envs,
     )
@@ -177,6 +178,8 @@ if __name__ == "__main__":
     # Initialize config
     with hydra.initialize(version_base=None, config_path="../../configs"):
         cfg = hydra.compose(config_name="env/maniskill_example.yaml")
+
+    cfg.env.device = "cpu"
 
     env = make_maniskill(
         cfg,
