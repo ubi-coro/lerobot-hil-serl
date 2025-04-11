@@ -77,6 +77,16 @@ def make_maniskill_env(
 ) -> gym.vector.VectorEnv | None:
     """Make ManiSkill3 gym environment"""
     from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
+    import lerobot.scripts.server.one_dim_manipulator
+    from lerobot.scripts.server.one_dim_manipulator import (
+        StabilizingActionMaskingWrapper,
+        ManiSkillActionWrapper,
+        ManiSkillObservationWrapper,
+        ManiSkillCompat,
+        ManiSkillMultiplyActionWrapper,
+        RecordEpisode,
+        KeyboardControlWrapper
+    )
 
     env = gym.make(
         cfg.env.task,
@@ -86,17 +96,33 @@ def make_maniskill_env(
         sensor_configs=dict(width=cfg.env.image_size, height=cfg.env.image_size),
         num_envs=n_envs,
     )
-    # cfg.env_cfg.control_mode = cfg.eval_env_cfg.control_mode = env.control_mode
+    env._max_episode_steps = env.max_episode_steps = (
+        50  # gym_utils.find_max_episode_steps_value(env)
+    )
+    if cfg.env.video_record.enabled:
+        env = RecordEpisode(
+            env,
+            output_dir=cfg.env.video_record.record_dir,
+            save_trajectory=True,
+            trajectory_name=cfg.env.video_record.trajectory_name,
+            save_video=True,
+            video_fps=30,
+        )
+    env = ManiSkillObservationWrapper(env, device=cfg.env.device)
     env = ManiSkillVectorEnv(env, ignore_terminations=True)
-    # state should have the size of 25
-    # env = ConvertToLeRobotEnv(env, n_envs)
-    # env = PixelWrapper(cfg, env, n_envs)
     env._max_episode_steps = env.max_episode_steps = (
         50  # gym_utils.find_max_episode_steps_value(env)
     )
     env.unwrapped.metadata["render_fps"] = 20
+    #env = ManiSkillCompat(env)
+    env = ManiSkillActionWrapper(env)
+    env = ManiSkillMultiplyActionWrapper(env, multiply_factor=0.01)
+    #if cfg.env.task == "Reach1D-v0":
+    env = StabilizingActionMaskingWrapper(env, ref_pose=np.array([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]), ax=[0, 1])
+    #env = KeyboardControlWrapper(env, ax=[0, 1])
 
     return env
+
 
 
 class PixelWrapper(gym.Wrapper):

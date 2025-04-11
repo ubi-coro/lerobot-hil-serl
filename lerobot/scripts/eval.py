@@ -42,6 +42,7 @@ https://huggingface.co/lerobot/diffusion_pusht/tree/main.
 """
 
 import argparse
+import os
 import json
 import logging
 import threading
@@ -123,7 +124,7 @@ def rollout(
     # Reset the policy and environments.
     policy.reset()
 
-    observation, info = env.reset(seed=seeds)
+    observation, info = env.reset(seed=seeds, options=dict())
     if render_callback is not None:
         render_callback(env)
 
@@ -136,7 +137,7 @@ def rollout(
     step = 0
     # Keep track of which environments are done.
     done = np.array([False] * env.num_envs)
-    max_steps = env.call("_max_episode_steps")[0]
+    max_steps = 50  #env.call("_max_episode_steps")[0]
     progbar = trange(
         max_steps,
         desc=f"Running rollout with at most {max_steps} steps",
@@ -145,13 +146,13 @@ def rollout(
     )
     while not np.all(done):
         # Numpy array to tensor and changing dictionary keys to LeRobot policy format.
-        observation = preprocess_observation(observation)
+        #observation = preprocess_observation(observation)
         if return_observations:
             all_observations.append(deepcopy(observation))
 
-        observation = {
-            key: observation[key].to(device, non_blocking=True) for key in observation
-        }
+        #observation = {
+        #    key: observation[key].to(device, non_blocking=True) for key in observation
+        #}
 
         with torch.inference_mode():
             action = policy.select_action(observation)
@@ -168,18 +169,15 @@ def rollout(
         # VectorEnv stores is_success in `info["final_info"][env_index]["is_success"]`. "final_info" isn't
         # available of none of the envs finished.
         if "final_info" in info:
-            successes = [
-                info["is_success"] if info is not None else False
-                for info in info["final_info"]
-            ]
+            successes = list(info["final_info"]["success"].numpy())
         else:
             successes = [False] * env.num_envs
 
         # Keep track of which environments are done so far.
-        done = terminated | truncated | done
+        done = (terminated | truncated | done).numpy()
 
         all_actions.append(torch.from_numpy(action))
-        all_rewards.append(torch.from_numpy(reward))
+        all_rewards.append(reward) #torch.from_numpy(reward))
         all_dones.append(torch.from_numpy(done))
         all_successes.append(torch.tensor(successes))
 
@@ -264,6 +262,7 @@ def eval_policy(
         # noqa: B023
         if n_episodes_rendered >= max_episodes_rendered:
             return
+
         n_to_render_now = min(max_episodes_rendered - n_episodes_rendered, env.num_envs)
         if isinstance(env, gym.vector.SyncVectorEnv):
             ep_frames.append(
@@ -560,6 +559,7 @@ def main(
     print(info["aggregated"])
 
     # Save info
+    os.makedirs(Path(out_dir))
     with open(Path(out_dir) / "eval_info.json", "w") as f:
         json.dump(info, f, indent=2)
 

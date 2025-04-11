@@ -13,7 +13,7 @@ env:
   obs: rgb
   render_mode: human
   render_size: 64
-  device: cpu
+  device: cuda
 
   reward_classifier:
     pretrained_path: null

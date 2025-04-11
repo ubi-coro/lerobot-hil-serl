@@ -16,6 +16,7 @@
 import functools
 import logging
 import random
+import time
 from pprint import pformat
 from typing import Callable, Optional, Sequence, TypedDict
 
@@ -401,11 +402,11 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
     # online_env = make_env(cfg, n_envs=1)
     # TODO: Remove the import of maniskill and unifiy with make env
     online_env = make_maniskill_env(cfg, n_envs=1)
-    if cfg.training.eval_freq > 0:
-        logging.info("make_env eval")
-        # eval_env = make_env(cfg, n_envs=1)
-        # TODO: Remove the import of maniskill and unifiy with make env
-        eval_env = make_maniskill_env(cfg, n_envs=1)
+    #if cfg.training.eval_freq > 0:
+    #    logging.info("make_env eval")
+    #    # eval_env = make_env(cfg, n_envs=1)
+    #    # TODO: Remove the import of maniskill and unifiy with make env
+    #    eval_env = make_maniskill_env(cfg, n_envs=1)
 
     # TODO: Add a way to resume training
 
@@ -449,12 +450,12 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
     logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
     logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
-    obs, info = online_env.reset()
+    obs, info = online_env.reset(options=dict())
 
     # HACK for maniskill
     # obs = preprocess_observation(obs)
-    obs = preprocess_maniskill_observation(obs)
-    obs = {key: obs[key].to(device, non_blocking=True) for key in obs}
+    #obs = preprocess_maniskill_observation(obs)
+    #obs = {key: obs[key].to(device, non_blocking=True) for key in obs}
 
     replay_buffer = ReplayBuffer(
         capacity=cfg.training.online_buffer_capacity,
@@ -488,14 +489,17 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
             action = online_env.action_space.sample()
             next_obs, reward, done, truncated, info = online_env.step(action)
             # HACK
-            action = torch.tensor(action, dtype=torch.float32).to(
+            action = torch.tensor(action[0], dtype=torch.float32).to(
                 device, non_blocking=True
-            )
+            ).unsqueeze(0)
+
+        online_env.render()
+        time.sleep(0.05)
 
         # HACK: For maniskill
         # next_obs = preprocess_observation(next_obs)
-        next_obs = preprocess_maniskill_observation(next_obs)
-        next_obs = {key: next_obs[key].to(device, non_blocking=True) for key in obs}
+        #next_obs = preprocess_maniskill_observation(next_obs)
+        #next_obs = {key: next_obs[key].to(device, non_blocking=True) for key in obs}
         sum_reward_episode += float(reward[0])
         # Because we are using a single environment
         # we can safely assume that the episode is done
@@ -509,10 +513,10 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
             sum_reward_episode = 0
             # HACK: This is for maniskill
             logging.info(
-                f"global step {interaction_step}: episode success: {info['success'].float().item()} \n"
+                f"global step {interaction_step}: episode success: {info['final_info']['success'].float().item()} \n"
             )
             logger.log_dict(
-                {"Episode success": info["success"].float().item()}, interaction_step
+                {"Episode success": info["final_info"]["success"].float().item()}, interaction_step
             )
 
         replay_buffer.add(
@@ -600,6 +604,28 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
             logger.log_dict(training_infos, interaction_step, mode="train")
 
         policy.update_target_networks()
+
+
+        if cfg.training.save_checkpoint and (
+            interaction_step % cfg.training.save_freq == 0
+            or interaction_step == cfg.training.online_steps
+        ):
+            logging.info(f"Checkpoint policy after step {interaction_step}")
+            # Note: Save with step as the identifier, and format it to have at least 6 digits but more if
+            # needed (choose 6 as a minimum for consistency without being overkill).
+            _num_digits = max(
+                6, len(str(cfg.training.online_steps))
+            )
+            step_identifier = f"{interaction_step:0{_num_digits}d}"
+
+            logger.save_checkpoint(
+                interaction_step,
+                policy,
+                optimizers,
+                lr_scheduler,
+                identifier=step_identifier,
+            )
+            logging.info("Resume training")
 
 
 @hydra.main(version_base="1.2", config_name="default", config_path="../configs")
