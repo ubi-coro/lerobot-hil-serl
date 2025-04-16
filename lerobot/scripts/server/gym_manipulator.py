@@ -968,10 +968,10 @@ def make_robot_env(
     from omegaconf import OmegaConf
 
     if "maniskill" in cfg.env.name:
-        from lerobot.scripts.server.maniskill_manipulator import make_maniskill
+        from lerobot.common.envs.factory import make_maniskill_env
 
         logging.warning("WE SHOULD REMOVE THE MANISKILL BEFORE THE MERGE INTO MAIN")
-        env = make_maniskill(
+        env = make_maniskill_env(
             cfg=cfg,
             n_envs=1,
         )

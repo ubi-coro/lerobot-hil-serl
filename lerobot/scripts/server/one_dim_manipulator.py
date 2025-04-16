@@ -343,22 +343,18 @@ class KeyboardControlWrapper(gym.Wrapper):
     def _on_press(self, key):
         try:
             if key == keyboard.Key.right:
-                self.action[0] = 1.0  # Move right (X-axis)
-                self.intervention = True
+                self.action[0] = -1.0  # Move right (X-axis)
             elif key == keyboard.Key.left:
-                self.action[0] = -1.0  # Move left (X-axis)
-                self.intervention = True
+                self.action[0] = 1.0  # Move left (X-axis)
             elif key == keyboard.Key.up:
-                self.action[1] = 1.0  # Move up (Y-axis)
-                self.intervention = True
+                self.action[1] = -1.0  # Move up (Y-axis)
             elif key == keyboard.Key.down:
-                self.action[1] = -1.0  # Move down (Y-axis)
-                self.intervention = True
+                self.action[1] = 1.0  # Move down (Y-axis)
             elif key == keyboard.Key.page_up:
                 self.action[2] = 1.0  # Move up (Z-axis) with Shift
-                self.intervention = True
             elif key == keyboard.Key.page_down:
                 self.action[2] = -1.0  # Move down (Z-axis) with Shift
+            elif key == keyboard.Key.space:
                 self.intervention = True
             elif key == keyboard.Key.esc:
                 self.done = True  # Exit the loop
@@ -372,9 +368,8 @@ class KeyboardControlWrapper(gym.Wrapper):
             self.action[1] = 0.0  # Stop movement along Y-axis
         if key in [keyboard.Key.page_up, keyboard.Key.page_down]:
             self.action[2] = 0.0  # Stop movement along Z-axis
-
-        if not self.action[0] and not self.action[1]:
-            self.intervention = False  # Stop intervention when no keys are pressed
+        if key == keyboard.Key.space:
+            self.intervention = False
 
     def step(self, action):
         """
@@ -386,11 +381,16 @@ class KeyboardControlWrapper(gym.Wrapper):
             telop = self.intervention
 
         if telop:
+            action = np.zeros_like(action)
             for i, ax in enumerate(self.axes):
                 action[ax] = self.action[i]
 
-
         obs, reward, done, vec, info = self.env.step(action)
+
+        if telop:
+            info["is_intervention"] = telop
+            info["action_intervention"] = torch.from_numpy(action)
+
         return obs, reward, self.done or done, vec, info
 
 
@@ -470,59 +470,70 @@ def rollout(args):
     )
 
     assert isinstance(policy, nn.Module)
-    policy.eval()
+    #policy.eval()
 
-    with (
-        torch.no_grad(),
-        torch.autocast(device_type=get_safe_torch_device(hydra_cfg.device, log=True).type) if hydra_cfg.use_amp else nullcontext(),
-    ):
-        policy.reset()
-        observation, info = env.reset(options=dict())
-        done = False
-        steps = 0
-        while not done:
-            with torch.inference_mode():
-                action = policy.select_action(observation)
+    observation, info = env.reset(options=dict())
+    done = False
+    steps = 0
+    while not done:
+        action = policy.select_action(observation)
 
-            # Convert to CPU / numpy.
-            action = action.to("cpu").numpy()
-            assert action.ndim == 2, "Action dimensions should be (batch, action_dim)"
+        # Convert to CPU / numpy.
+        action = action.to("cpu").numpy()
+        assert action.ndim == 2, "Action dimensions should be (batch, action_dim)"
 
-            # Apply the next action.
-            observation, reward, terminated, truncated, info = env.step(action)
+        # Apply the next action.
+        observation, reward, terminated, truncated, info = env.step(action)
 
-            env.render()
+        env.render()
 
-            done = terminated | truncated | done
+        done = terminated | truncated | done
 
-            time.sleep(0.05)
+        time.sleep(0.05)
 
-            steps += 1
+        steps += 1
 
     env.close()
 
 
 def explore(args):
+    import lerobot.common.envs.aloha
 
     # Initialize config
     with hydra.initialize(version_base=None, config_path="../../configs"):
-        cfg = hydra.compose(config_name="env/maniskill_example.yaml")
+        cfg = hydra.compose(config_name="env/gym_aloha_pushcube.yaml")
+
+
+    import matplotlib.pyplot as plt
+
+
 
     env = make_env(
         cfg,
         n_envs=1
     )
+    obs, info = env.reset(options=dict())
 
     print("env done")
 
-    obs, info = env.reset(options=dict())
+    plt.ion()  # Turn on interactive mode
+    fig, ax = plt.subplots()
+    im = ax.imshow(env.render())  # Initial frame
+
+
     while True:
         random_action = env.action_space.sample()
-        zero_action = np.zeros_like(random_action[0])
-        obs, reward, terminated, truncated, info = env.step(zero_action)
+        if isinstance(random_action, tuple):
+            random_action = random_action[0]
+        zero_action = np.zeros_like(random_action)
+        obs, reward, terminated, truncated, info = env.step(random_action)
         print(reward)
-        env.render()
+        frame = env.render()
+        im.set_data(frame)
         time.sleep(0.05)
+
+        plt.draw()
+        plt.pause(0.001)
     env.close()
 
 

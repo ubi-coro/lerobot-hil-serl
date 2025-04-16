@@ -133,7 +133,7 @@ def make_maniskill(
         A wrapped ManiSkill environment
     """
     import lerobot.scripts.server.one_dim_manipulator
-    from lerobot.scripts.server.one_dim_manipulator import StabilizingActionMaskingWrapper
+    from lerobot.scripts.server.one_dim_manipulator import StabilizingActionMaskingWrapper, KeyboardControlWrapper
 
     env = gym.make(
         cfg.env.task,
@@ -163,8 +163,8 @@ def make_maniskill(
     env = ManiSkillCompat(env)
     env = ManiSkillActionWrapper(env)
     env = ManiSkillMultiplyActionWrapper(env, multiply_factor=0.03)
-    if cfg.env.task == "Reach1D-v0":
-        env = StabilizingActionMaskingWrapper(env)
+    env = StabilizingActionMaskingWrapper(env)
+    env = KeyboardControlWrapper
 
     return env
 

@@ -328,7 +328,7 @@ def act_with_policy(
     policy = torch.compile(policy)
     assert isinstance(policy, nn.Module)
 
-    obs, info = online_env.reset()
+    obs, info = online_env.reset(options=dict())
 
     # NOTE: For the moment we will solely handle the case of a single environment
     sum_reward_episode = 0
@@ -374,6 +374,8 @@ def act_with_policy(
                 .unsqueeze(dim=0)
             )
 
+        online_env.render()
+
         sum_reward_episode += float(reward)
         # Increment total steps counter for intervention rate
         episode_total_steps += 1
@@ -384,6 +386,8 @@ def act_with_policy(
             # NOTE: The action space for demonstration before hand is with the full action space
             # but sometimes for example we want to deactivate the gripper
             action = info["action_intervention"]
+            del info["is_intervention"]
+            del info["action_intervention"]
             episode_intervention = True
             # Increment intervention steps counter
             episode_intervention_steps += 1
@@ -453,7 +457,7 @@ def act_with_policy(
             # Reset intervention counters
             episode_intervention_steps = 0
             episode_total_steps = 0
-            obs, info = online_env.reset()
+            obs, info = online_env.reset(options=dict())
 
         if cfg.fps is not None:
             dt_time = time.perf_counter() - start_time
@@ -537,7 +541,8 @@ def actor_cli(cfg: dict):
         mp.set_start_method("spawn")
 
     init_logging(log_file="actor.log")
-    robot = make_robot(cfg=cfg.robot)
+    #robot = make_robot(cfg=cfg.robot)
+    robot = None
 
     shutdown_event = setup_process_handlers(use_threads(cfg))
 
