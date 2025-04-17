@@ -1,3 +1,17 @@
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import enum
 import logging
 import math
@@ -8,10 +22,7 @@ from copy import deepcopy
 import numpy as np
 import tqdm
 
-from lerobot.common.robot_devices.utils import (
-    RobotDeviceAlreadyConnectedError,
-    RobotDeviceNotConnectedError,
-)
+from lerobot.common.robot_devices.utils import RobotDeviceAlreadyConnectedError, RobotDeviceNotConnectedError
 from lerobot.common.utils.utils import capture_timestamp_utc
 
 PROTOCOL_VERSION = 2.0
@@ -147,9 +158,7 @@ NUM_READ_RETRY = 10
 NUM_WRITE_RETRY = 10
 
 
-def convert_degrees_to_steps(
-    degrees: float | np.ndarray, models: str | list[str]
-) -> np.ndarray:
+def convert_degrees_to_steps(degrees: float | np.ndarray, models: str | list[str]) -> np.ndarray:
     """This function converts the degree range to the step range for indicating motors rotation.
     It assumes a motor achieves a full rotation by going from -180 degree position to +180.
     The motor resolution (e.g. 4096) corresponds to the number of steps needed to achieve a full rotation.
@@ -247,7 +256,7 @@ class DriveMode(enum.Enum):
 class CalibrationMode(enum.Enum):
     # Joints with rotational motions are expressed in degrees in nominal range of [-180, 180]
     DEGREE = 0
-    # Joints with linear motions (like gripper of Aloha) are experessed in nominal range of [0, 100]
+    # Joints with linear motions (like gripper of Aloha) are expressed in nominal range of [0, 100]
     LINEAR = 1
 
 
@@ -258,7 +267,6 @@ class JointOutOfRangeError(Exception):
 
 
 class DynamixelMotorsBus:
-    # TODO(rcadene): Add a script to find the motor indices without DynamixelWizzard2
     """
     The DynamixelMotorsBus class allows to efficiently read and write to the attached motors. It relies on
     the python dynamixel sdk to communicate with the motors. For more info, see the [Dynamixel SDK Documentation](https://emanual.robotis.com/docs/en/software/dynamixel/dynamixel_sdk/sample_code/python_read_write_protocol_2_0/#python-read-write-protocol-20).
@@ -280,10 +288,11 @@ class DynamixelMotorsBus:
     motor_index = 6
     motor_model = "xl330-m288"
 
-    motors_bus = DynamixelMotorsBus(
+    config = DynamixelMotorsBusConfig(
         port="/dev/tty.usbmodem575E0031751",
         motors={motor_name: (motor_index, motor_model)},
     )
+    motors_bus = DynamixelMotorsBus(config)
     motors_bus.connect()
 
     position = motors_bus.read("Present_Position")
@@ -299,23 +308,14 @@ class DynamixelMotorsBus:
 
     def __init__(
         self,
-        port: str,
-        motors: dict[str, tuple[int, str]],
-        extra_model_control_table: dict[str, list[tuple]] | None = None,
-        extra_model_resolution: dict[str, int] | None = None,
-        mock=False,
+        config: DynamixelMotorsBusConfig,
     ):
-        self.port = port
-        self.motors = motors
-        self.mock = mock
+        self.port = config.port
+        self.motors = config.motors
+        self.mock = config.mock
 
         self.model_ctrl_table = deepcopy(MODEL_CONTROL_TABLE)
-        if extra_model_control_table:
-            self.model_ctrl_table.update(extra_model_control_table)
-
         self.model_resolution = deepcopy(MODEL_RESOLUTION)
-        if extra_model_resolution:
-            self.model_resolution.update(extra_model_resolution)
 
         self.port_handler = None
         self.packet_handler = None
@@ -332,7 +332,7 @@ class DynamixelMotorsBus:
             )
 
         if self.mock:
-            import tests.mock_dynamixel_sdk as dxl
+            import tests.motors.mock_dynamixel_sdk as dxl
         else:
             import dynamixel_sdk as dxl
 
@@ -356,7 +356,7 @@ class DynamixelMotorsBus:
 
     def reconnect(self):
         if self.mock:
-            import tests.mock_dynamixel_sdk as dxl
+            import tests.motors.mock_dynamixel_sdk as dxl
         else:
             import dynamixel_sdk as dxl
 
@@ -384,9 +384,7 @@ class DynamixelMotorsBus:
         indices = []
         for idx in tqdm.tqdm(possible_ids):
             try:
-                present_idx = self.read_with_motor_ids(
-                    self.motor_models, [idx], "ID", num_retry=num_retry
-                )[0]
+                present_idx = self.read_with_motor_ids(self.motor_models, [idx], "ID", num_retry=num_retry)[0]
             except ConnectionError:
                 continue
 
@@ -402,9 +400,7 @@ class DynamixelMotorsBus:
     def set_bus_baudrate(self, baudrate):
         present_bus_baudrate = self.port_handler.getBaudRate()
         if present_bus_baudrate != baudrate:
-            print(
-                f"Setting bus baud rate to {baudrate}. Previously {present_bus_baudrate}."
-            )
+            print(f"Setting bus baud rate to {baudrate}. Previously {present_bus_baudrate}.")
             self.port_handler.setBaudRate(baudrate)
 
             if self.port_handler.getBaudRate() != baudrate:
@@ -576,12 +572,8 @@ class DynamixelMotorsBus:
                 # values[i] = (values[i] + homing_offset + resolution * factor) / (resolution // 2) * HALF_TURN_DEGREE
                 # - HALF_TURN_DEGREE <= (values[i] + homing_offset + resolution * factor) / (resolution // 2) * HALF_TURN_DEGREE <= HALF_TURN_DEGREE
                 # (- (resolution // 2) - values[i] - homing_offset) / resolution <= factor <= ((resolution // 2) - values[i] - homing_offset) / resolution
-                low_factor = (
-                    -(resolution // 2) - values[i] - homing_offset
-                ) / resolution
-                upp_factor = (
-                    (resolution // 2) - values[i] - homing_offset
-                ) / resolution
+                low_factor = (-(resolution // 2) - values[i] - homing_offset) / resolution
+                upp_factor = ((resolution // 2) - values[i] - homing_offset) / resolution
 
             elif CalibrationMode[calib_mode] == CalibrationMode.LINEAR:
                 start_pos = self.calibration["start_pos"][calib_idx]
@@ -589,9 +581,7 @@ class DynamixelMotorsBus:
 
                 # Convert from initial range to range [0, 100] in %
                 calib_val = (values[i] - start_pos) / (end_pos - start_pos) * 100
-                in_range = (calib_val > LOWER_BOUND_LINEAR) and (
-                    calib_val < UPPER_BOUND_LINEAR
-                )
+                in_range = (calib_val > LOWER_BOUND_LINEAR) and (calib_val < UPPER_BOUND_LINEAR)
 
                 # Solve this inequality to find the factor to shift the range into [0, 100] %
                 # values[i] = (values[i] - start_pos + resolution * factor) / (end_pos + resolution * factor - start_pos - resolution * factor) * 100
@@ -607,27 +597,19 @@ class DynamixelMotorsBus:
                     factor = math.ceil(low_factor)
 
                     if factor > upp_factor:
-                        raise ValueError(
-                            f"No integer found between bounds [{low_factor=}, {upp_factor=}]"
-                        )
+                        raise ValueError(f"No integer found between bounds [{low_factor=}, {upp_factor=}]")
                 else:
                     factor = math.ceil(upp_factor)
 
                     if factor > low_factor:
-                        raise ValueError(
-                            f"No integer found between bounds [{low_factor=}, {upp_factor=}]"
-                        )
+                        raise ValueError(f"No integer found between bounds [{low_factor=}, {upp_factor=}]")
 
                 if CalibrationMode[calib_mode] == CalibrationMode.DEGREE:
                     out_of_range_str = f"{LOWER_BOUND_DEGREE} < {calib_val} < {UPPER_BOUND_DEGREE} degrees"
                     in_range_str = f"{LOWER_BOUND_DEGREE} < {calib_val} < {UPPER_BOUND_DEGREE} degrees"
                 elif CalibrationMode[calib_mode] == CalibrationMode.LINEAR:
-                    out_of_range_str = (
-                        f"{LOWER_BOUND_LINEAR} < {calib_val} < {UPPER_BOUND_LINEAR} %"
-                    )
-                    in_range_str = (
-                        f"{LOWER_BOUND_LINEAR} < {calib_val} < {UPPER_BOUND_LINEAR} %"
-                    )
+                    out_of_range_str = f"{LOWER_BOUND_LINEAR} < {calib_val} < {UPPER_BOUND_LINEAR} %"
+                    in_range_str = f"{LOWER_BOUND_LINEAR} < {calib_val} < {UPPER_BOUND_LINEAR} %"
 
                 logging.warning(
                     f"Auto-correct calibration of motor '{name}' by shifting value by {abs(factor)} full turns, "
@@ -682,11 +664,9 @@ class DynamixelMotorsBus:
         values = np.round(values).astype(np.int32)
         return values
 
-    def read_with_motor_ids(
-        self, motor_models, motor_ids, data_name, num_retry=NUM_READ_RETRY
-    ):
+    def read_with_motor_ids(self, motor_models, motor_ids, data_name, num_retry=NUM_READ_RETRY):
         if self.mock:
-            import tests.mock_dynamixel_sdk as dxl
+            import tests.motors.mock_dynamixel_sdk as dxl
         else:
             import dynamixel_sdk as dxl
 
@@ -731,7 +711,7 @@ class DynamixelMotorsBus:
         start_time = time.perf_counter()
 
         if self.mock:
-            import tests.mock_dynamixel_sdk as dxl
+            import tests.motors.mock_dynamixel_sdk as dxl
         else:
             import dynamixel_sdk as dxl
 
@@ -787,9 +767,7 @@ class DynamixelMotorsBus:
             values = self.apply_calibration_autocorrect(values, motor_names, is_velocity=is_velocity)
 
         # log the number of seconds it took to read the data from the motors
-        delta_ts_name = get_log_name(
-            "delta_timestamp_s", "read", data_name, motor_names
-        )
+        delta_ts_name = get_log_name("delta_timestamp_s", "read", data_name, motor_names)
         self.logs[delta_ts_name] = time.perf_counter() - start_time
 
         # log the utc time at which the data was received
@@ -798,11 +776,9 @@ class DynamixelMotorsBus:
 
         return values
 
-    def write_with_motor_ids(
-        self, motor_models, motor_ids, data_name, values, num_retry=NUM_WRITE_RETRY
-    ):
+    def write_with_motor_ids(self, motor_models, motor_ids, data_name, values, num_retry=NUM_WRITE_RETRY):
         if self.mock:
-            import tests.mock_dynamixel_sdk as dxl
+            import tests.motors.mock_dynamixel_sdk as dxl
         else:
             import dynamixel_sdk as dxl
 
@@ -843,7 +819,7 @@ class DynamixelMotorsBus:
         start_time = time.perf_counter()
 
         if self.mock:
-            import tests.mock_dynamixel_sdk as dxl
+            import tests.motors.mock_dynamixel_sdk as dxl
         else:
             import dynamixel_sdk as dxl
 
@@ -896,9 +872,7 @@ class DynamixelMotorsBus:
             )
 
         # log the number of seconds it took to write the data to the motors
-        delta_ts_name = get_log_name(
-            "delta_timestamp_s", "write", data_name, motor_names
-        )
+        delta_ts_name = get_log_name("delta_timestamp_s", "write", data_name, motor_names)
         self.logs[delta_ts_name] = time.perf_counter() - start_time
 
         # TODO(rcadene): should we log the time before sending the write command?

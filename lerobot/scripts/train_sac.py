@@ -16,7 +16,6 @@
 import functools
 import logging
 import random
-import time
 from pprint import pformat
 from typing import Callable, Optional, Sequence, TypedDict
 
@@ -53,9 +52,7 @@ def make_optimizers_and_scheduler(cfg, policy):
         params=policy.critic_ensemble.parameters(), lr=policy.config.critic_lr
     )
     # We wrap policy log temperature in list because this is a torch tensor and not a nn.Module
-    optimizer_temperature = torch.optim.Adam(
-        params=[policy.log_alpha], lr=policy.config.critic_lr
-    )
+    optimizer_temperature = torch.optim.Adam(params=[policy.log_alpha], lr=policy.config.critic_lr)
     lr_scheduler = None
     optimizers = {
         "actor": optimizer_actor,
@@ -107,9 +104,7 @@ def random_crop_vectorized(images: torch.Tensor, output_size: tuple) -> torch.Te
     images_hwcn = images.permute(0, 2, 3, 1)  # (B, H, W, C)
 
     # Gather pixels
-    cropped_hwcn = images_hwcn[
-        torch.arange(B, device=images.device).view(B, 1, 1), rows, cols, :
-    ]
+    cropped_hwcn = images_hwcn[torch.arange(B, device=images.device).view(B, 1, 1), rows, cols, :]
     # cropped_hwcn => (B, crop_h, crop_w, C)
 
     cropped = cropped_hwcn.permute(0, 3, 1, 2)  # (B, C, crop_h, crop_w)
@@ -199,12 +194,8 @@ class ReplayBuffer:
         """
         # We convert the LeRobotDataset into a replay buffer, because it is more efficient to sample from
         # a replay buffer than from a lerobot dataset.
-        replay_buffer = cls(
-            capacity=len(lerobot_dataset), device=device, state_keys=state_keys
-        )
-        list_transition = cls._lerobotdataset_to_transitions(
-            dataset=lerobot_dataset, state_keys=state_keys
-        )
+        replay_buffer = cls(capacity=len(lerobot_dataset), device=device, state_keys=state_keys)
+        list_transition = cls._lerobotdataset_to_transitions(dataset=lerobot_dataset, state_keys=state_keys)
         # Fill the replay buffer with the lerobot dataset transitions
         for data in list_transition:
             replay_buffer.add(
@@ -249,9 +240,7 @@ class ReplayBuffer:
 
         # If not provided, you can either raise an error or define a default:
         if state_keys is None:
-            raise ValueError(
-                "You must provide a list of keys in `state_keys` that define your 'state'."
-            )
+            raise ValueError("You must provide a list of keys in `state_keys` that define your 'state'.")
 
         transitions: list[Transition] = []
         num_frames = len(dataset)
@@ -305,40 +294,36 @@ class ReplayBuffer:
         # -- Build batched states --
         batch_state = {}
         for key in self.state_keys:
-            batch_state[key] = torch.cat(
-                [t["state"][key] for t in list_of_transitions], dim=0
-            ).to(self.device)
+            batch_state[key] = torch.cat([t["state"][key] for t in list_of_transitions], dim=0).to(
+                self.device
+            )
             if key.startswith("observation.image") and self.use_drq:
                 batch_state[key] = self.image_augmentation_function(batch_state[key])
 
         # -- Build batched actions --
-        batch_actions = torch.cat([t["action"] for t in list_of_transitions]).to(
-            self.device
-        )
+        batch_actions = torch.cat([t["action"] for t in list_of_transitions]).to(self.device)
 
         # -- Build batched rewards --
-        batch_rewards = torch.tensor(
-            [t["reward"] for t in list_of_transitions], dtype=torch.float32
-        ).to(self.device)
+        batch_rewards = torch.tensor([t["reward"] for t in list_of_transitions], dtype=torch.float32).to(
+            self.device
+        )
 
         # -- Build batched next states --
         batch_next_state = {}
         for key in self.state_keys:
-            batch_next_state[key] = torch.cat(
-                [t["next_state"][key] for t in list_of_transitions], dim=0
-            ).to(self.device)
+            batch_next_state[key] = torch.cat([t["next_state"][key] for t in list_of_transitions], dim=0).to(
+                self.device
+            )
             if key.startswith("observation.image") and self.use_drq:
-                batch_next_state[key] = self.image_augmentation_function(
-                    batch_next_state[key]
-                )
+                batch_next_state[key] = self.image_augmentation_function(batch_next_state[key])
 
         # -- Build batched dones --
-        batch_dones = torch.tensor(
-            [t["done"] for t in list_of_transitions], dtype=torch.float32
-        ).to(self.device)
-        batch_dones = torch.tensor(
-            [t["done"] for t in list_of_transitions], dtype=torch.float32
-        ).to(self.device)
+        batch_dones = torch.tensor([t["done"] for t in list_of_transitions], dtype=torch.float32).to(
+            self.device
+        )
+        batch_dones = torch.tensor([t["done"] for t in list_of_transitions], dtype=torch.float32).to(
+            self.device
+        )
 
         # Return a BatchTransition typed dict
         return BatchTransition(
@@ -402,11 +387,11 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
     # online_env = make_env(cfg, n_envs=1)
     # TODO: Remove the import of maniskill and unifiy with make env
     online_env = make_maniskill_env(cfg, n_envs=1)
-    #if cfg.training.eval_freq > 0:
-    #    logging.info("make_env eval")
-    #    # eval_env = make_env(cfg, n_envs=1)
-    #    # TODO: Remove the import of maniskill and unifiy with make env
-    #    eval_env = make_maniskill_env(cfg, n_envs=1)
+    if cfg.training.eval_freq > 0:
+        logging.info("make_env eval")
+        # eval_env = make_env(cfg, n_envs=1)
+        # TODO: Remove the import of maniskill and unifiy with make env
+        eval_env = make_maniskill_env(cfg, n_envs=1)
 
     # TODO: Add a way to resume training
 
@@ -428,9 +413,7 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
         # dataset_stats=offline_dataset.meta.stats if not cfg.resume else None,
         # Hack: But if we do online traning, we do not need dataset_stats
         dataset_stats=None,
-        pretrained_policy_name_or_path=str(logger.last_pretrained_model_dir)
-        if cfg.resume
-        else None,
+        pretrained_policy_name_or_path=str(logger.last_pretrained_model_dir) if cfg.resume else None,
         device=device,
     )
     assert isinstance(policy, nn.Module)
@@ -439,9 +422,7 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
 
     # TODO: Handle resume
 
-    num_learnable_params = sum(
-        p.numel() for p in policy.parameters() if p.requires_grad
-    )
+    num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     num_total_params = sum(p.numel() for p in policy.parameters())
 
     log_output_dir(out_dir)
@@ -450,12 +431,12 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
     logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
     logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
-    obs, info = online_env.reset(options=dict())
+    obs, info = online_env.reset()
 
     # HACK for maniskill
     # obs = preprocess_observation(obs)
-    #obs = preprocess_maniskill_observation(obs)
-    #obs = {key: obs[key].to(device, non_blocking=True) for key in obs}
+    obs = preprocess_maniskill_observation(obs)
+    obs = {key: obs[key].to(device, non_blocking=True) for key in obs}
 
     replay_buffer = ReplayBuffer(
         capacity=cfg.training.online_buffer_capacity,
@@ -482,42 +463,29 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
 
         if interaction_step >= cfg.training.online_step_before_learning:
             action = policy.select_action(batch=obs)
-            next_obs, reward, done, truncated, info = online_env.step(
-                action.cpu().numpy()
-            )
+            next_obs, reward, done, truncated, info = online_env.step(action.cpu().numpy())
         else:
             action = online_env.action_space.sample()
             next_obs, reward, done, truncated, info = online_env.step(action)
             # HACK
-            action = torch.tensor(action[0], dtype=torch.float32).to(
-                device, non_blocking=True
-            ).unsqueeze(0)
-
-        online_env.render()
-        time.sleep(0.05)
+            action = torch.tensor(action, dtype=torch.float32).to(device, non_blocking=True)
 
         # HACK: For maniskill
         # next_obs = preprocess_observation(next_obs)
-        #next_obs = preprocess_maniskill_observation(next_obs)
-        #next_obs = {key: next_obs[key].to(device, non_blocking=True) for key in obs}
+        next_obs = preprocess_maniskill_observation(next_obs)
+        next_obs = {key: next_obs[key].to(device, non_blocking=True) for key in obs}
         sum_reward_episode += float(reward[0])
         # Because we are using a single environment
         # we can safely assume that the episode is done
         if done[0] or truncated[0]:
-            logging.info(
-                f"Global step {interaction_step}: Episode reward: {sum_reward_episode}"
-            )
-            logger.log_dict(
-                {"Sum episode reward": sum_reward_episode}, interaction_step
-            )
+            logging.info(f"Global step {interaction_step}: Episode reward: {sum_reward_episode}")
+            logger.log_dict({"Sum episode reward": sum_reward_episode}, interaction_step)
             sum_reward_episode = 0
             # HACK: This is for maniskill
             logging.info(
-                f"global step {interaction_step}: episode success: {info['final_info']['success'].float().item()} \n"
+                f"global step {interaction_step}: episode success: {info['success'].float().item()} \n"
             )
-            logger.log_dict(
-                {"Episode success": info["final_info"]["success"].float().item()}, interaction_step
-            )
+            logger.log_dict({"Episode success": info["success"].float().item()}, interaction_step)
 
         replay_buffer.add(
             state=obs,
@@ -591,9 +559,7 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
 
                 training_infos["loss_actor"] = loss_actor.item()
 
-                loss_temperature = policy.compute_loss_temperature(
-                    observations=observations
-                )
+                loss_temperature = policy.compute_loss_temperature(observations=observations)
                 optimizers["temperature"].zero_grad()
                 loss_temperature.backward()
                 optimizers["temperature"].step()
@@ -606,28 +572,6 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
         policy.update_target_networks()
 
 
-        if cfg.training.save_checkpoint and (
-            interaction_step % cfg.training.save_freq == 0
-            or interaction_step == cfg.training.online_steps
-        ):
-            logging.info(f"Checkpoint policy after step {interaction_step}")
-            # Note: Save with step as the identifier, and format it to have at least 6 digits but more if
-            # needed (choose 6 as a minimum for consistency without being overkill).
-            _num_digits = max(
-                6, len(str(cfg.training.online_steps))
-            )
-            step_identifier = f"{interaction_step:0{_num_digits}d}"
-
-            logger.save_checkpoint(
-                interaction_step,
-                policy,
-                optimizers,
-                lr_scheduler,
-                identifier=step_identifier,
-            )
-            logging.info("Resume training")
-
-
 @hydra.main(version_base="1.2", config_name="default", config_path="../configs")
 def train_cli(cfg: dict):
     train(
@@ -637,9 +581,7 @@ def train_cli(cfg: dict):
     )
 
 
-def train_notebook(
-    out_dir=None, job_name=None, config_name="default", config_path="../configs"
-):
+def train_notebook(out_dir=None, job_name=None, config_name="default", config_path="../configs"):
     from hydra import compose, initialize
 
     hydra.core.global_hydra.GlobalHydra.instance().clear()

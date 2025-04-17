@@ -18,8 +18,13 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from lerobot.common.envs.configs import EnvConfig
+from lerobot.common.utils.utils import get_channel_first_image_shape
+from lerobot.configs.types import FeatureType, PolicyFeature
+
 
 def preprocess_observation(observations: dict[str, np.ndarray]) -> dict[str, Tensor]:
+    # TODO(aliberts, rcadene): refactor this to use features from the environment (no hardcoding)
     """Convert environment observation to LeRobot format observation.
     Args:
         observation: Dictionary of observation batches from a Gym vector environment.
@@ -35,13 +40,16 @@ def preprocess_observation(observations: dict[str, np.ndarray]) -> dict[str, Ten
         if "images" not in key:
             continue
 
+        # TODO(aliberts, rcadene): use transforms.ToTensor()?
+        if not torch.is_tensor(img):
+            img = torch.from_numpy(img)
+
         if img.ndim == 3:
             img = img.unsqueeze(0)
+
         # sanity check that images are channel last
         _, h, w, c = img.shape
-        assert (
-            c < h and c < w
-        ), f"expect channel last images, but instead got {img.shape=}"
+        assert c < h and c < w, f"expect channel last images, but instead got {img.shape=}"
 
         # sanity check that images are uint8
         assert img.dtype == torch.uint8, f"expect torch.uint8, but instead {img.dtype=}"
@@ -65,6 +73,26 @@ def preprocess_observation(observations: dict[str, np.ndarray]) -> dict[str, Ten
     # return_observations["observation.state"] = torch.from_numpy(observations["agent_pos"]).float()
     return_observations["observation.state"] = observations["observation.state"].float()
     return return_observations
+
+
+def env_to_policy_features(env_cfg: EnvConfig) -> dict[str, PolicyFeature]:
+    # TODO(aliberts, rcadene): remove this hardcoding of keys and just use the nested keys as is
+    # (need to also refactor preprocess_observation and externalize normalization from policies)
+    policy_features = {}
+    for key, ft in env_cfg.features.items():
+        if ft.type is FeatureType.VISUAL:
+            if len(ft.shape) != 3:
+                raise ValueError(f"Number of dimensions of {key} != 3 (shape={ft.shape})")
+
+            shape = get_channel_first_image_shape(ft.shape)
+            feature = PolicyFeature(type=ft.type, shape=shape)
+        else:
+            feature = ft
+
+        policy_key = env_cfg.features_map.get(key, key)
+        policy_features[policy_key] = feature
+
+    return policy_features
 
 
 def preprocess_maniskill_observation(

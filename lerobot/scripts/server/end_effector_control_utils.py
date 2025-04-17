@@ -1,13 +1,13 @@
-from lerobot.common.robot_devices.robots.factory import make_robot
-from lerobot.common.utils.utils import init_hydra_config
+import argparse
+import logging
+import sys
+import time
+
+import numpy as np
+import torch
+
 from lerobot.common.robot_devices.utils import busy_wait
 from lerobot.scripts.server.kinematics import RobotKinematics, MRKinematics
-import logging
-import time
-import torch
-import numpy as np
-import argparse
-
 
 logging.basicConfig(level=logging.INFO)
 
@@ -29,6 +29,9 @@ class InputController:
         self.z_step_size = z_step_size
         self.running = True
         self.episode_end_status = None  # None, "success", or "failure"
+        self.intervention_flag = False
+        self.open_gripper_command = False
+        self.close_gripper_command = False
 
     def start(self):
         """Start the controller and initialize resources."""
@@ -69,6 +72,19 @@ class InputController:
         status = self.episode_end_status
         self.episode_end_status = None  # Reset after reading
         return status
+
+    def should_intervene(self):
+        """Return True if intervention flag was set."""
+        return self.intervention_flag
+
+    def gripper_command(self):
+        """Return the current gripper command."""
+        if self.open_gripper_command == self.close_gripper_command:
+            return "no-op"
+        elif self.open_gripper_command:
+            return "open"
+        elif self.close_gripper_command:
+            return "close"
 
 
 class KeyboardController(InputController):
@@ -187,9 +203,7 @@ class KeyboardController(InputController):
 class GamepadController(InputController):
     """Generate motion deltas from gamepad input."""
 
-    def __init__(
-        self, x_step_size=0.01, y_step_size=0.01, z_step_size=0.01, deadzone=0.1
-    ):
+    def __init__(self, x_step_size=0.01, y_step_size=0.01, z_step_size=0.01, deadzone=0.1):
         super().__init__(x_step_size, y_step_size, z_step_size)
         self.deadzone = deadzone
         self.joystick = None
@@ -203,9 +217,7 @@ class GamepadController(InputController):
         pygame.joystick.init()
 
         if pygame.joystick.get_count() == 0:
-            logging.error(
-                "No gamepad detected. Please connect a gamepad and try again."
-            )
+            logging.error("No gamepad detected. Please connect a gamepad and try again.")
             self.running = False
             return
 
@@ -246,10 +258,24 @@ class GamepadController(InputController):
                 elif event.button == 0:
                     self.episode_end_status = "rerecord_episode"
 
+                # RB button (6) for opening gripper
+                elif event.button == 6:
+                    self.open_gripper_command = True
+
+                # LT button (7) for closing gripper
+                elif event.button == 7:
+                    self.close_gripper_command = True
+
             # Reset episode status on button release
             elif event.type == pygame.JOYBUTTONUP:
                 if event.button in [0, 2, 3]:
                     self.episode_end_status = None
+
+                elif event.button == 6:
+                    self.open_gripper_command = False
+
+                elif event.button == 7:
+                    self.close_gripper_command = False
 
             # Check for RB button (typically button 5) for intervention flag
             if self.joystick.get_button(5):
@@ -285,10 +311,6 @@ class GamepadController(InputController):
         except pygame.error:
             logging.error("Error reading gamepad. Is it still connected?")
             return 0.0, 0.0, 0.0
-
-    def should_intervene(self):
-        """Return True if intervention flag was set."""
-        return self.intervention_flag
 
 
 class GamepadControllerHID(InputController):
@@ -330,7 +352,6 @@ class GamepadControllerHID(InputController):
         self.buttons = {}
         self.quit_requested = False
         self.save_requested = False
-        self.intervention_flag = False
 
     def find_device(self):
         """Look for the gamepad device by vendor and product ID."""
@@ -338,18 +359,12 @@ class GamepadControllerHID(InputController):
 
         devices = hid.enumerate()
         for device in devices:
-            if (
-                device["vendor_id"] == self.vendor_id
-                and device["product_id"] == self.product_id
-            ):
-                logging.info(
-                    f"Found gamepad: {device.get('product_string', 'Unknown')}"
-                )
+            if device["vendor_id"] == self.vendor_id and device["product_id"] == self.product_id:
+                logging.info(f"Found gamepad: {device.get('product_string', 'Unknown')}")
                 return device
 
         logging.error(
-            f"No gamepad with vendor ID 0x{self.vendor_id:04X} and "
-            f"product ID 0x{self.product_id:04X} found"
+            f"No gamepad with vendor ID 0x{self.vendor_id:04X} and product ID 0x{self.product_id:04X} found"
         )
         return None
 
@@ -381,9 +396,7 @@ class GamepadControllerHID(InputController):
 
         except OSError as e:
             logging.error(f"Error opening gamepad: {e}")
-            logging.error(
-                "You might need to run this with sudo/admin privileges on some systems"
-            )
+            logging.error("You might need to run this with sudo/admin privileges on some systems")
             self.running = False
 
     def stop(self):
@@ -421,18 +434,20 @@ class GamepadControllerHID(InputController):
                     # Apply deadzone
                     self.left_x = 0 if abs(self.left_x) < self.deadzone else self.left_x
                     self.left_y = 0 if abs(self.left_y) < self.deadzone else self.left_y
-                    self.right_x = (
-                        0 if abs(self.right_x) < self.deadzone else self.right_x
-                    )
-                    self.right_y = (
-                        0 if abs(self.right_y) < self.deadzone else self.right_y
-                    )
+                    self.right_x = 0 if abs(self.right_x) < self.deadzone else self.right_x
+                    self.right_y = 0 if abs(self.right_y) < self.deadzone else self.right_y
 
                     # Parse button states (byte 5 in the Logitech RumblePad 2)
                     buttons = data[5]
 
                     # Check if RB is pressed then the intervention flag should be set
-                    self.intervention_flag = data[6] == 2
+                    self.intervention_flag = data[6] in [2, 6, 10, 14]
+
+                    # Check if RT is pressed
+                    self.open_gripper_command = data[6] in [8, 10, 12]
+
+                    # Check if LT is pressed
+                    self.close_gripper_command = data[6] in [4, 6, 12]
 
                     # Check if Y/Triangle button (bit 7) is pressed for saving
                     # Check if X/Square button (bit 5) is pressed for failure
@@ -493,9 +508,7 @@ def run_inverse_kinematics(robot, fps=10):
         joint_positions = obs["observation.state"].cpu().numpy()
         ee_pos = RobotKinematics.fk_gripper_tip(joint_positions)
         desired_ee_pos = ee_pos
-        target_joint_state = RobotKinematics.ik(
-            joint_positions, desired_ee_pos, position_only=True
-        )
+        target_joint_state = RobotKinematics.ik(joint_positions, desired_ee_pos, position_only=True)
         robot.send_action(torch.from_numpy(target_joint_state))
         logging.info(f"Target Joint State: {target_joint_state}")
         busy_wait(1 / fps - (time.perf_counter() - loop_start_time))
@@ -504,6 +517,7 @@ def run_inverse_kinematics(robot, fps=10):
 def teleoperate_inverse_kinematics_with_leader(robot, fps=10):
     logging.info("Testing Inverse Kinematics")
     fk_func = RobotKinematics.fk_gripper_tip
+    kinematics = RobotKinematics(robot.robot_type)
     timestep = time.perf_counter()
     while time.perf_counter() - timestep < 60.0:
         loop_start_time = time.perf_counter()
@@ -537,6 +551,8 @@ def teleoperate_delta_inverse_kinematics_with_leader(robot, fps=10):
     while time.perf_counter() - start_time_s < 3.0:
         robot.teleop_step()
         time.sleep(1.0/30)
+    logging.info("Testing Delta End-Effector Control")
+    timestep = time.perf_counter()
 
     # Initial position capture
     obs = robot.capture_observation()
@@ -595,9 +611,7 @@ def teleoperate_delta_inverse_kinematics_with_leader(robot, fps=10):
         busy_wait(1 / fps - (time.perf_counter() - loop_start_time))
 
 
-def teleoperate_delta_inverse_kinematics(
-    robot, controller, fps=10, bounds=None, fk_func=None
-):
+def teleoperate_delta_inverse_kinematics(robot, controller, fps=10, bounds=None, fk_func=None):
     """
     Control a robot using delta end-effector movements from any input controller.
 
@@ -619,6 +633,8 @@ def teleoperate_delta_inverse_kinematics(
     obs = robot.capture_observation()
     joint_positions = obs["observation.state"].cpu().numpy()
     current_ee_pos = fk_func(joint_positions)
+    kinematics = RobotKinematics(robot.robot_type)
+    current_ee_pos = kinematics.fk_gripper_tip(joint_positions)
 
     # Initialize desired position with current position
     desired_ee_pos = np.eye(4)  # Identity matrix
@@ -633,7 +649,7 @@ def teleoperate_delta_inverse_kinematics(
 
             # Get currrent robot state
             joint_positions = robot.follower_arms["main"].read("Present_Position")
-            current_ee_pos = fk_func(joint_positions)
+            current_ee_pos = kinematics.fk_gripper_tip(joint_positions)
 
             # Get movement deltas from the controller
             delta_x, delta_y, delta_z = controller.get_deltas()
@@ -645,16 +661,12 @@ def teleoperate_delta_inverse_kinematics(
 
             # Apply bounds if provided
             if bounds is not None:
-                desired_ee_pos[:3, 3] = np.clip(
-                    desired_ee_pos[:3, 3], bounds["min"], bounds["max"]
-                )
+                desired_ee_pos[:3, 3] = np.clip(desired_ee_pos[:3, 3], bounds["min"], bounds["max"])
 
             # Only send commands if there's actual movement
             if any([abs(v) > 0.001 for v in [delta_x, delta_y, delta_z]]):
                 # Compute joint targets via inverse kinematics
-                target_joint_state = RobotKinematics.ik(
-                    joint_positions, desired_ee_pos, position_only=True, fk_func=fk_func
-                )
+                target_joint_state = kinematics.ik(joint_positions, desired_ee_pos, position_only=True, fk_func=fk_func)
 
                 # Send command to robot
                 robot.send_action(torch.from_numpy(target_joint_state))
@@ -776,15 +788,12 @@ def animate_fk(robot):
     plt.show()
 
 
-def make_robot_from_config(config_path, overrides=None):
-    """Helper function to create a robot from a config file."""
-    if overrides is None:
-        overrides = []
-    robot_cfg = init_hydra_config(config_path, overrides)
-    return make_robot(robot_cfg)
-
-
 if __name__ == "__main__":
+    from lerobot.common.envs.configs import EEActionSpaceConfig, EnvWrapperConfig, HILSerlRobotEnvConfig
+    from lerobot.common.robot_devices.robots.configs import RobotConfig
+    from lerobot.common.robot_devices.robots.utils import make_robot_from_config
+    from lerobot.scripts.server.gym_manipulator import make_robot_env
+
     parser = argparse.ArgumentParser(description="Test end-effector control")
     parser.add_argument(
         "--mode",
@@ -802,21 +811,16 @@ if __name__ == "__main__":
         help="Control mode to use",
     )
     parser.add_argument(
-        "--task",
+        "--robot-type",
         type=str,
-        default="Robot manipulation task",
-        help="Description of the task being performed",
+        default="so100",
+        help="Robot type (so100, koch, aloha, etc.)",
     )
-    parser.add_argument(
-        "--push-to-hub",
-        default=True,
-        type=bool,
-        help="Push the dataset to Hugging Face Hub",
-    )
-    # Add the rest of your existing arguments
+
     args = parser.parse_args()
 
-    robot = make_robot_from_config("../../configs/robot/aloha-mr.yaml", [])
+    robot_config = RobotConfig.get_choice_class(args.robot_type)(mock=False)
+    robot = make_robot_from_config(robot_config)
 
     if not robot.is_connected:
         robot.connect()
@@ -831,29 +835,28 @@ if __name__ == "__main__":
         # Determine controller type based on mode prefix
         controller = None
         if args.mode.startswith("keyboard"):
-            controller = KeyboardController(
-                x_step_size=0.01, y_step_size=0.01, z_step_size=0.05
-            )
+            controller = KeyboardController(x_step_size=0.01, y_step_size=0.01, z_step_size=0.05)
         elif args.mode.startswith("gamepad"):
-            controller = GamepadController(
-                x_step_size=0.02, y_step_size=0.02, z_step_size=0.05
-            )
+            if sys.platform == "darwin":
+                controller = GamepadControllerHID(x_step_size=0.01, y_step_size=0.01, z_step_size=0.05)
+            else:
+                controller = GamepadController(x_step_size=0.01, y_step_size=0.01, z_step_size=0.05)
 
         # Handle mode categories
         if args.mode in ["keyboard", "gamepad"]:
             # Direct robot control modes
-            teleoperate_delta_inverse_kinematics(
-                robot, controller, bounds=bounds, fps=10
-            )
+            teleoperate_delta_inverse_kinematics(robot, controller, bounds=bounds, fps=10)
 
         elif args.mode in ["keyboard_gym", "gamepad_gym"]:
             # Gym environment control modes
-            from lerobot.scripts.server.gym_manipulator import make_robot_env
-
-            cfg = init_hydra_config("lerobot/configs/env/so100_real.yaml", [])
-            cfg.env.wrapper.ee_action_space_params.use_gamepad = False
-            env = make_robot_env(robot, None, cfg)
-            teleoperate_gym_env(env, controller)
+            cfg = HILSerlRobotEnvConfig(robot=robot_config, wrapper=EnvWrapperConfig())
+            cfg.wrapper.ee_action_space_params = EEActionSpaceConfig(
+                x_step_size=0.03, y_step_size=0.03, z_step_size=0.03, bounds=bounds
+            )
+            cfg.wrapper.ee_action_space_params.use_gamepad = False
+            cfg.device = "cpu"
+            env = make_robot_env(cfg, robot)
+            teleoperate_gym_env(env, controller, fps=cfg.fps)
 
         elif args.mode == "leader":
             # Leader-follower modes don't use controllers

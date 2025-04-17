@@ -1,3 +1,17 @@
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Logic to calibrate a robot arm built with dynamixel motors"""
 # TODO(rcadene, aliberts): move this logic into the robot code when refactoring
 
@@ -10,7 +24,9 @@ from lerobot.common.robot_devices.motors.dynamixel import (
 )
 from lerobot.common.robot_devices.motors.utils import MotorsBus
 
-URL_TEMPLATE = "https://raw.githubusercontent.com/huggingface/lerobot/main/media/{robot}/{arm}_{position}.webp"
+URL_TEMPLATE = (
+    "https://raw.githubusercontent.com/huggingface/lerobot/main/media/{robot}/{arm}_{position}.webp"
+)
 
 # The following positions are provided in nominal degree range ]-180, +180[
 # For more info on these constants, see comments in the code where they get used.
@@ -21,9 +37,7 @@ ROTATED_POSITION_DEGREE = 90
 def assert_drive_mode(drive_mode):
     # `drive_mode` is in [0,1] with 0 means original rotation direction for the motor, and 1 means inverted.
     if not np.all(np.isin(drive_mode, [0, 1])):
-        raise ValueError(
-            f"`drive_mode` contains values other than 0 or 1: ({drive_mode})"
-        )
+        raise ValueError(f"`drive_mode` contains values other than 0 or 1: ({drive_mode})")
 
 
 def apply_drive_mode(position, drive_mode):
@@ -64,9 +78,7 @@ def run_arm_calibration(arm: MotorsBus, robot_type: str, arm_name: str, arm_type
     ```
     """
     if (arm.read("Torque_Enable") != TorqueMode.DISABLED.value).any():
-        raise ValueError(
-            "To run calibration, the torque must be disabled on all motors."
-        )
+        raise ValueError("To run calibration, the torque must be disabled on all motors.")
 
     print(f"\nRunning calibration of {robot_type} {arm_name} {arm_type}...")
 

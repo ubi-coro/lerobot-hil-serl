@@ -16,7 +16,6 @@
 import json
 import os
 import platform
-from copy import copy
 from functools import wraps
 from pathlib import Path
 
@@ -25,20 +24,14 @@ import torch
 
 from lerobot import available_cameras, available_motors, available_robots
 from lerobot.common.robot_devices.cameras.utils import Camera
+from lerobot.common.robot_devices.cameras.utils import make_camera as make_camera_device
 from lerobot.common.robot_devices.motors.utils import MotorsBus
-from lerobot.common.robot_devices.robots.factory import (
-    make_robot as make_robot_from_cfg,
+from lerobot.common.robot_devices.motors.utils import (
+    make_motors_bus as make_motors_bus_device,
 )
-from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.common.utils.import_utils import is_package_available
-from lerobot.common.utils.utils import init_hydra_config
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-# Pass this as the first argument to init_hydra_config.
-DEFAULT_CONFIG_PATH = "lerobot/configs/default.yaml"
-
-ROBOT_CONFIG_PATH_TEMPLATE = "lerobot/configs/robot/{robot}.yaml"
+DEVICE = os.environ.get("LEROBOT_TEST_DEVICE", "cuda") if torch.cuda.is_available() else "cpu"
 
 TEST_ROBOT_TYPES = []
 for robot_type in available_robots:
@@ -54,13 +47,9 @@ for motor_type in available_motors:
 
 # Camera indices used for connecting physical cameras
 OPENCV_CAMERA_INDEX = int(os.environ.get("LEROBOT_TEST_OPENCV_CAMERA_INDEX", 0))
-INTELREALSENSE_CAMERA_INDEX = int(
-    os.environ.get("LEROBOT_TEST_INTELREALSENSE_CAMERA_INDEX", 128422271614)
-)
+INTELREALSENSE_SERIAL_NUMBER = int(os.environ.get("LEROBOT_TEST_INTELREALSENSE_SERIAL_NUMBER", 128422271614))
 
-DYNAMIXEL_PORT = os.environ.get(
-    "LEROBOT_TEST_DYNAMIXEL_PORT", "/dev/tty.usbmodem575E0032081"
-)
+DYNAMIXEL_PORT = os.environ.get("LEROBOT_TEST_DYNAMIXEL_PORT", "/dev/tty.usbmodem575E0032081")
 DYNAMIXEL_MOTORS = {
     "shoulder_pan": [1, "xl430-w250"],
     "shoulder_lift": [2, "xl430-w250"],
@@ -70,9 +59,7 @@ DYNAMIXEL_MOTORS = {
     "gripper": [6, "xl330-m288"],
 }
 
-FEETECH_PORT = os.environ.get(
-    "LEROBOT_TEST_FEETECH_PORT", "/dev/tty.usbmodem585A0080971"
-)
+FEETECH_PORT = os.environ.get("LEROBOT_TEST_FEETECH_PORT", "/dev/tty.usbmodem585A0080971")
 FEETECH_MOTORS = {
     "shoulder_pan": [1, "sts3215"],
     "shoulder_lift": [2, "sts3215"],
@@ -171,13 +158,9 @@ def require_package_arg(func):
         if "required_packages" in arg_names:
             # Get the index of 'required_packages' and retrieve the value from args
             index = arg_names.index("required_packages")
-            required_packages = (
-                args[index] if len(args) > index else kwargs.get("required_packages")
-            )
+            required_packages = args[index] if len(args) > index else kwargs.get("required_packages")
         else:
-            raise ValueError(
-                "Function does not have 'required_packages' as an argument."
-            )
+            raise ValueError("Function does not have 'required_packages' as an argument.")
 
         if required_packages is None:
             return func(*args, **kwargs)
@@ -234,17 +217,11 @@ def require_robot(func):
         mock = kwargs.get("mock")
 
         if robot_type is None:
-            raise ValueError(
-                "The 'robot_type' must be an argument of the test function."
-            )
+            raise ValueError("The 'robot_type' must be an argument of the test function.")
         if request is None:
-            raise ValueError(
-                "The 'request' fixture must be an argument of the test function."
-            )
+            raise ValueError("The 'request' fixture must be an argument of the test function.")
         if mock is None:
-            raise ValueError(
-                "The 'mock' variable must be an argument of the test function."
-            )
+            raise ValueError("The 'mock' variable must be an argument of the test function.")
 
         # Run test with a real robot. Skip test if robot connection fails.
         if not mock and not request.getfixturevalue("is_robot_available"):
@@ -264,17 +241,11 @@ def require_camera(func):
         mock = kwargs.get("mock")
 
         if request is None:
-            raise ValueError(
-                "The 'request' fixture must be an argument of the test function."
-            )
+            raise ValueError("The 'request' fixture must be an argument of the test function.")
         if camera_type is None:
-            raise ValueError(
-                "The 'camera_type' must be an argument of the test function."
-            )
+            raise ValueError("The 'camera_type' must be an argument of the test function.")
         if mock is None:
-            raise ValueError(
-                "The 'mock' variable must be an argument of the test function."
-            )
+            raise ValueError("The 'mock' variable must be an argument of the test function.")
 
         if not mock and not request.getfixturevalue("is_camera_available"):
             pytest.skip(f"A {camera_type} camera is not available.")
@@ -293,17 +264,11 @@ def require_motor(func):
         mock = kwargs.get("mock")
 
         if request is None:
-            raise ValueError(
-                "The 'request' fixture must be an argument of the test function."
-            )
+            raise ValueError("The 'request' fixture must be an argument of the test function.")
         if motor_type is None:
-            raise ValueError(
-                "The 'motor_type' must be an argument of the test function."
-            )
+            raise ValueError("The 'motor_type' must be an argument of the test function.")
         if mock is None:
-            raise ValueError(
-                "The 'mock' variable must be an argument of the test function."
-            )
+            raise ValueError("The 'mock' variable must be an argument of the test function.")
 
         if not mock and not request.getfixturevalue("is_motor_available"):
             pytest.skip(f"A {motor_type} motor is not available.")
@@ -346,83 +311,30 @@ def mock_calibration_dir(calibration_dir):
         json.dump(example_calib, f)
 
 
-def make_robot(
-    robot_type: str, overrides: list[str] | None = None, mock=False
-) -> Robot:
-    if mock:
-        overrides = [] if overrides is None else copy(overrides)
-
-        # Explicitely add mock argument to the cameras and set it to true
-        # TODO(rcadene, aliberts): redesign when we drop hydra
-        if robot_type in ["koch", "so100", "moss"]:
-            overrides.append("+leader_arms.main.mock=true")
-            overrides.append("+follower_arms.main.mock=true")
-            if "~cameras" not in overrides:
-                overrides.append("+cameras.laptop.mock=true")
-                overrides.append("+cameras.phone.mock=true")
-
-        elif robot_type == "koch_bimanual":
-            overrides.append("+leader_arms.left.mock=true")
-            overrides.append("+leader_arms.right.mock=true")
-            overrides.append("+follower_arms.left.mock=true")
-            overrides.append("+follower_arms.right.mock=true")
-            if "~cameras" not in overrides:
-                overrides.append("+cameras.laptop.mock=true")
-                overrides.append("+cameras.phone.mock=true")
-
-        elif robot_type == "aloha":
-            overrides.append("+leader_arms.left.mock=true")
-            overrides.append("+leader_arms.right.mock=true")
-            overrides.append("+follower_arms.left.mock=true")
-            overrides.append("+follower_arms.right.mock=true")
-            if "~cameras" not in overrides:
-                overrides.append("+cameras.cam_high.mock=true")
-                overrides.append("+cameras.cam_low.mock=true")
-                overrides.append("+cameras.cam_left_wrist.mock=true")
-                overrides.append("+cameras.cam_right_wrist.mock=true")
-
-        else:
-            raise NotImplementedError(robot_type)
-
-    config_path = ROBOT_CONFIG_PATH_TEMPLATE.format(robot=robot_type)
-    robot_cfg = init_hydra_config(config_path, overrides)
-    robot = make_robot_from_cfg(robot_cfg)
-    return robot
-
-
-def make_camera(camera_type, **kwargs) -> Camera:
+# TODO(rcadene, aliberts): remove this dark pattern that overrides
+def make_camera(camera_type: str, **kwargs) -> Camera:
     if camera_type == "opencv":
-        from lerobot.common.robot_devices.cameras.opencv import OpenCVCamera
-
         camera_index = kwargs.pop("camera_index", OPENCV_CAMERA_INDEX)
-        return OpenCVCamera(camera_index, **kwargs)
+        return make_camera_device(camera_type, camera_index=camera_index, **kwargs)
 
     elif camera_type == "intelrealsense":
-        from lerobot.common.robot_devices.cameras.intelrealsense import (
-            IntelRealSenseCamera,
-        )
-
-        camera_index = kwargs.pop("camera_index", INTELREALSENSE_CAMERA_INDEX)
-        return IntelRealSenseCamera(camera_index, **kwargs)
-
+        serial_number = kwargs.pop("serial_number", INTELREALSENSE_SERIAL_NUMBER)
+        return make_camera_device(camera_type, serial_number=serial_number, **kwargs)
     else:
         raise ValueError(f"The camera type '{camera_type}' is not valid.")
 
 
+# TODO(rcadene, aliberts): remove this dark pattern that overrides
 def make_motors_bus(motor_type: str, **kwargs) -> MotorsBus:
     if motor_type == "dynamixel":
-        from lerobot.common.robot_devices.motors.dynamixel import DynamixelMotorsBus
-
         port = kwargs.pop("port", DYNAMIXEL_PORT)
         motors = kwargs.pop("motors", DYNAMIXEL_MOTORS)
-        return DynamixelMotorsBus(port, motors, **kwargs)
+        return make_motors_bus_device(motor_type, port=port, motors=motors, **kwargs)
 
     elif motor_type == "feetech":
-        from lerobot.common.robot_devices.motors.feetech import FeetechMotorsBus
-
         port = kwargs.pop("port", FEETECH_PORT)
         motors = kwargs.pop("motors", FEETECH_MOTORS)
-        return FeetechMotorsBus(port, motors, **kwargs)
+        return make_motors_bus_device(motor_type, port=port, motors=motors, **kwargs)
 
     else:
         raise ValueError(f"The motor type '{motor_type}' is not valid.")

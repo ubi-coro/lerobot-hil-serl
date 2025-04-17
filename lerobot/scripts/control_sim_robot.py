@@ -1,3 +1,16 @@
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Utilities to control a robot in simulation.
 
@@ -59,8 +72,8 @@ python lerobot/scripts/control_sim_robot.py record \
 ```
 
 **NOTE**: You can use your keyboard to control data recording flow.
-- Tap right arrow key '->' to early exit while recording an episode and go to reseting the environment.
-- Tap right arrow key '->' to early exit while reseting the environment and got to recording the next episode.
+- Tap right arrow key '->' to early exit while recording an episode and go to resetting the environment.
+- Tap right arrow key '->' to early exit while resetting the environment and got to recording the next episode.
 - Tap left arrow key '<-' to early exit and re-record the current episode.
 - Tap escape key 'esc' to stop the data recording.
 This might require a sudo permission to allow your terminal to monitor keyboard events.
@@ -90,10 +103,11 @@ from lerobot.common.robot_devices.control_utils import (
     sanity_check_dataset_robot_compatibility,
     stop_recording,
 )
-from lerobot.common.robot_devices.robots.factory import make_robot
-from lerobot.common.robot_devices.robots.utils import Robot
+from lerobot.common.robot_devices.robots.utils import Robot, make_robot
 from lerobot.common.robot_devices.utils import busy_wait
 from lerobot.common.utils.utils import init_hydra_config, init_logging, log_say
+
+raise NotImplementedError("This script is currently deactivated")
 
 DEFAULT_FEATURES = {
     "next.reward": {
@@ -130,7 +144,7 @@ def none_or_int(value):
 
 def init_sim_calibration(robot, cfg):
     # Constants necessary for transforming the joint pos of the real robot to the sim
-    # depending on the robot discription used in that sim.
+    # depending on the robot description used in that sim.
     start_pos = np.array(robot.leader_arms.main.calibration["start_pos"])
     axis_directions = np.array(cfg.get("axis_directions", [1]))
     offsets = np.array(cfg.get("offsets", [0])) * np.pi
@@ -160,10 +174,7 @@ def teleoperate(env, robot: Robot, process_action_fn, teleop_time_s=None):
         leader_pos = robot.leader_arms.main.read("Present_Position")
         action = process_action_fn(leader_pos)
         env.step(np.expand_dims(action, 0))
-        if (
-            teleop_time_s is not None
-            and time.perf_counter() - start_teleop_t > teleop_time_s
-        ):
+        if teleop_time_s is not None and time.perf_counter() - start_teleop_t > teleop_time_s:
             print("Teleoperation processes finished.")
             break
 
@@ -195,27 +206,19 @@ def record(
     # Load pretrained policy
 
     extra_features = (
-        {"next.reward": {"dtype": "int64", "shape": (1,), "names": None}}
-        if assign_rewards
-        else None
+        {"next.reward": {"dtype": "int64", "shape": (1,), "names": None}} if assign_rewards else None
     )
 
     policy = None
     if pretrained_policy_name_or_path is not None:
-        policy, policy_fps, device, use_amp = init_policy(
-            pretrained_policy_name_or_path, policy_overrides
-        )
+        policy, policy_fps, device, use_amp = init_policy(pretrained_policy_name_or_path, policy_overrides)
 
         if fps is None:
             fps = policy_fps
-            logging.warning(
-                f"No fps provided, so using the fps from policy config ({policy_fps})."
-            )
+            logging.warning(f"No fps provided, so using the fps from policy config ({policy_fps}).")
 
     if policy is None and process_action_from_leader is None:
-        raise ValueError(
-            "Either policy or process_action_fn has to be set to enable control in sim."
-        )
+        raise ValueError("Either policy or process_action_fn has to be set to enable control in sim.")
 
     # initialize listener before sim env
     listener, events = init_keyboard_listener(assign_rewards=assign_rewards)
@@ -250,7 +253,7 @@ def record(
                 key = "observation.image." + key
             features[key] = {
                 "dtype": "video",
-                "names": ["channel", "height", "width"],
+                "names": ["channels", "height", "width"],
                 "shape": shape,
             }
 
@@ -366,9 +369,7 @@ def record(
         if events["stop_recording"] or recorded_episodes >= num_episodes:
             break
         else:
-            logging.info(
-                "Waiting for a few seconds before starting next episode recording..."
-            )
+            logging.info("Waiting for a few seconds before starting next episode recording...")
             busy_wait(3)
 
     log_say("Stop recording", play_sounds, blocking=True)
@@ -467,9 +468,7 @@ if __name__ == "__main__":
         required=True,
         help="A description of the task preformed during recording that can be used as a language instruction.",
     )
-    parser_record.add_argument(
-        "--num-episodes", type=int, default=50, help="Number of episodes to record."
-    )
+    parser_record.add_argument("--num-episodes", type=int, default=50, help="Number of episodes to record.")
     parser_record.add_argument(
         "--run-compute-stats",
         type=int,
@@ -493,7 +492,7 @@ if __name__ == "__main__":
         type=int,
         default=0,
         help=(
-            "Number of subprocesses handling the saving of frames as PNGs. Set to 0 to use threads only; "
+            "Number of subprocesses handling the saving of frames as PNG. Set to 0 to use threads only; "
             "set to ≥1 to use subprocesses, each using threads to write images. The best number of processes "
             "and threads depends on your system. We recommend 4 threads per camera with 0 processes. "
             "If fps is unstable, adjust the thread count. If still unstable, try using 1 or more subprocesses."
@@ -547,9 +546,7 @@ if __name__ == "__main__":
         default="lerobot/test",
         help="Dataset identifier. By convention it should match '{hf_username}/{dataset_name}' (e.g. `lerobot/test`).",
     )
-    parser_replay.add_argument(
-        "--episode", type=int, default=0, help="Index of the episodes to replay."
-    )
+    parser_replay.add_argument("--episode", type=int, default=0, help="Index of the episodes to replay.")
 
     args = parser.parse_args()
 
@@ -565,7 +562,7 @@ if __name__ == "__main__":
 
     # make gym env
     env_cfg = init_hydra_config(env_config_path)
-    importlib.import_module(f"gym_{env_cfg.env.name}")
+    importlib.import_module(f"gym_{env_cfg.env.type}")
 
     def env_constructor():
         return gym.make(env_cfg.env.handle, disable_env_checker=True, **env_cfg.env.gym)
@@ -576,6 +573,7 @@ if __name__ == "__main__":
     if control_mode in ["teleoperate", "record"]:
         # make robot
         robot_overrides = ["~cameras", "~follower_arms"]
+        # TODO(rcadene): remove
         robot_cfg = init_hydra_config(robot_path, robot_overrides)
         robot = make_robot(robot_cfg)
         robot.connect()

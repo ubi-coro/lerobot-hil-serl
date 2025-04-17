@@ -17,7 +17,7 @@
 """
 This script will help you convert any LeRobot dataset already pushed to the hub from codebase version 1.6 to
 2.0. You will be required to provide the 'tasks', which is a short but accurate description in plain English
-for each of the task performed in the dataset. This will allow to easily train models with task-conditionning.
+for each of the task performed in the dataset. This will allow to easily train models with task-conditioning.
 
 We support 3 different scenarios for these tasks (see instructions below):
     1. Single task dataset: all episodes of your dataset have the same single task.
@@ -130,7 +130,7 @@ from lerobot.common.datasets.utils import (
     create_branch,
     create_lerobot_dataset_card,
     flatten_dict,
-    get_hub_safe_version,
+    get_safe_version,
     load_json,
     unflatten_dict,
     write_json,
@@ -141,7 +141,8 @@ from lerobot.common.datasets.video_utils import (
     get_image_pixel_channels,
     get_video_info,
 )
-from lerobot.common.utils.utils import init_hydra_config
+from lerobot.common.robot_devices.robots.configs import RobotConfig
+from lerobot.common.robot_devices.robots.utils import make_robot_config
 
 V16 = "v1.6"
 V20 = "v2.0"
@@ -152,21 +153,18 @@ V1_INFO_PATH = "meta_data/info.json"
 V1_STATS_PATH = "meta_data/stats.safetensors"
 
 
-def parse_robot_config(
-    config_path: Path, config_overrides: list[str] | None = None
-) -> tuple[str, dict]:
-    robot_cfg = init_hydra_config(config_path, config_overrides)
-    if robot_cfg["robot_type"] in ["aloha", "koch"]:
+def parse_robot_config(robot_cfg: RobotConfig) -> tuple[str, dict]:
+    if robot_cfg.type in ["aloha", "koch"]:
         state_names = [
-            f"{arm}_{motor}" if len(robot_cfg["follower_arms"]) > 1 else motor
-            for arm in robot_cfg["follower_arms"]
-            for motor in robot_cfg["follower_arms"][arm]["motors"]
+            f"{arm}_{motor}" if len(robot_cfg.follower_arms) > 1 else motor
+            for arm in robot_cfg.follower_arms
+            for motor in robot_cfg.follower_arms[arm].motors
         ]
         action_names = [
             # f"{arm}_{motor}" for arm in ["left", "right"] for motor in robot_cfg["leader_arms"][arm]["motors"]
-            f"{arm}_{motor}" if len(robot_cfg["leader_arms"]) > 1 else motor
-            for arm in robot_cfg["leader_arms"]
-            for motor in robot_cfg["leader_arms"][arm]["motors"]
+            f"{arm}_{motor}" if len(robot_cfg.leader_arms) > 1 else motor
+            for arm in robot_cfg.leader_arms
+            for motor in robot_cfg.leader_arms[arm].motors
         ]
     # elif robot_cfg["robot_type"] == "stretch3": TODO
     else:
@@ -175,7 +173,7 @@ def parse_robot_config(
         )
 
     return {
-        "robot_type": robot_cfg["robot_type"],
+        "robot_type": robot_cfg.type,
         "names": {
             "observation.state": state_names,
             "observation.effort": state_names,
@@ -206,8 +204,9 @@ def convert_stats_to_json(v1_dir: Path, v2_dir: Path) -> None:
 
 
 def get_features_from_hf_dataset(
-    dataset: Dataset, robot_config: dict | None = None
+    dataset: Dataset, robot_config: RobotConfig | None = None
 ) -> dict[str, list]:
+    robot_config = parse_robot_config(robot_config)
     features = {}
     for key, ft in dataset.features.items():
         if isinstance(ft, datasets.Value):
@@ -219,9 +218,7 @@ def get_features_from_hf_dataset(
             dtype = ft.feature.dtype
             shape = (ft.length,)
             motor_names = (
-                robot_config["names"][key]
-                if robot_config
-                else [f"motor_{i}" for i in range(ft.length)]
+                robot_config["names"][key] if robot_config else [f"motor_{i}" for i in range(ft.length)]
             )
             assert len(motor_names) == shape[0]
             names = {"motors": motor_names}
@@ -230,11 +227,11 @@ def get_features_from_hf_dataset(
             image = dataset[0][key]  # Assuming first row
             channels = get_image_pixel_channels(image)
             shape = (image.height, image.width, channels)
-            names = ["height", "width", "channel"]
+            names = ["height", "width", "channels"]
         elif ft._type == "VideoFrame":
             dtype = "video"
             shape = None  # Add shape later
-            names = ["height", "width", "channel"]
+            names = ["height", "width", "channels"]
 
         features[key] = {
             "dtype": dtype,
@@ -245,15 +242,11 @@ def get_features_from_hf_dataset(
     return features
 
 
-def add_task_index_by_episodes(
-    dataset: Dataset, tasks_by_episodes: dict
-) -> tuple[Dataset, list[str]]:
+def add_task_index_by_episodes(dataset: Dataset, tasks_by_episodes: dict) -> tuple[Dataset, list[str]]:
     df = dataset.to_pandas()
     tasks = list(set(tasks_by_episodes.values()))
     tasks_to_task_index = {task: task_idx for task_idx, task in enumerate(tasks)}
-    episodes_to_task_index = {
-        ep_idx: tasks_to_task_index[task] for ep_idx, task in tasks_by_episodes.items()
-    }
+    episodes_to_task_index = {ep_idx: tasks_to_task_index[task] for ep_idx, task in tasks_by_episodes.items()}
     df["task_index"] = df["episode_index"].map(episodes_to_task_index).astype(int)
 
     features = dataset.features
@@ -270,19 +263,10 @@ def add_task_index_from_tasks_col(
     # HACK: This is to clean some of the instructions in our version of Open X datasets
     prefix_to_clean = "tf.Tensor(b'"
     suffix_to_clean = "', shape=(), dtype=string)"
-    df[tasks_col] = (
-        df[tasks_col]
-        .str.removeprefix(prefix_to_clean)
-        .str.removesuffix(suffix_to_clean)
-    )
+    df[tasks_col] = df[tasks_col].str.removeprefix(prefix_to_clean).str.removesuffix(suffix_to_clean)
 
     # Create task_index col
-    tasks_by_episode = (
-        df.groupby("episode_index")[tasks_col]
-        .unique()
-        .apply(lambda x: x.tolist())
-        .to_dict()
-    )
+    tasks_by_episode = df.groupby("episode_index")[tasks_col].unique().apply(lambda x: x.tolist()).to_dict()
     tasks = df[tasks_col].unique().tolist()
     tasks_to_task_index = {task: idx for idx, task in enumerate(tasks)}
     df["task_index"] = df[tasks_col].map(tasks_to_task_index).astype(int)
@@ -307,9 +291,7 @@ def split_parquet_by_episodes(
     for ep_chunk in range(total_chunks):
         ep_chunk_start = DEFAULT_CHUNK_SIZE * ep_chunk
         ep_chunk_end = min(DEFAULT_CHUNK_SIZE * (ep_chunk + 1), total_episodes)
-        chunk_dir = "/".join(DEFAULT_PARQUET_PATH.split("/")[:-1]).format(
-            episode_chunk=ep_chunk
-        )
+        chunk_dir = "/".join(DEFAULT_PARQUET_PATH.split("/")[:-1]).format(episode_chunk=ep_chunk)
         (output_dir / chunk_dir).mkdir(parents=True, exist_ok=True)
         for ep_idx in range(ep_chunk_start, ep_chunk_end):
             ep_table = table.filter(pc.equal(table["episode_index"], ep_idx))
@@ -341,9 +323,7 @@ def move_videos(
     videos_moved = False
     video_files = [str(f.relative_to(work_dir)) for f in work_dir.glob("videos*/*.mp4")]
     if len(video_files) == 0:
-        video_files = [
-            str(f.relative_to(work_dir)) for f in work_dir.glob("videos*/*/*/*.mp4")
-        ]
+        video_files = [str(f.relative_to(work_dir)) for f in work_dir.glob("videos*/*/*/*.mp4")]
         videos_moved = True  # Videos have already been moved
 
     assert len(video_files) == total_episodes * len(video_keys)
@@ -374,9 +354,7 @@ def move_videos(
                 target_path = DEFAULT_VIDEO_PATH.format(
                     episode_chunk=ep_chunk, video_key=vid_key, episode_index=ep_idx
                 )
-                video_file = V1_VIDEO_FILE.format(
-                    video_key=vid_key, episode_index=ep_idx
-                )
+                video_file = V1_VIDEO_FILE.format(video_key=vid_key, episode_index=ep_idx)
                 if len(video_dirs) == 1:
                     video_path = video_dirs[0] / video_file
                 else:
@@ -393,9 +371,7 @@ def move_videos(
     subprocess.run(["git", "push"], cwd=work_dir, check=True)
 
 
-def fix_lfs_video_files_tracking(
-    work_dir: Path, lfs_untracked_videos: list[str]
-) -> None:
+def fix_lfs_video_files_tracking(work_dir: Path, lfs_untracked_videos: list[str]) -> None:
     """
     HACK: This function fixes the tracking by git lfs which was not properly set on some repos. In that case,
     there's no other option than to download the actual files and reupload them with lfs tracking.
@@ -419,14 +395,10 @@ def fix_lfs_video_files_tracking(
     subprocess.run(["git", "push"], cwd=work_dir, check=True)
 
 
-def fix_gitattributes(
-    work_dir: Path, current_gittatributes: Path, clean_gittatributes: Path
-) -> None:
+def fix_gitattributes(work_dir: Path, current_gittatributes: Path, clean_gittatributes: Path) -> None:
     shutil.copyfile(clean_gittatributes, current_gittatributes)
     subprocess.run(["git", "add", ".gitattributes"], cwd=work_dir, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Fix .gitattributes"], cwd=work_dir, check=True
-    )
+    subprocess.run(["git", "commit", "-m", "Fix .gitattributes"], cwd=work_dir, check=True)
     subprocess.run(["git", "push"], cwd=work_dir, check=True)
 
 
@@ -463,9 +435,7 @@ def _get_lfs_untracked_videos(work_dir: Path, video_files: list[str]) -> list[st
     return [f for f in video_files if f not in lfs_tracked_files]
 
 
-def get_videos_info(
-    repo_id: str, local_dir: Path, video_keys: list[str], branch: str
-) -> dict:
+def get_videos_info(repo_id: str, local_dir: Path, video_keys: list[str], branch: str) -> dict:
     # Assumes first episode
     video_files = [
         DEFAULT_VIDEO_PATH.format(episode_chunk=0, video_key=vid_key, episode_index=0)
@@ -492,11 +462,11 @@ def convert_dataset(
     single_task: str | None = None,
     tasks_path: Path | None = None,
     tasks_col: Path | None = None,
-    robot_config: dict | None = None,
+    robot_config: RobotConfig | None = None,
     test_branch: str | None = None,
     **card_kwargs,
 ):
-    v1 = get_hub_safe_version(repo_id, V16)
+    v1 = get_safe_version(repo_id, V16)
     v1x_dir = local_dir / V16 / repo_id
     v20_dir = local_dir / V20 / repo_id
     v1x_dir.mkdir(parents=True, exist_ok=True)
@@ -540,31 +510,19 @@ def convert_dataset(
     if single_task:
         tasks_by_episodes = {ep_idx: single_task for ep_idx in episode_indices}
         dataset, tasks = add_task_index_by_episodes(dataset, tasks_by_episodes)
-        tasks_by_episodes = {
-            ep_idx: [task] for ep_idx, task in tasks_by_episodes.items()
-        }
+        tasks_by_episodes = {ep_idx: [task] for ep_idx, task in tasks_by_episodes.items()}
     elif tasks_path:
         tasks_by_episodes = load_json(tasks_path)
-        tasks_by_episodes = {
-            int(ep_idx): task for ep_idx, task in tasks_by_episodes.items()
-        }
+        tasks_by_episodes = {int(ep_idx): task for ep_idx, task in tasks_by_episodes.items()}
         dataset, tasks = add_task_index_by_episodes(dataset, tasks_by_episodes)
-        tasks_by_episodes = {
-            ep_idx: [task] for ep_idx, task in tasks_by_episodes.items()
-        }
+        tasks_by_episodes = {ep_idx: [task] for ep_idx, task in tasks_by_episodes.items()}
     elif tasks_col:
-        dataset, tasks, tasks_by_episodes = add_task_index_from_tasks_col(
-            dataset, tasks_col
-        )
+        dataset, tasks, tasks_by_episodes = add_task_index_from_tasks_col(dataset, tasks_col)
     else:
         raise ValueError
 
-    assert set(tasks) == {
-        task for ep_tasks in tasks_by_episodes.values() for task in ep_tasks
-    }
-    tasks = [
-        {"task_index": task_idx, "task": task} for task_idx, task in enumerate(tasks)
-    ]
+    assert set(tasks) == {task for ep_tasks in tasks_by_episodes.values() for task in ep_tasks}
+    tasks = [{"task_index": task_idx, "task": task} for task_idx, task in enumerate(tasks)]
     write_jsonlines(tasks, v20_dir / TASKS_PATH)
     features["task_index"] = {
         "dtype": "int64",
@@ -594,9 +552,7 @@ def convert_dataset(
                 clean_gitattr,
                 branch,
             )
-        videos_info = get_videos_info(
-            repo_id, v1x_dir, video_keys=video_keys, branch=branch
-        )
+        videos_info = get_videos_info(repo_id, v1x_dir, video_keys=video_keys, branch=branch)
         for key in video_keys:
             features[key]["shape"] = (
                 videos_info[key].pop("video.height"),
@@ -604,25 +560,18 @@ def convert_dataset(
                 videos_info[key].pop("video.channels"),
             )
             features[key]["video_info"] = videos_info[key]
-            assert math.isclose(
-                videos_info[key]["video.fps"], metadata_v1["fps"], rel_tol=1e-3
-            )
+            assert math.isclose(videos_info[key]["video.fps"], metadata_v1["fps"], rel_tol=1e-3)
             if "encoding" in metadata_v1:
-                assert (
-                    videos_info[key]["video.pix_fmt"]
-                    == metadata_v1["encoding"]["pix_fmt"]
-                )
+                assert videos_info[key]["video.pix_fmt"] == metadata_v1["encoding"]["pix_fmt"]
     else:
         assert metadata_v1.get("video", 0) == 0
         videos_info = None
 
     # Split data into 1 parquet file by episode
-    episode_lengths = split_parquet_by_episodes(
-        dataset, total_episodes, total_chunks, v20_dir
-    )
+    episode_lengths = split_parquet_by_episodes(dataset, total_episodes, total_chunks, v20_dir)
 
     if robot_config is not None:
-        robot_type = robot_config["robot_type"]
+        robot_type = robot_config.type
         repo_tags = [robot_type]
     else:
         robot_type = "unknown"
@@ -657,14 +606,10 @@ def convert_dataset(
     }
     write_json(metadata_v2_0, v20_dir / INFO_PATH)
     convert_stats_to_json(v1x_dir, v20_dir)
-    card = create_lerobot_dataset_card(
-        tags=repo_tags, dataset_info=metadata_v2_0, **card_kwargs
-    )
+    card = create_lerobot_dataset_card(tags=repo_tags, dataset_info=metadata_v2_0, **card_kwargs)
 
     with contextlib.suppress(EntryNotFoundError, HfHubHTTPError):
-        hub_api.delete_folder(
-            repo_id=repo_id, path_in_repo="data", repo_type="dataset", revision=branch
-        )
+        hub_api.delete_folder(repo_id=repo_id, path_in_repo="data", repo_type="dataset", revision=branch)
 
     with contextlib.suppress(EntryNotFoundError, HfHubHTTPError):
         hub_api.delete_folder(
@@ -675,9 +620,7 @@ def convert_dataset(
         )
 
     with contextlib.suppress(EntryNotFoundError, HfHubHTTPError):
-        hub_api.delete_folder(
-            repo_id=repo_id, path_in_repo="meta", repo_type="dataset", revision=branch
-        )
+        hub_api.delete_folder(repo_id=repo_id, path_in_repo="meta", repo_type="dataset", revision=branch)
 
     hub_api.upload_folder(
         repo_id=repo_id,
@@ -726,16 +669,10 @@ def main():
         help="The path to a .json file containing one language instruction for each episode_index",
     )
     parser.add_argument(
-        "--robot-config",
-        type=Path,
-        default=None,
-        help="Path to the robot's config yaml the dataset during conversion.",
-    )
-    parser.add_argument(
-        "--robot-overrides",
+        "--robot",
         type=str,
-        nargs="*",
-        help="Any key=value arguments to override the robot config values (use dots for.nested=overrides)",
+        default=None,
+        help="Robot config used for the dataset during conversion (e.g. 'koch', 'aloha', 'so100', etc.)",
     )
     parser.add_argument(
         "--local-dir",
@@ -760,12 +697,10 @@ def main():
     if not args.local_dir:
         args.local_dir = Path("/tmp/lerobot_dataset_v2")
 
-    robot_config = (
-        parse_robot_config(args.robot_config, args.robot_overrides)
-        if args.robot_config
-        else None
-    )
-    del args.robot_config, args.robot_overrides
+    if args.robot is not None:
+        robot_config = make_robot_config(args.robot)
+
+    del args.robot
 
     convert_dataset(**vars(args), robot_config=robot_config)
 

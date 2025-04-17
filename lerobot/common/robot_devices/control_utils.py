@@ -1,3 +1,17 @@
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 ########################################################################################
 # Utilities
 ########################################################################################
@@ -13,27 +27,19 @@ from functools import cache
 import cv2
 import numpy as np
 import torch
-import tqdm
 from deepdiff import DeepDiff
 from termcolor import colored
 
 from lerobot.common.datasets.image_writer import safe_stop_image_writer
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.common.datasets.utils import get_features_from_robot
-from lerobot.common.policies.factory import make_policy
+from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.common.robot_devices.utils import busy_wait
-from lerobot.common.utils.utils import (
-    get_safe_torch_device,
-    init_hydra_config,
-    set_global_seed,
-)
-from lerobot.scripts.eval import get_pretrained_policy_path
+from lerobot.common.utils.utils import get_safe_torch_device, has_method
 
 
-def log_control_info(
-    robot: Robot, dt_s, episode_index=None, frame_index=None, fps=None
-):
+def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, fps=None):
     log_items = []
     if episode_index is not None:
         log_items.append(f"ep:{episode_index}")
@@ -96,17 +102,11 @@ def is_headless():
         return True
 
 
-def has_method(_object: object, method_name: str):
-    return hasattr(_object, method_name) and callable(getattr(_object, method_name))
-
-
 def predict_action(observation, policy, device, use_amp):
     observation = copy(observation)
     with (
         torch.inference_mode(),
-        torch.autocast(device_type=device.type)
-        if device.type == "cuda" and use_amp
-        else nullcontext(),
+        torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
     ):
         # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
         for name in observation:
@@ -129,7 +129,7 @@ def predict_action(observation, policy, device, use_amp):
     return action
 
 
-def init_keyboard_listener(assign_rewards=False, use_foot_switch=False):
+def init_keyboard_listener(assign_rewards=False):
     """
     Initializes a keyboard listener to enable early termination of an episode
     or environment reset by pressing the right arrow key ('->'). This may require
@@ -158,48 +158,28 @@ def init_keyboard_listener(assign_rewards=False, use_foot_switch=False):
 
     def on_press(key):
         try:
-            k = key.char if hasattr(key, 'char') else key
-            print(k)
+            if key == keyboard.Key.right:
+                print("Right arrow key pressed. Exiting loop...")
+                events["exit_early"] = True
+            elif key == keyboard.Key.left:
+                print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
+                events["rerecord_episode"] = True
+                events["exit_early"] = True
+            elif key == keyboard.Key.esc:
+                print("Escape key pressed. Stopping data recording...")
+                events["stop_recording"] = True
+                events["exit_early"] = True
+            elif assign_rewards and key == keyboard.Key.space:
+                events["next.reward"] = 1 if events["next.reward"] == 0 else 0
+                print(
+                    "Space key pressed. Assigning new reward to the subsequent frames. New reward:",
+                    events["next.reward"],
+                )
 
-            if use_foot_switch:
-                if k == 'a':
-                    print("Left pedal ('a') pressed. Exiting loop and rerecord the last episode...")
-                    events["rerecord_episode"] = True
-                    events["exit_early"] = True
-                elif k == 'b':
-                    print("Middle pedal ('b') pressed. Exiting loop...")
-                    events["exit_early"] = True
-                elif assign_rewards and k == 'c':
-                    events["next.reward"] = 1
-                    print("Right pedal ('c') pressed. Reward ON.")
-            else:
-                if k == keyboard.Key.right:
-                    print("Right arrow key pressed. Exiting loop...")
-                    events["exit_early"] = True
-                elif k == keyboard.Key.left:
-                    print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
-                    events["rerecord_episode"] = True
-                    events["exit_early"] = True
-                elif k == keyboard.Key.esc:
-                    print("Escape key pressed. Stopping data recording...")
-                    events["stop_recording"] = True
-                    events["exit_early"] = True
-                elif assign_rewards and k == keyboard.Key.space:
-                    events["next.reward"] = 1 if events["next.reward"] == 0 else 0
-                    print("Space key pressed. Toggling reward to:", events["next.reward"])
         except Exception as e:
             print(f"Error handling key press: {e}")
 
-    def on_release(key):
-        try:
-            k = key.char if hasattr(key, 'char') else key
-            if use_foot_switch and assign_rewards and k == 'c':
-                events["next.reward"] = 0
-                print("Right pedal ('c') released. Reward OFF.")
-        except Exception as e:
-            print(f"Error handling key release: {e}")
-
-    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+    listener = keyboard.Listener(on_press=on_press)
     listener.start()
 
     return listener, events
@@ -208,12 +188,8 @@ def init_keyboard_listener(assign_rewards=False, use_foot_switch=False):
 def init_policy(pretrained_policy_name_or_path, policy_overrides):
     """Instantiate the policy and load fps, device and use_amp from config yaml"""
     pretrained_policy_path = get_pretrained_policy_path(pretrained_policy_name_or_path)
-    hydra_cfg = init_hydra_config(
-        pretrained_policy_path / "config.yaml", policy_overrides
-    )
-    policy = make_policy(
-        hydra_cfg=hydra_cfg, pretrained_policy_name_or_path=pretrained_policy_path
-    )
+    hydra_cfg = init_hydra_config(pretrained_policy_path / "config.yaml", policy_overrides)
+    policy = make_policy(hydra_cfg=hydra_cfg, pretrained_policy_name_or_path=pretrained_policy_path)
 
     # Check device is available
     device = get_safe_torch_device(hydra_cfg.device, log=True)
@@ -254,10 +230,8 @@ def record_episode(
     episode_time_s,
     display_cameras,
     policy,
-    device,
-    use_amp,
     fps,
-    record_delta_actions,
+    single_task,
 ):
     control_loop(
         robot=robot,
@@ -266,11 +240,9 @@ def record_episode(
         dataset=dataset,
         events=events,
         policy=policy,
-        device=device,
-        use_amp=use_amp,
         fps=fps,
-        record_delta_actions=record_delta_actions,
         teleoperate=policy is None,
+        single_task=single_task,
     )
 
 
@@ -282,11 +254,9 @@ def control_loop(
     display_cameras=False,
     dataset: LeRobotDataset | None = None,
     events=None,
-    policy=None,
-    device=None,
-    use_amp=None,
-    fps=None,
-    record_delta_actions=False,
+    policy: PreTrainedPolicy = None,
+    fps: int | None = None,
+    single_task: str | None = None,
 ):
     # TODO(rcadene): Add option to record logs
     if not robot.is_connected:
@@ -301,50 +271,45 @@ def control_loop(
     if teleoperate and policy is not None:
         raise ValueError("When `teleoperate` is True, `policy` should be None.")
 
+    if dataset is not None and single_task is None:
+        raise ValueError("You need to provide a task as argument in `single_task`.")
+
     if dataset is not None and fps is not None and dataset.fps != fps:
-        raise ValueError(
-            f"The dataset fps should be equal to requested fps ({dataset['fps']} != {fps})."
-        )
+        raise ValueError(f"The dataset fps should be equal to requested fps ({dataset['fps']} != {fps}).")
 
     timestamp = 0
     start_episode_t = time.perf_counter()
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
-        current_joint_positions = robot.follower_arms["main"].read("Present_Position")
-
         if teleoperate:
             observation, action = robot.teleop_step(record_data=True)
-            if record_delta_actions:
-                action["action"] = action["action"] - current_joint_positions
         else:
             observation = robot.capture_observation()
 
             if policy is not None:
-                pred_action = predict_action(observation, policy, device, use_amp)
+                pred_action = predict_action(
+                    observation,
+                    policy,
+                    get_safe_torch_device(policy.config.device),
+                    policy.config.use_amp,
+                )
                 # Action can eventually be clipped using `max_relative_target`,
                 # so action actually sent is saved in the dataset.
                 action = robot.send_action(pred_action)
                 action = {"action": action}
 
         if dataset is not None:
-            frame = {**observation, **action}
-            if "next.reward" in events:
-                frame["next.reward"] = events["next.reward"]
-                frame["next.done"] = (events["next.reward"] == 1) or (
-                    events["exit_early"]
-                )
+            frame = {**observation, **action, "task": single_task}
             dataset.add_frame(frame)
 
-            # if frame["next.done"]:
-            # break
+        # if frame["next.done"]:
+        # break
 
         if display_cameras and not is_headless():
             image_keys = [key for key in observation if "image" in key]
             for key in image_keys:
-                cv2.imshow(
-                    key, cv2.cvtColor(observation[key].numpy(), cv2.COLOR_RGB2BGR)
-                )
+                cv2.imshow(key, cv2.cvtColor(observation[key].numpy(), cv2.COLOR_RGB2BGR))
             cv2.waitKey(1)
 
         if fps is not None:
@@ -352,7 +317,7 @@ def control_loop(
             busy_wait(1 / fps - dt_s)
 
         dt_s = time.perf_counter() - start_loop_t
-        #log_control_info(robot, dt_s, fps=fps)
+        log_control_info(robot, dt_s, fps=fps)
 
         timestamp = time.perf_counter() - start_episode_t
         if events["exit_early"]:
@@ -360,26 +325,18 @@ def control_loop(
             break
 
 
-def reset_environment(robot, events, reset_time_s):
+def reset_environment(robot, events, reset_time_s, fps):
     # TODO(rcadene): refactor warmup_record and reset_environment
-    # TODO(alibets): allow for teleop during reset
     if has_method(robot, "teleop_safety_stop"):
         robot.teleop_safety_stop()
 
-    timestamp = 0
-    start_vencod_t = time.perf_counter()
-    if "next.reward" in events:
-        events["next.reward"] = 0
-
-    # Wait if necessary
-    with tqdm.tqdm(total=reset_time_s, desc="Waiting") as pbar:
-        while timestamp < reset_time_s:
-            time.sleep(1)
-            timestamp = time.perf_counter() - start_vencod_t
-            pbar.update(1)
-            if events["exit_early"]:
-                events["exit_early"] = False
-                break
+    control_loop(
+        robot=robot,
+        control_time_s=reset_time_s,
+        events=events,
+        fps=fps,
+        teleoperate=True,
+    )
 
 
 def reset_follower_position(robot: Robot, target_position):
@@ -413,21 +370,21 @@ def stop_recording(robot, listener, display_cameras):
             cv2.destroyAllWindows()
 
 
-def sanity_check_dataset_name(repo_id, policy):
+def sanity_check_dataset_name(repo_id, policy_cfg):
     _, dataset_name = repo_id.split("/")
     # either repo_id doesnt start with "eval_" and there is no policy
     # or repo_id starts with "eval_" and there is a policy
 
     # Check if dataset_name starts with "eval_" but policy is missing
-    if dataset_name.startswith("eval_") and policy is None:
+    if dataset_name.startswith("eval_") and policy_cfg is None:
         raise ValueError(
-            f"Your dataset name begins with 'eval_' ({dataset_name}), but no policy is provided."
+            f"Your dataset name begins with 'eval_' ({dataset_name}), but no policy is provided ({policy_cfg.type})."
         )
 
     # Check if dataset_name does not start with "eval_" but policy is provided
-    if not dataset_name.startswith("eval_") and policy is not None:
+    if not dataset_name.startswith("eval_") and policy_cfg is not None:
         raise ValueError(
-            f"Your dataset name does not begin with 'eval_' ({dataset_name}), but a policy is provided ({policy})."
+            f"Your dataset name does not begin with 'eval_' ({dataset_name}), but a policy is provided ({policy_cfg.type})."
         )
 
 
@@ -450,14 +407,11 @@ def sanity_check_dataset_robot_compatibility(
 
     mismatches = []
     for field, dataset_value, present_value in fields:
-        diff = DeepDiff(
-            dataset_value, present_value, exclude_regex_paths=[r".*\['info'\]$"]
-        )
+        diff = DeepDiff(dataset_value, present_value, exclude_regex_paths=[r".*\['info'\]$"])
         if diff:
             mismatches.append(f"{field}: expected {present_value}, got {dataset_value}")
 
     if mismatches:
         raise ValueError(
-            "Dataset metadata compatibility check failed with mismatches:\n"
-            + "\n".join(mismatches)
+            "Dataset metadata compatibility check failed with mismatches:\n" + "\n".join(mismatches)
         )

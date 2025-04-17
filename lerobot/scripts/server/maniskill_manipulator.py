@@ -1,12 +1,13 @@
-import einops
-import numpy as np
-import gymnasium as gym
-import torch
-
-from omegaconf import DictConfig
 from typing import Any
-from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
+
+import einops
+import gymnasium as gym
+import numpy as np
+import torch
 from mani_skill.utils.wrappers.record import RecordEpisode
+from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
+
+from lerobot.common.envs.configs import ManiskillEnvConfig
 
 
 def preprocess_maniskill_observation(
@@ -49,6 +50,8 @@ def preprocess_maniskill_observation(
 class ManiSkillObservationWrapper(gym.ObservationWrapper):
     def __init__(self, env, device: torch.device = "cuda"):
         super().__init__(env)
+        if isinstance(device, str):
+            device = torch.device(device)
         self.device = device
 
     def observation(self, observation):
@@ -63,9 +66,7 @@ class ManiSkillCompat(gym.Wrapper):
         new_action_space_shape = env.action_space.shape[-1]
         new_low = np.squeeze(env.action_space.low, axis=0)
         new_high = np.squeeze(env.action_space.high, axis=0)
-        self.action_space = gym.spaces.Box(
-            low=new_low, high=new_high, shape=(new_action_space_shape,)
-        )
+        self.action_space = gym.spaces.Box(low=new_low, high=new_high, shape=(new_action_space_shape,))
 
     def reset(
         self, *, seed: int | None = None, options: dict[str, Any] | None = None
@@ -84,9 +85,7 @@ class ManiSkillCompat(gym.Wrapper):
 class ManiSkillActionWrapper(gym.ActionWrapper):
     def __init__(self, env):
         super().__init__(env)
-        self.action_space = gym.spaces.Tuple(
-            spaces=(env.action_space, gym.spaces.Discrete(2))
-        )
+        self.action_space = gym.spaces.Tuple(spaces=(env.action_space, gym.spaces.Discrete(2)))
 
     def action(self, action):
         action, telop = action
@@ -100,9 +99,7 @@ class ManiSkillMultiplyActionWrapper(gym.Wrapper):
         action_space_agent: gym.spaces.Box = env.action_space[0]
         action_space_agent.low = action_space_agent.low * multiply_factor
         action_space_agent.high = action_space_agent.high * multiply_factor
-        self.action_space = gym.spaces.Tuple(
-            spaces=(action_space_agent, gym.spaces.Discrete(2))
-        )
+        self.action_space = gym.spaces.Tuple(spaces=(action_space_agent, gym.spaces.Discrete(2)))
 
     def step(self, action):
         if isinstance(action, tuple):
@@ -114,6 +111,66 @@ class ManiSkillMultiplyActionWrapper(gym.Wrapper):
         return obs, reward, terminated, truncated, info
 
 
+class BatchCompatibleWrapper(gym.ObservationWrapper):
+    """Ensures observations are batch-compatible by adding a batch dimension if necessary."""
+
+    def __init__(self, env):
+        super().__init__(env)
+
+    def observation(self, observation: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        for key in observation:
+            if "image" in key and observation[key].dim() == 3:
+                observation[key] = observation[key].unsqueeze(0)
+            if "state" in key and observation[key].dim() == 1:
+                observation[key] = observation[key].unsqueeze(0)
+        return observation
+
+
+class TimeLimitWrapper(gym.Wrapper):
+    """Adds a time limit to the environment based on fps and control_time."""
+
+    def __init__(self, env, control_time_s, fps):
+        super().__init__(env)
+        self.control_time_s = control_time_s
+        self.fps = fps
+        self.max_episode_steps = int(self.control_time_s * self.fps)
+        self.current_step = 0
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        self.current_step += 1
+
+        if self.current_step >= self.max_episode_steps:
+            terminated = True
+
+        return obs, reward, terminated, truncated, info
+
+    def reset(self, *, seed=None, options=None):
+        self.current_step = 0
+        return super().reset(seed=seed, options=options)
+
+
+class ManiskillMockGripperWrapper(gym.Wrapper):
+    def __init__(self, env, nb_discrete_actions: int = 3):
+        super().__init__(env)
+        new_shape = env.action_space[0].shape[0] + 1
+        new_low = np.concatenate([env.action_space[0].low, [0]])
+        new_high = np.concatenate([env.action_space[0].high, [nb_discrete_actions - 1]])
+        action_space_agent = gym.spaces.Box(low=new_low, high=new_high, shape=(new_shape,))
+        self.action_space = gym.spaces.Tuple((action_space_agent, env.action_space[1]))
+
+    def step(self, action):
+        if isinstance(action, tuple):
+            action_agent, telop_action = action
+        else:
+            telop_action = 0
+            action_agent = action
+        real_action = action_agent[:-1]
+        final_action = (real_action, telop_action)
+        obs, reward, terminated, truncated, info = self.env.step(final_action)
+        return obs, reward, terminated, truncated, info
+
+
 def make_maniskill(
     cfg: DictConfig,
     n_envs: int | None = None,
@@ -122,11 +179,7 @@ def make_maniskill(
     Factory function to create a ManiSkill environment with standard wrappers.
 
     Args:
-        task: Name of the ManiSkill task
-        obs_mode: Observation mode (rgb, rgbd, etc)
-        control_mode: Control mode for the robot
-        render_mode: Rendering mode
-        sensor_configs: Camera sensor configurations
+        cfg: Configuration for the ManiSkill environment
         n_envs: Number of parallel environments
 
     Returns:
@@ -136,15 +189,15 @@ def make_maniskill(
     from lerobot.scripts.server.one_dim_manipulator import StabilizingActionMaskingWrapper, KeyboardControlWrapper
 
     env = gym.make(
-        cfg.env.task,
-        obs_mode=cfg.env.obs,
-        control_mode=cfg.env.control_mode,
-        render_mode=cfg.env.render_mode,
-        render_backend='sapien_cpu',
-        sensor_configs={"width": cfg.env.image_size, "height": cfg.env.image_size},
+        cfg.task,
+        obs_mode=cfg.obs_type,
+        control_mode=cfg.control_mode,
+        render_mode=cfg.render_mode,
+        sensor_configs={"width": cfg.image_size, "height": cfg.image_size},
         num_envs=n_envs,
     )
 
+    # Add video recording if enabled
     if cfg.env.video_record.enabled:
         env = RecordEpisode(
             env,
@@ -154,47 +207,66 @@ def make_maniskill(
             save_video=True,
             video_fps=30,
         )
-    env = ManiSkillObservationWrapper(env, device=cfg.env.device)
+
+    # Add observation and image processing
+    env = ManiSkillObservationWrapper(env, device=cfg.device)
     env = ManiSkillVectorEnv(env, ignore_terminations=True, auto_reset=False)
-    env._max_episode_steps = env.max_episode_steps = (
-        50  # gym_utils.find_max_episode_steps_value(env)
-    )
-    env.unwrapped.metadata["render_fps"] = 20
+    env._max_episode_steps = env.max_episode_steps = cfg.episode_length
+    env.unwrapped.metadata["render_fps"] = cfg.fps
+
+    # Add compatibility wrappers
     env = ManiSkillCompat(env)
     env = ManiSkillActionWrapper(env)
     env = ManiSkillMultiplyActionWrapper(env, multiply_factor=0.03)
+    if cfg.mock_gripper:
+        env = ManiskillMockGripperWrapper(env, nb_discrete_actions=3)
     env = StabilizingActionMaskingWrapper(env)
-    env = KeyboardControlWrapper
-
+    env = KeyboardControlWrapper(env)
     return env
 
 
+# @parser.wrap()
+# def main(cfg: TrainPipelineConfig):
+#     """Main function to run the ManiSkill environment."""
+#     # Create the ManiSkill environment
+#     env = make_maniskill(cfg.env, n_envs=1)
+
+#     # Reset the environment
+#     obs, info = env.reset()
+
+#     # Run a simple interaction loop
+#     sum_reward = 0
+#     for i in range(100):
+#         # Sample a random action
+#         action = env.action_space.sample()
+
+#         # Step the environment
+#         start_time = time.perf_counter()
+#         obs, reward, terminated, truncated, info = env.step(action)
+#         step_time = time.perf_counter() - start_time
+#         sum_reward += reward
+#         # Log information
+
+#         # Reset if episode terminated
+#         if terminated or truncated:
+#             logging.info(f"Step {i}, reward: {sum_reward}, step time: {step_time}s")
+#             sum_reward = 0
+#             obs, info = env.reset()
+
+#     # Close the environment
+#     env.close()
+
+
+# if __name__ == "__main__":
+#     logging.basicConfig(level=logging.INFO)
+#     main()
+
 if __name__ == "__main__":
-    import argparse
-    import hydra
+    import draccus
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config", type=str, default="lerobot/configs/env/maniskill_example.yaml"
+    config = ManiskillEnvConfig()
+    draccus.set_config_type("json")
+    draccus.dump(
+        config=config,
+        stream=open(file="run_config.json", mode="w"),
     )
-    args = parser.parse_args()
-
-    # Initialize config
-    with hydra.initialize(version_base=None, config_path="../../configs"):
-        cfg = hydra.compose(config_name="env/maniskill_example.yaml")
-
-    cfg.env.device = "cpu"
-
-    env = make_maniskill(
-        cfg,
-        n_envs=1
-    )
-
-    print("env done")
-    obs, info = env.reset()
-    import time
-    while True:
-        random_action = env.action_space.sample()
-        obs, reward, terminated, truncated, info = env.step(random_action)
-        env.render()
-        time.sleep(0.1)
