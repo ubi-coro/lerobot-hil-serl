@@ -5,6 +5,19 @@ import logging
 import modern_robotics as mr
 from scipy.spatial.transform import Rotation
 
+from lerobot.common.robot_devices.robots.configs import RobotConfig, AlohaRobotConfig
+
+
+def get_kinematics(robot_cfg: RobotConfig, robot_type: str = "follower"):
+    robot_type = getattr(robot_cfg, "robot_type", "so100")
+    if isinstance(robot_cfg, AlohaRobotConfig):
+        if robot_type == "follower":
+            return MRKinematics(robot_cfg.follower_model)
+        else:
+            return MRKinematics(robot_cfg.leader_model)
+    else:
+        return RobotKinematics(robot_type)
+
 
 def skew_symmetric(w):
     """Creates the skew-symmetric matrix from a 3D vector."""

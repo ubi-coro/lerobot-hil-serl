@@ -19,7 +19,7 @@ from lerobot.common.robot_devices.control_utils import (
 from lerobot.common.robot_devices.robots.utils import make_robot_from_config
 from lerobot.common.utils.utils import log_say
 from lerobot.configs import parser
-from lerobot.scripts.server.kinematics import RobotKinematics
+from lerobot.scripts.server.kinematics import get_kinematics
 
 logging.basicConfig(level=logging.INFO)
 MAX_GRIPPER_COMMAND = 40
@@ -563,8 +563,7 @@ class EEActionWrapper(gym.ActionWrapper):
         self.use_gripper = use_gripper
 
         # Initialize kinematics instance for the appropriate robot type
-        robot_type = getattr(env.unwrapped.robot.config, "robot_type", "so100")
-        self.kinematics = RobotKinematics(robot_type)
+        self.kinematics = get_kinematics(env.unwrapped.robot.config, robot_type="follower")
         self.fk_function = self.kinematics.fk_gripper_tip
 
         action_space_bounds = np.array(
@@ -633,7 +632,7 @@ class EEObservationWrapper(gym.ObservationWrapper):
 
         # Initialize kinematics instance for the appropriate robot type
         robot_type = getattr(env.unwrapped.robot.config, "robot_type", "so100")
-        self.kinematics = RobotKinematics(robot_type)
+        self.kinematics = get_kinematics(env.unwrapped.robot.config, robot_type="follower")
         self.fk_function = self.kinematics.fk_gripper_tip
 
     def observation(self, observation):
@@ -673,8 +672,7 @@ class BaseLeaderControlWrapper(gym.Wrapper):
         self.event_lock = Lock()  # Thread-safe access to events
 
         # Initialize robot control
-        robot_type = getattr(env.unwrapped.robot.config, "robot_type", "so100")
-        self.kinematics = RobotKinematics(robot_type)
+        self.kinematics = get_kinematics(env.unwrapped.robot.config, robot_type="leader")
         self.prev_leader_ee = None
         self.prev_leader_pos = None
         self.leader_torque_enabled = True

@@ -199,11 +199,6 @@ class ManipulatorRobot:
                 "shape": (len(state_names),),
                 "names": state_names,
             },
-            "observation.joint_vel": {
-                "dtype": "float32",
-                "shape": (len(state_names), ),
-                "names": state_names,
-            },
         }
 
     @property
@@ -607,7 +602,7 @@ class ManipulatorRobot:
         # Populate output dictionaries and format to pytorch
         obs_dict = {}
         obs_dict["observation.state"] = state
-        obs_dict["observation.joint_vel"] = vel
+        #obs_dict["observation.joint_vel"] = vel
         for name in self.cameras:
             obs_dict[f"observation.images.{name}"] = images[name]
 
