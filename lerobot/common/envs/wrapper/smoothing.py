@@ -7,16 +7,14 @@ class SmoothActionWrapper(gym.Wrapper):
 
     To be used after ManiSkillObservationWrapper.
     """
-    def __init__(self, env, device, max_delta_range_factor: float = 0.3):
+    def __init__(self, env, device, smoothing_range_factor: float = 0.3, smoothing_penalty: float = 0.0):
         super().__init__(env)
         self.device = device
 
-        action_space = self.env.action_space[0] \
-            if isinstance(self.env.action_space, gym.spaces.Tuple) \
-            else self.env.action_space
-        self.action_dim = action_space.shape
-        self.max_delta = max_delta_range_factor * action_space.high
-        self.min_delta = max_delta_range_factor * action_space.low
+        self.action_dim = self.action_space.shape
+        self.smoothing_penalty = smoothing_penalty
+        self.max_delta = smoothing_range_factor * action_space.high
+        self.min_delta = smoothing_range_factor * action_space.low
 
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
 
@@ -27,10 +25,6 @@ class SmoothActionWrapper(gym.Wrapper):
         return obs, info
 
     def step(self, action):
-        if isinstance(action, tuple):
-            action, telop = action
-        else:
-            telop = 0
 
         # Clamp the delta action
         delta_action = action - self.prev_action
@@ -38,13 +32,14 @@ class SmoothActionWrapper(gym.Wrapper):
         if exceeds_limits:
             print(f"Clamp {delta_action} to {self.max_delta}")
             delta_action = np.clip(delta_action, self.min_delta, self.max_delta)
+
         smoothed_action = self.prev_action + delta_action
         self.prev_action = smoothed_action.copy()
 
-        obs, reward, terminated, truncated, info = self.env.step((smoothed_action, telop))
+        obs, reward, terminated, truncated, info = self.env.step(smoothed_action)
         obs = self._append_prev_action(obs)
         if exceeds_limits:
-            reward -= 0.05
+            reward -= self.smoothing_penalty
         return obs, reward, terminated, truncated, info
 
     def _append_prev_action(self, obs):

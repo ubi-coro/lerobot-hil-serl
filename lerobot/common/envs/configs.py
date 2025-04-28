@@ -38,6 +38,44 @@ class EnvConfig(draccus.ChoiceRegistry, abc.ABC):
     def gym_kwargs(self) -> dict:
         raise NotImplementedError()
 
+    def make(self, n_envs: int = 1, use_async_envs: bool = False) -> gym.vector.VectorEnv | None:
+        """Makes a gym vector environment according to the config.
+
+            Args:
+                cfg (EnvConfig): the config of the environment to instantiate.
+                n_envs (int, optional): The number of parallelized env to return. Defaults to 1.
+                use_async_envs (bool, optional): Whether to return an AsyncVectorEnv or a SyncVectorEnv. Defaults to
+                    False.
+
+            Raises:
+                ValueError: if n_envs < 1
+                ModuleNotFoundError: If the requested env package is not installed
+
+            Returns:
+                gym.vector.VectorEnv: The parallelized gym.env instance.
+            """
+        if n_envs < 1:
+            raise ValueError("`n_envs must be at least 1")
+
+        package_name = f"gym_{self.type}"
+
+        try:
+            importlib.import_module(package_name)
+        except ModuleNotFoundError as e:
+            print(f"{package_name} is not installed. Please install it with `pip install 'lerobot[{self.type}]'`")
+            raise e
+
+        gym_handle = f"{package_name}/{self.task}"
+
+        # batched version of the env that returns an observation of shape (b, c)
+        env_cls = gym.vector.AsyncVectorEnv if use_async_envs else gym.vector.SyncVectorEnv
+        env = env_cls(
+            [lambda: gym.make(gym_handle, disable_env_checker=True, **self.gym_kwargs) for _ in range(n_envs)]
+        )
+
+        return env
+
+
 
 @EnvConfig.register_subclass("aloha")
 @dataclass
@@ -222,11 +260,137 @@ class HILSerlRobotEnvConfig(EnvConfig):
     episode: int = 0
     device: str = "cuda"
     push_to_hub: bool = True
+    smoothing_range_factor: Optional[float] = None
     pretrained_policy_name_or_path: Optional[str] = None
     reward_classifier_pretrained_path: Optional[str] = None
 
     def gym_kwargs(self) -> dict:
         return {}
+
+    def make(self, **kwargs) -> gym.vector.VectorEnv:
+        """
+        Factory function to create a vectorized robot environment.
+
+        cfg.
+            robot: Robot instance to control
+            reward_classifier: Classifier model for computing rewards
+            cfg: Configuration object containing environment parameters
+
+        Returns:
+            A vectorized gym environment with all the necessary wrappers applied.
+        """
+        import lerobot.common.envs.wrapper.hilserl as wrapper
+        from lerobot.common.envs.wrapper.smoothing import SmoothActionWrapper
+
+
+        robot = make_robot_from_config(cfg.robot)
+        # Create base environment
+        env = RobotEnv(
+            robot=robot,
+            display_cameras=self.wrapper.display_cameras,
+        )
+
+        # Add observation and image processing
+        if self.wrapper.add_joint_velocity_to_observation:
+            env = wrapper.AddJointVelocityToObservation(env=env, fps=self.fps)
+        if self.wrapper.add_current_to_observation:
+            env = wrapper.AddCurrentToObservation(env=env)
+        if self.wrapper.add_ee_pose_to_observation:
+            env = wrapper.EEObservationWrapper(env=env, ee_pose_limits=self.wrapper.ee_action_space_params.bounds)
+
+        env = wrapper.ConvertToLeRobotObservation(env=env, device=self.device)
+
+        if self.wrapper.crop_params_dict is not None:
+            env = wrapper.ImageCropResizeWrapper(
+                env=env,
+                crop_params_dict=self.wrapper.crop_params_dict,
+                resize_size=self.wrapper.resize_size,
+            )
+
+        # Add reward computation and control wrappers
+        reward_classifier = self.init_reward_classifier()
+        if reward_classifier is not None:
+            env = wrapper.RewardWrapper(env=env, reward_classifier=reward_classifier, device=self.device)
+        env = wrapper.TimeLimitWrapper(env=env, control_time_s=self.wrapper.control_time_s, fps=self.fps)
+        if self.wrapper.use_gripper:
+            env = wrapper.GripperActionWrapper(env=env, quantization_threshold=self.wrapper.gripper_quantization_threshold)
+            if self.wrapper.gripper_penalty is not None:
+                env = wrapper.GripperPenaltyWrapper(
+                    env=env,
+                    penalty=self.wrapper.gripper_penalty,
+                )
+
+        env = wrapper.EEActionWrapper(
+            env=env,
+            ee_action_space_params=self.wrapper.ee_action_space_params,
+            use_gripper=self.wrapper.use_gripper,
+        )
+
+        if self.max_delta_range_factor is not None:
+            env = SmoothActionWrapper(env, smoothing_range_factor=self.smoothing_range_factor)
+
+        if self.wrapper.ee_action_space_params.control_mode == "gamepad":
+            env = wrapper.GamepadControlWrapper(
+                env=env,
+                x_step_size=self.wrapper.ee_action_space_params.x_step_size,
+                y_step_size=self.wrapper.ee_action_space_params.y_step_size,
+                z_step_size=self.wrapper.ee_action_space_params.z_step_size,
+                use_gripper=self.wrapper.use_gripper,
+            )
+        elif self.wrapper.ee_action_space_params.control_mode == "leader":
+            env = wrapper.GearedLeaderControlWrapper(
+                env=env,
+                ee_action_space_params=self.wrapper.ee_action_space_params,
+                use_gripper=self.wrapper.use_gripper,
+            )
+        elif self.wrapper.ee_action_space_params.control_mode == "leader_automatic":
+            env = wrapper.GearedLeaderAutomaticControlWrapper(
+                env=env,
+                ee_action_space_params=self.wrapper.ee_action_space_params,
+                use_gripper=self.wrapper.use_gripper,
+            )
+        else:
+            raise ValueError(f"Invalid control mode: {self.wrapper.ee_action_space_params.control_mode}")
+
+        env = wrapper.ResetWrapper(
+            env=env,
+            reset_pose=self.wrapper.fixed_reset_joint_positions,
+            reset_time_s=self.wrapper.reset_time_s,
+        )
+        env = wrapper.BatchCompatibleWrapper(env=env)
+        env = wrapper.TorchActionWrapper(env=env, device=self.device)
+
+        return env
+
+
+    def init_reward_classifier(self):
+        """
+        Load a reward classifier policy from a pretrained path if configured.
+
+        Args:
+            self: The environment configuration containing classifier paths
+
+        Returns:
+            The loaded classifier model or None if not configured
+        """
+        if self.reward_classifier_pretrained_path is None:
+            return None
+
+        from lerobot.common.policies.reward_model.modeling_classifier import Classifier
+
+        # Get device from config or default to CUDA
+        device = getattr(self, "device", "cpu")
+
+        # Load the classifier directly using from_pretrained
+        classifier = Classifier.from_pretrained(
+            pretrained_name_or_path=self.reward_classifier_pretrained_path,
+        )
+
+        # Ensure model is on the correct device
+        classifier.to(device)
+        classifier.eval()  # Set to evaluation mode
+
+        return classifier
 
 
 @EnvConfig.register_subclass("maniskill_push")
@@ -276,3 +440,58 @@ class ManiskillEnvConfig(EnvConfig):
             "sensor_configs": {"width": self.image_size, "height": self.image_size},
             "num_envs": 1,
         }
+
+    def make(self, n_envs: int = 1, **kwargs) -> gym.vector.VectorEnv | None:
+        """
+        Factory function to create a ManiSkill environment with standard wrappers.
+
+        Args:
+            cfg: Configuration for the ManiSkill environment
+            n_envs: Number of parallel environments
+
+        Returns:
+            A wrapped ManiSkill environment
+        """
+        import lerobot.common.envs.wrapper.maniskill as maniskill_wrapper
+        from lerobot.common.envs.wrapper.hilserl import StabilizingActionMaskingWrapper
+        from lerobot.common.envs.wrapper.smoothing import SmoothActionWrapper
+        from mani_skill.utils.wrappers.record import RecordEpisode
+
+        env = gym.make(
+            self.task,
+            obs_mode=self.obs_type,
+            control_mode=self.control_mode,
+            render_mode=self.render_mode,
+            sensor_configs={"width": self.image_size, "height": self.image_size},
+            num_envs=n_envs,
+        )
+        env._max_episode_steps = self.episode_length
+
+        # Add video recording if enabled
+        if self.video_record.enabled:
+            env = RecordEpisode(
+                env,
+                output_dir=self.video_record.record_dir,
+                save_trajectory=True,
+                trajectory_name=self.video_record.trajectory_name,
+                save_video=True,
+                video_fps=30,
+            )
+
+        # Add observation and image processing
+        env = maniskill_wrapper.ManiSkillObservationWrapper(env, device=self.device)
+        env = maniskill_wrapper.ManiSkillVectorEnv(env, ignore_terminations=False, auto_reset=False)
+        env._max_episode_steps = env.max_episode_steps = self.episode_length
+        env.unwrapped.metadata["render_fps"] = self.fps
+
+        # Add compatibility wrappers
+        env = maniskill_wrapper.ManiSkillCompat(env)
+        env = maniskill_wrapper.ManiSkillActionWrapper(env)
+        env = maniskill_wrapper.ManiSkillMultiplyActionWrapper(env, multiply_factor=0.03)
+        if self.mock_gripper:
+            env = maniskill_wrapper.ManiskillMockGripperWrapper(env, nb_discrete_actions=3)
+        env = maniskill_wrapper.StabilizingActionMaskingWrapper(env, ref_pose=np.array([0.0, 0.0, 0.02, 0.0, 1.0, 0.0, 0.0]), ax=[0, 1])
+        # env = ActionLoggingPlotWrapper(env)
+        env = SmoothActionWrapper(env, device=self.device)
+        env = maniskill_wrapper.KeyboardControlWrapper(env, ax=[0, 1])
+        return env

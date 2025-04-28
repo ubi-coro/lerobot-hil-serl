@@ -38,7 +38,6 @@ from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.scripts.server import hilserl_pb2, hilserl_pb2_grpc, learner_service
 from lerobot.scripts.server.buffer import Transition
-from lerobot.scripts.server.gym_manipulator import make_robot_env
 from lerobot.scripts.server.network_utils import (
     bytes_to_state_dict,
     python_object_to_bytes,
@@ -197,7 +196,7 @@ def act_with_policy(
 
     logging.info("make_env online")
 
-    online_env = make_robot_env(cfg=cfg.env)
+    online_env = cfg.env.make()
 
     set_seed(cfg.seed)
     device = get_safe_torch_device(cfg.policy.device, log=True)

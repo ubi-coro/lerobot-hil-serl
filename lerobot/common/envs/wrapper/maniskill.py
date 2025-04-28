@@ -131,3 +131,80 @@ class BatchCompatibleWrapper(gym.ObservationWrapper):
             if "state" in key and observation[key].dim() == 1:
                 observation[key] = observation[key].unsqueeze(0)
         return observation
+
+
+class KeyboardControlWrapper(gym.Wrapper):
+    """
+    A wrapper for controlling the robot's end-effector using the keyboard.
+    Arrow keys are used to move the end-effector along the X-axis.
+    """
+
+    def __init__(self, env: Reach1DEnv, ax: list | float | None = None):
+        super().__init__(env)
+
+        if ax is None:
+            ax = 0
+        if not isinstance(ax, list):
+            ax = [ax]
+        assert len(ax) <= 3, "Can only control three axes with KeyboardControlWrapper"
+        self.axes = ax
+
+        self.action = np.array([0.0, 0.0, 0.0])  # Default action value
+        self.done = False
+        self.intervention = False
+
+        listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
+        listener.start()
+
+    def _on_press(self, key):
+        try:
+            if key == keyboard.Key.right:
+                self.action[0] = -0.03  # Move right (X-axis)
+            elif key == keyboard.Key.left:
+                self.action[0] = 0.03  # Move left (X-axis)
+            elif key == keyboard.Key.up:
+                self.action[1] = -0.03  # Move up (Y-axis)
+            elif key == keyboard.Key.down:
+                self.action[1] = 0.03  # Move down (Y-axis)
+            elif key == keyboard.Key.page_up:
+                self.action[2] = 0.03  # Move up (Z-axis) with Shift
+            elif key == keyboard.Key.page_down:
+                self.action[2] = -0.03  # Move down (Z-axis) with Shift
+            elif key == keyboard.Key.space:
+                self.intervention = True
+            elif key == keyboard.Key.esc:
+                self.done = True  # Exit the loop
+        except AttributeError:
+            pass
+
+    def _on_release(self, key):
+        if key in [keyboard.Key.right, keyboard.Key.left]:
+            self.action[0] = 0.0  # Stop movement along X-axis
+        if key in [keyboard.Key.up, keyboard.Key.down]:
+            self.action[1] = 0.0  # Stop movement along Y-axis
+        if key in [keyboard.Key.page_up, keyboard.Key.page_down]:
+            self.action[2] = 0.0  # Stop movement along Z-axis
+        if key == keyboard.Key.space:
+            self.intervention = False
+
+    def step(self, action):
+        """
+        Run the environment loop with keyboard control.
+        """
+        if isinstance(action, tuple):
+            action, telop = action
+        else:
+            telop = self.intervention
+
+        if telop:
+            action = np.zeros_like(action)
+            for i, ax in enumerate(self.axes):
+                action[ax] = self.action[i]
+
+        obs, reward, done, vec, info = self.env.step(action)
+
+        if telop:
+            info["is_intervention"] = bool(telop)
+            info["action_intervention"] = torch.from_numpy(action)
+
+        return obs, reward, self.done or done, vec, info
