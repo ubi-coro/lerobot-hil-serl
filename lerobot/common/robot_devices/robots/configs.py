@@ -28,6 +28,7 @@ from lerobot.common.robot_devices.motors.configs import (
     FeetechMotorsBusConfig,
     MotorsBusConfig,
 )
+from lerobot.common.robot_devices.sensors.config import BotaConfig
 
 
 @dataclass
@@ -43,6 +44,7 @@ class ManipulatorRobotConfig(RobotConfig):
     leader_arms: dict[str, MotorsBusConfig] = field(default_factory=lambda: {})
     follower_arms: dict[str, MotorsBusConfig] = field(default_factory=lambda: {})
     cameras: dict[str, CameraConfig] = field(default_factory=lambda: {})
+    botas: dict[str, BotaConfig] = field(default_factory=lambda: {})
 
     # Optionally limit the magnitude of the relative positional target vector for safety purposes.
     # Set this to a positive scalar to have the same value for all motors, or a list that is the same length
@@ -100,6 +102,15 @@ class AlohaRobotConfig(ManipulatorRobotConfig):
     # first try to teleoperate the grippers only (by commenting out the rest of the motors in this yaml),
     # then to gradually add more motors (by uncommenting), until you can teleoperate both arms fully
     max_relative_target: int | None = 5
+
+    # The duration of the velocity-based time profile
+    # Higher values lead to smoother motions, but increase lag.
+    moving_time: float = 0.1
+
+    # Specific to Aloha, the kinematic chain of leader and follower might differ. Therefore, we specify a robot model
+    # "class" for leader and follower. This is required for initializing forward and inverse kinematics
+    follower_model = "vx300s-bota"
+    leader_model = "wx250s"
 
     leader_arms: dict[str, MotorsBusConfig] = field(
         default_factory=lambda: {

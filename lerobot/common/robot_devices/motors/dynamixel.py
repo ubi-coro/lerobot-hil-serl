@@ -43,8 +43,8 @@ UPPER_BOUND_DEGREE = 270
 # their nominal range is [0, 100] %. For instance, for Aloha gripper, 0% is fully
 # closed, and 100% is fully open. To account for slight calibration issue, we allow up to
 # [-10, 110] until an error is raised.
-LOWER_BOUND_LINEAR = -10
-UPPER_BOUND_LINEAR = 110
+LOWER_BOUND_LINEAR = -30
+UPPER_BOUND_LINEAR = 130
 
 HALF_TURN_DEGREE = 180
 
@@ -121,7 +121,8 @@ X_SERIES_BAUDRATE_TABLE = {
     6: 4_000_000,
 }
 
-CALIBRATION_REQUIRED = ["Goal_Position", "Present_Position"]
+CALIBRATION_REQUIRED = ["Goal_Position", "Present_Position", "Present_Velocity"]
+IS_VELOCITY = ["Present_Velocity"]
 CONVERT_UINT32_TO_INT32_REQUIRED = ["Goal_Position", "Present_Position"]
 
 MODEL_CONTROL_TABLE = {
@@ -421,20 +422,24 @@ class DynamixelMotorsBus:
     def set_calibration(self, calibration: dict[str, list]):
         self.calibration = calibration
 
-    def apply_calibration_autocorrect(self, values: np.ndarray | list, motor_names: list[str] | None):
+    def apply_calibration_autocorrect(
+        self, values: np.ndarray | list, motor_names: list[str] | None, is_velocity: bool = False
+    ):
         """This function applies the calibration, automatically detects out of range errors for motors values and attempts to correct.
 
         For more info, see docstring of `apply_calibration` and `autocorrect_calibration`.
         """
         try:
-            values = self.apply_calibration(values, motor_names)
+            values = self.apply_calibration(values, motor_names, is_velocity=is_velocity)
         except JointOutOfRangeError as e:
             print(e)
             self.autocorrect_calibration(values, motor_names)
             values = self.apply_calibration(values, motor_names)
         return values
 
-    def apply_calibration(self, values: np.ndarray | list, motor_names: list[str] | None):
+    def apply_calibration(
+        self, values: np.ndarray | list, motor_names: list[str] | None, is_velocity: bool = False
+    ):
         """Convert from unsigned int32 joint position range [0, 2**32[ to the universal float32 nominal degree range ]-180.0, 180.0[ with
         a "zero position" at 0 degree.
 
@@ -472,14 +477,15 @@ class DynamixelMotorsBus:
 
                 # Convert from range [-2**31, 2**31] to
                 # nominal range [-resolution//2, resolution//2] (e.g. [-2048, 2048])
-                values[i] += homing_offset
+                if not is_velocity:
+                    values[i] += homing_offset
 
                 # Convert from range [-resolution//2, resolution//2] to
                 # universal float32 centered degree range [-180, 180]
                 # (e.g. 2048 / (4096 // 2) * 180 = 180)
                 values[i] = values[i] / (resolution // 2) * HALF_TURN_DEGREE
 
-                if (values[i] < LOWER_BOUND_DEGREE) or (values[i] > UPPER_BOUND_DEGREE):
+                if not is_velocity and ( (values[i] < LOWER_BOUND_DEGREE) or (values[i] > UPPER_BOUND_DEGREE) ):
                     raise JointOutOfRangeError(
                         f"Wrong motor position range detected for {name}. "
                         f"Expected to be in nominal range of [-{HALF_TURN_DEGREE}, {HALF_TURN_DEGREE}] degrees (a full rotation), "
@@ -495,9 +501,12 @@ class DynamixelMotorsBus:
 
                 # Rescale the present position to a nominal range [0, 100] %,
                 # useful for joints with linear motions like Aloha gripper
-                values[i] = (values[i] - start_pos) / (end_pos - start_pos) * 100
+                if not is_velocity:
+                    values[i] -= start_pos
 
-                if (values[i] < LOWER_BOUND_LINEAR) or (values[i] > UPPER_BOUND_LINEAR):
+                values[i] = values[i] / (end_pos - start_pos) * 100
+
+                if not is_velocity and ( (values[i] < LOWER_BOUND_LINEAR) or (values[i] > UPPER_BOUND_LINEAR) ):
                     raise JointOutOfRangeError(
                         f"Wrong motor position range detected for {name}. "
                         f"Expected to be in nominal range of [0, 100] % (a full linear translation), "
@@ -509,7 +518,9 @@ class DynamixelMotorsBus:
 
         return values
 
-    def autocorrect_calibration(self, values: np.ndarray | list, motor_names: list[str] | None):
+    def autocorrect_calibration(
+        self, values: np.ndarray | list, motor_names: list[str] | None
+    ):
         """This function automatically detects issues with values of motors after calibration, and correct for these issues.
 
         Some motors might have values outside of expected maximum bounds after calibration.
@@ -605,7 +616,9 @@ class DynamixelMotorsBus:
                 # A full turn corresponds to 360 degrees but also to 4096 steps for a motor resolution of 4096.
                 self.calibration["homing_offset"][calib_idx] += resolution * factor
 
-    def revert_calibration(self, values: np.ndarray | list, motor_names: list[str] | None):
+    def revert_calibration(
+        self, values: np.ndarray | list, motor_names: list[str] | None, is_velocity: bool = False
+    ):
         """Inverse of `apply_calibration`."""
         if motor_names is None:
             motor_names = self.motor_names
@@ -626,7 +639,8 @@ class DynamixelMotorsBus:
 
                 # Subtract the homing offsets to come back to actual motor range of values
                 # which can be arbitrary.
-                values[i] -= homing_offset
+                if not is_velocity:
+                    values[i] -= homing_offset
 
                 # Remove drive mode, which is the rotation direction of the motor, to come back to
                 # actual motor rotation direction which can be arbitrary.
@@ -639,7 +653,10 @@ class DynamixelMotorsBus:
 
                 # Convert from nominal lnear range of [0, 100] % to
                 # actual motor range of values which can be arbitrary.
-                values[i] = values[i] / 100 * (end_pos - start_pos) + start_pos
+                values[i] = values[i] / 100 * (end_pos - start_pos)
+
+                if not is_velocity:
+                    values[i] += start_pos
 
         values = np.round(values).astype(np.int32)
         return values
@@ -743,7 +760,8 @@ class DynamixelMotorsBus:
             values = values.astype(np.int32)
 
         if data_name in CALIBRATION_REQUIRED and self.calibration is not None:
-            values = self.apply_calibration_autocorrect(values, motor_names)
+            is_velocity = data_name in IS_VELOCITY
+            values = self.apply_calibration_autocorrect(values, motor_names, is_velocity=is_velocity)
 
         # log the number of seconds it took to read the data from the motors
         delta_ts_name = get_log_name("delta_timestamp_s", "read", data_name, motor_names)
@@ -816,7 +834,8 @@ class DynamixelMotorsBus:
             models.append(model)
 
         if data_name in CALIBRATION_REQUIRED and self.calibration is not None:
-            values = self.revert_calibration(values, motor_names)
+            is_velocity = data_name in IS_VELOCITY
+            values = self.revert_calibration(values, motor_names, is_velocity=is_velocity)
 
         values = values.tolist()
 

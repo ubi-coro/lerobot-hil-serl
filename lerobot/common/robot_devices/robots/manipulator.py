@@ -164,6 +164,8 @@ class ManipulatorRobot:
         self.leader_arms = make_motors_buses_from_configs(self.config.leader_arms)
         self.follower_arms = make_motors_buses_from_configs(self.config.follower_arms)
         self.cameras = make_cameras_from_configs(self.config.cameras)
+        self.botas = self.config.botas  # todo: make botas from config
+
         self.is_connected = False
         self.logs = {}
 
@@ -197,11 +199,35 @@ class ManipulatorRobot:
                 "shape": (len(state_names),),
                 "names": state_names,
             },
+            "observation.joint_vel": {
+                "dtype": "float32",
+                "shape": (len(state_names), ),
+                "names": state_names,
+            },
         }
 
     @property
+    def bota_features(self) -> dict:
+        if self.has_bota:
+            wrench_names = [f"{name}_{axis}" for name in self.botas for axis in ['x', 'y', 'z']]
+            return {
+                "observation.tcp_force": {
+                    "dtype": "float32",
+                    "shape": (len(wrench_names), ),
+                    "names": wrench_names,
+                },
+                "observation.tcp_torque": {
+                    "dtype": "float32",
+                    "shape": (len(wrench_names), ),
+                    "names": wrench_names,
+                },
+            }
+        else:
+            return {}
+
+    @property
     def features(self):
-        return {**self.motor_features, **self.camera_features}
+        return {**self.motor_features, **self.camera_features, **self.bota_features}
 
     @property
     def has_camera(self):
@@ -210,6 +236,14 @@ class ManipulatorRobot:
     @property
     def num_cameras(self):
         return len(self.cameras)
+
+    @property
+    def has_bota(self):
+        return len(self.botas) > 0
+
+    @property
+    def num_botas(self):
+        return len(self.botas)
 
     @property
     def available_arms(self):
@@ -248,10 +282,11 @@ class ManipulatorRobot:
 
         # We assume that at connection time, arms are in a rest position, and torque can
         # be safely disabled to run calibration and/or set robot preset configurations.
-        for name in self.follower_arms:
-            self.follower_arms[name].write("Torque_Enable", TorqueMode.DISABLED.value)
-        for name in self.leader_arms:
-            self.leader_arms[name].write("Torque_Enable", TorqueMode.DISABLED.value)
+        # I do not make this assumption!
+        #for name in self.follower_arms:
+        #    self.follower_arms[name].write("Torque_Enable", TorqueMode.DISABLED.value)
+        #for name in self.leader_arms:
+        #    self.leader_arms[name].write("Torque_Enable", TorqueMode.DISABLED.value)
 
         self.activate_calibration()
 
@@ -263,7 +298,10 @@ class ManipulatorRobot:
         elif self.robot_type in ["so100", "moss", "lekiwi"]:
             self.set_so100_robot_preset()
 
-        # Enable torque on all motors of the follower arms
+        # Disable torque on all leaders, enable torque on all follower arms
+        for name in self.leader_arms:
+            print(f"Deactivating torque on {name} leader arm.")
+            self.leader_arms[name].write("Torque_Enable", TorqueMode.DISABLED.value)
         for name in self.follower_arms:
             print(f"Activating torque on {name} follower arm.")
             self.follower_arms[name].write("Torque_Enable", 1)
@@ -291,11 +329,21 @@ class ManipulatorRobot:
 
         self.is_connected = True
 
+        # Connect to botas
+        # Bota calibration might require teleoperation, so we set is_connected first
+        for name in self.botas:
+            self.botas[name].connect()
+            self.botas[name].activate_calibration(self, name, self.calibration_dir, self.config.fps)
+
     def activate_calibration(self):
         """After calibration all motors function in human interpretable ranges.
         Rotations are expressed in degrees in nominal range of [-180, 180],
         and linear motions (like gripper of Aloha) in nominal range of [0, 100].
         """
+        if self.robot_type in ["koch", "koch_bimanual", "aloha"]:
+            from lerobot.common.robot_devices.motors.dynamixel import TorqueMode
+        elif self.robot_type in ["so100", "moss", "lekiwi"]:
+            from lerobot.common.robot_devices.motors.feetech import TorqueMode
 
         def load_or_run_calibration_(name, arm, arm_type):
             arm_id = get_arm_id(name, arm_type)
@@ -307,6 +355,10 @@ class ManipulatorRobot:
             else:
                 # TODO(rcadene): display a warning in __init__ if calibration file not available
                 print(f"Missing calibration file '{arm_calib_path}'")
+
+                if not all(arm.read("Torque_Enable") == TorqueMode.DISABLED.value):
+                    print(f"Press <enter> to disable the torque of {self.robot_type} {name} {arm_type}... ")
+                    arm.write("Torque_Enable", TorqueMode.DISABLED.value)
 
                 if self.robot_type in ["koch", "koch_bimanual", "aloha"]:
                     from lerobot.common.robot_devices.robots.dynamixel_calibration import run_arm_calibration
@@ -389,11 +441,20 @@ class ManipulatorRobot:
                 elbow_idx = arm.read("ID", "elbow")
                 arm.write("Secondary_ID", elbow_idx, "elbow_shadow")
 
+        def set_drive_mode_(arm):
+            # set the drive mode to time-based profile to set moving time via velocity profiles
+            drive_mode = arm.read('Drive_Mode')
+            for i in range(len(arm.motor_names)):
+                drive_mode[i] |= 1 << 2  # set third bit to enable time-based profiles
+            arm.write('Drive_Mode', drive_mode)
+
         for name in self.follower_arms:
             set_shadow_(self.follower_arms[name])
+            set_drive_mode_(self.follower_arms[name])
 
         for name in self.leader_arms:
             set_shadow_(self.leader_arms[name])
+            set_drive_mode_(self.follower_arms[name])
 
         for name in self.follower_arms:
             # Set a velocity limit of 131 as advised by Trossen Robotics
@@ -418,6 +479,13 @@ class ManipulatorRobot:
 
             # Note: We can't enable torque on the leader gripper since "xc430-w150" doesn't have
             # a Current Controlled Position mode.
+
+        # set time profile after setting operation mode
+        for name in self.follower_arms:
+            self.follower_arms[name].write("Profile_Velocity", int(self.config.moving_time * 1000))
+
+        for name in self.leader_arms:
+            self.leader_arms[name].write("Profile_Velocity", int(self.config.moving_time * 1000))
 
         if self.config.gripper_open_degree is not None:
             warnings.warn(
@@ -482,22 +550,6 @@ class ManipulatorRobot:
         if not record_data:
             return
 
-        # TODO(rcadene): Add velocity and other info
-        # Read follower position
-        follower_pos = {}
-        for name in self.follower_arms:
-            before_fread_t = time.perf_counter()
-            follower_pos[name] = self.follower_arms[name].read("Present_Position")
-            follower_pos[name] = torch.from_numpy(follower_pos[name])
-            self.logs[f"read_follower_{name}_pos_dt_s"] = time.perf_counter() - before_fread_t
-
-        # Create state by concatenating follower current position
-        state = []
-        for name in self.follower_arms:
-            if name in follower_pos:
-                state.append(follower_pos[name])
-        state = torch.cat(state)
-
         # Create action by concatenating follower goal position
         action = []
         for name in self.follower_arms:
@@ -505,22 +557,10 @@ class ManipulatorRobot:
                 action.append(follower_goal_pos[name])
         action = torch.cat(action)
 
-        # Capture images from cameras
-        images = {}
-        for name in self.cameras:
-            before_camread_t = time.perf_counter()
-            images[name] = self.cameras[name].async_read()
-            images[name] = torch.from_numpy(images[name])
-            self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs["delta_timestamp_s"]
-            self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
-
-        # Populate output dictionaries
-        obs_dict, action_dict = {}, {}
-        obs_dict["observation.state"] = state
+        # Populate output dictionnaries
+        action_dict = {}
         action_dict["action"] = action
-        for name in self.cameras:
-            obs_dict[f"observation.images.{name}"] = images[name]
-
+        obs_dict = self.capture_observation()
         return obs_dict, action_dict
 
     def capture_observation(self):
@@ -536,14 +576,24 @@ class ManipulatorRobot:
             before_fread_t = time.perf_counter()
             follower_pos[name] = self.follower_arms[name].read("Present_Position")
             follower_pos[name] = torch.from_numpy(follower_pos[name])
-            self.logs[f"read_follower_{name}_pos_dt_s"] = time.perf_counter() - before_fread_t
+            self.logs[f"read_follower_{name}_pos_dt_s"] = (
+                time.perf_counter() - before_fread_t
+            )
+            follower_vel[name] = self.follower_arms[name].read("Present_Velocity")
+            follower_vel[name] = torch.from_numpy(follower_vel[name])
+            self.logs[f"read_follower_{name}_vel_dt_s"] = (
+                time.perf_counter() - before_fread_t
+            )
 
         # Create state by concatenating follower current position
         state = []
+        vel = []
         for name in self.follower_arms:
             if name in follower_pos:
                 state.append(follower_pos[name])
+                vel.append(follower_vel[name])
         state = torch.cat(state)
+        vel = torch.cat(vel)
 
         # Capture images from cameras
         images = {}
@@ -557,8 +607,22 @@ class ManipulatorRobot:
         # Populate output dictionaries and format to pytorch
         obs_dict = {}
         obs_dict["observation.state"] = state
+        obs_dict["observation.joint_vel"] = vel
         for name in self.cameras:
             obs_dict[f"observation.images.{name}"] = images[name]
+
+        # Read forces and torques
+        if self.has_bota:
+            force = []
+            torque = []
+            for name in self.botas:
+                data = self.botas[name].read()
+                force.append(torch.from_numpy(data["force"]))
+                torque.append(torch.from_numpy(data["torque"]))
+
+            obs_dict["observation.tcp_force"] = torch.cat(force)
+            obs_dict["observation.tcp_torque"] = torch.cat(torque)
+
         return obs_dict
 
     def send_action(self, action: torch.Tensor) -> torch.Tensor:
