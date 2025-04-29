@@ -2,13 +2,9 @@ from typing import Any
 
 import einops
 import gymnasium as gym
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from mani_skill.utils.wrappers.record import RecordEpisode
-from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
-
-from lerobot.common.envs.configs import ManiskillEnvConfig
+from pynput import keyboard
 
 
 def preprocess_maniskill_observation(
@@ -139,7 +135,7 @@ class KeyboardControlWrapper(gym.Wrapper):
     Arrow keys are used to move the end-effector along the X-axis.
     """
 
-    def __init__(self, env: Reach1DEnv, ax: list | float | None = None):
+    def __init__(self, env, ax: list | float | None = None):
         super().__init__(env)
 
         if ax is None:

@@ -1,9 +1,12 @@
+import logging
+import time
 
+import numpy as np
 
+from lerobot.common.envs.configs import PushCubeRobotEnvConfig
+from lerobot.common.robot_devices.control_utils import busy_wait
+from lerobot.common.utils.utils import log_say
 
-###########################################################
-# Factory functions
-###########################################################
 
 ###########################################################
 # Record and replay functions
@@ -145,9 +148,9 @@ def replay_episode(env, cfg):
         busy_wait(1 / 10 - dt_s)
 
 
-@parser.wrap()
-def main(cfg: EnvConfig):
-    env = make_robot_env(cfg)
+def main():
+    cfg = PushCubeRobotEnvConfig()
+    env = cfg.make()
 
     if cfg.mode == "record":
         policy = None

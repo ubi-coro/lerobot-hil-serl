@@ -1,4 +1,7 @@
 import gymnasium as gym
+import numpy as np
+import torch
+
 
 class SmoothActionWrapper(gym.Wrapper):
     """
@@ -11,7 +14,8 @@ class SmoothActionWrapper(gym.Wrapper):
         super().__init__(env)
         self.device = device
 
-        self.action_dim = self.action_space.shape
+        action_space = self.action_space[0] if isinstance(self.action_space, gym.spaces.Tuple) else self.action_space
+        self.action_dim = action_space.shape
         self.smoothing_penalty = smoothing_penalty
         self.max_delta = smoothing_range_factor * action_space.high
         self.min_delta = smoothing_range_factor * action_space.low

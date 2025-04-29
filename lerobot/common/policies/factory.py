@@ -60,7 +60,7 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.common.policies.pi0fast.modeling_pi0fast import PI0FASTPolicy
 
         return PI0FASTPolicy
-    elif name == "sac":
+    elif name.startswith("sac"):
         from lerobot.common.policies.sac.modeling_sac import SACPolicy
 
         return SACPolicy

@@ -13,13 +13,16 @@
 # limitations under the License.
 
 import abc
+import importlib
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
 import draccus
+import gymnasium as gym
+import numpy as np
 
 from lerobot.common.constants import ACTION, OBS_ENV, OBS_IMAGE, OBS_IMAGES, OBS_ROBOT
-from lerobot.common.robot_devices.robots.configs import RobotConfig
+from lerobot.common.robot_devices.robots.configs import RobotConfig, AlohaRobotConfig
 from lerobot.configs.types import FeatureType, PolicyFeature
 
 
@@ -241,6 +244,7 @@ class EnvWrapperConfig:
     gripper_quantization_threshold: float | None = 0.8
     gripper_penalty: float = 0.0
     gripper_penalty_in_reward: bool = False
+    smoothing_range_factor: Optional[float] = None
 
 
 @EnvConfig.register_subclass(name="gym_manipulator")
@@ -260,7 +264,6 @@ class HILSerlRobotEnvConfig(EnvConfig):
     episode: int = 0
     device: str = "cuda"
     push_to_hub: bool = True
-    smoothing_range_factor: Optional[float] = None
     pretrained_policy_name_or_path: Optional[str] = None
     reward_classifier_pretrained_path: Optional[str] = None
 
@@ -280,10 +283,11 @@ class HILSerlRobotEnvConfig(EnvConfig):
             A vectorized gym environment with all the necessary wrappers applied.
         """
         import lerobot.common.envs.wrapper.hilserl as wrapper
+        from lerobot.common.envs.robot_env import RobotEnv
         from lerobot.common.envs.wrapper.smoothing import SmoothActionWrapper
+        from lerobot.common.robot_devices.robots.utils import make_robot_from_config
 
-
-        robot = make_robot_from_config(cfg.robot)
+        robot = make_robot_from_config(self.robot)
         # Create base environment
         env = RobotEnv(
             robot=robot,
@@ -326,8 +330,8 @@ class HILSerlRobotEnvConfig(EnvConfig):
             use_gripper=self.wrapper.use_gripper,
         )
 
-        if self.max_delta_range_factor is not None:
-            env = SmoothActionWrapper(env, smoothing_range_factor=self.smoothing_range_factor)
+        if self.wrapper.smoothing_range_factor is not None:
+            env = SmoothActionWrapper(env, smoothing_range_factor=self.wrapper.smoothing_range_factor)
 
         if self.wrapper.ee_action_space_params.control_mode == "gamepad":
             env = wrapper.GamepadControlWrapper(
@@ -393,6 +397,56 @@ class HILSerlRobotEnvConfig(EnvConfig):
         return classifier
 
 
+@EnvConfig.register_subclass(name="real_push_cube")
+@dataclass
+class PushCubeRobotEnvConfig(HILSerlRobotEnvConfig):
+
+    robot: AlohaRobotConfig = AlohaRobotConfig()
+    features: dict[str, PolicyFeature] = field(
+        default_factory=lambda: {
+            "action": PolicyFeature(type=FeatureType.ACTION, shape=(18,)),
+            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(18,)),
+            "observation.image.cam_low": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
+            "observation.image.cam_high": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
+            "observation.image.cam_left_wrist": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128))
+        }
+    )
+    features_map: dict[str, str] = field(
+        default_factory=lambda: {
+            "action": ACTION,
+            "observation.state": OBS_ROBOT,
+            "observation.image.cam_low": f"{OBS_IMAGE}.cam_low",
+            "observation.image.cam_high": f"{OBS_IMAGE}.cam_high",
+            "observation.image.cam_left_wrist": f"{OBS_IMAGE}.cam_left_wrist",
+        }
+    )
+    wrapper: EnvWrapperConfig = EnvWrapperConfig(
+        add_ee_pose_to_observation=True,
+        crop_params_dict={
+            "observation.images.cam_low": (171, 207, 116, 251),
+            "observation.images.cam_right_wrist": (232, 200, 142, 204)
+        },
+        resize_size=(128, 128),
+        fixed_reset_joint_positions=[0.0, -31.728516, -31.464844, 52.910156, 52.646484, 3.7792969, 22.58789, -5.888670],
+        smoothing_range_factor=0.2,
+        ee_action_space_params=EEActionSpaceConfig(
+            x_step_size=0.05,
+            y_step_size=0.05,
+            z_step_size=0.05,
+            bounds={
+                "max": [0.38753916, 0.16131382, 0.13],
+                "min": [ 0.281119,  -0.27317196,  0.08]
+            },
+            control_mode="leader_automatic"
+        )
+    )
+    task: str = "Push the cube over the line"
+    num_episodes: int = 20  # only for record mode
+    episode: int = 0
+    device: str = "cuda"
+    push_to_hub: bool = False
+
+
 @EnvConfig.register_subclass("maniskill_push")
 @dataclass
 class ManiskillEnvConfig(EnvConfig):
@@ -455,6 +509,7 @@ class ManiskillEnvConfig(EnvConfig):
         import lerobot.common.envs.wrapper.maniskill as maniskill_wrapper
         from lerobot.common.envs.wrapper.hilserl import StabilizingActionMaskingWrapper
         from lerobot.common.envs.wrapper.smoothing import SmoothActionWrapper
+        from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
         from mani_skill.utils.wrappers.record import RecordEpisode
 
         env = gym.make(
@@ -480,7 +535,7 @@ class ManiskillEnvConfig(EnvConfig):
 
         # Add observation and image processing
         env = maniskill_wrapper.ManiSkillObservationWrapper(env, device=self.device)
-        env = maniskill_wrapper.ManiSkillVectorEnv(env, ignore_terminations=False, auto_reset=False)
+        env = ManiSkillVectorEnv(env, ignore_terminations=False, auto_reset=False)
         env._max_episode_steps = env.max_episode_steps = self.episode_length
         env.unwrapped.metadata["render_fps"] = self.fps
 
@@ -488,9 +543,7 @@ class ManiskillEnvConfig(EnvConfig):
         env = maniskill_wrapper.ManiSkillCompat(env)
         env = maniskill_wrapper.ManiSkillActionWrapper(env)
         env = maniskill_wrapper.ManiSkillMultiplyActionWrapper(env, multiply_factor=0.03)
-        if self.mock_gripper:
-            env = maniskill_wrapper.ManiskillMockGripperWrapper(env, nb_discrete_actions=3)
-        env = maniskill_wrapper.StabilizingActionMaskingWrapper(env, ref_pose=np.array([0.0, 0.0, 0.02, 0.0, 1.0, 0.0, 0.0]), ax=[0, 1])
+        env = StabilizingActionMaskingWrapper(env, ref_pose=np.array([0.0, 0.0, 0.02, 0.0, 1.0, 0.0, 0.0]), ax=[0, 1])
         # env = ActionLoggingPlotWrapper(env)
         env = SmoothActionWrapper(env, device=self.device)
         env = maniskill_wrapper.KeyboardControlWrapper(env, ax=[0, 1])

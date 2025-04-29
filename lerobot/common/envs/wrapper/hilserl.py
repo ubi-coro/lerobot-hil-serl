@@ -9,16 +9,14 @@ import gymnasium as gym
 import numpy as np
 import torch
 import torchvision.transforms.functional as F  # noqa: N812
+from scipy.spatial.transform import Rotation as R
 
-from lerobot.common.envs.configs import EnvConfig
 from lerobot.common.robot_devices.control_utils import (
     busy_wait,
     is_headless,
     reset_follower_position,
 )
-from lerobot.common.robot_devices.robots.utils import make_robot_from_config
 from lerobot.common.utils.utils import log_say
-from lerobot.configs import parser
 from lerobot.scripts.server.kinematics import get_kinematics
 
 logging.basicConfig(level=logging.INFO)
@@ -256,7 +254,7 @@ class ConvertToLeRobotObservation(gym.ObservationWrapper):
 class ResetWrapper(gym.Wrapper):
     def __init__(
         self,
-        env: RobotEnv,
+        env,
         reset_pose: np.ndarray | None = None,
         reset_time_s: float = 5,
     ):

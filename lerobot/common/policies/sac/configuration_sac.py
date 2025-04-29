@@ -128,12 +128,19 @@ class SACConfig(PreTrainedConfig):
                 "std": [0.229, 0.224, 0.225],
             },
             "observation.state": {
-                "min": [0.0, 0.0],
-                "max": [1.0, 1.0],
+                "min": [-1.9361e+00, -7.7640e-01, -7.7094e-01, -2.9709e+00, -8.5656e-01,
+                          1.0764e+00, -1.2680e+00,  0.0000e+00,  0.0000e+00, -9.3448e+00,
+                         -3.3828e+00, -3.8420e+00, -5.2553e+00, -3.4154e+00, -6.5082e+00,
+                         -6.0500e+00, -8.7193e+00, -8.2337e+00, -3.4650e-01, -4.9441e-01,
+                          8.3516e-03, -3.1114e-01, -9.9700e-01, -2.3471e-01, -2.7137e-01],
+                "max": [ 0.8644,  1.4306,  1.8520, -0.7578,  0.9508,  3.4901,  1.9381,  0.0400,
+                          0.0400,  5.0885,  4.7156,  7.9393,  7.9100,  2.9796,  5.7720,  4.7163,
+                          7.8145,  9.7415,  0.2422,  0.4505,  0.6306,  0.2622,  1.0000,  0.5135,
+                          0.4001],
             },
             "action": {
-                "min": [0.0, 0.0, 0.0],
-                "max": [1.0, 1.0, 1.0],
+                "min": [-0.03, -0.03],
+                "max": [0.03, 0.03],
             },
         }
     )
@@ -143,7 +150,7 @@ class SACConfig(PreTrainedConfig):
     device: str = "cuda"
     storage_device: str = "cpu"
     # Set to "helper2424/resnet10" for hil serl
-    vision_encoder_name: str | None = None
+    vision_encoder_name: str | None = "helper2424/resnet10"
     freeze_vision_encoder: bool = True
     image_encoder_hidden_dim: int = 32
     shared_encoder: bool = True
@@ -153,8 +160,8 @@ class SACConfig(PreTrainedConfig):
     # Training parameter
     online_steps: int = 1000000
     online_env_seed: int = 10000
-    online_buffer_capacity: int = 100000
-    offline_buffer_capacity: int = 100000
+    online_buffer_capacity: int = 50000
+    offline_buffer_capacity: int = 50000
     async_prefetch: bool = False
     online_step_before_learning: int = 100
     policy_update_freq: int = 1
@@ -227,3 +234,33 @@ class SACConfig(PreTrainedConfig):
     @property
     def reward_delta_indices(self) -> None:
         return None
+
+
+@PreTrainedConfig.register_subclass("sac_push_cube")
+@dataclass
+class SACPushCubeConfig(SACConfig):
+    utd_ratio: float = 5
+
+    dataset_stats: dict[str, dict[str, list[float]]] | None = field(
+        default_factory=lambda: {
+            "observation.image": {
+                "mean": [0.485, 0.456, 0.406],
+                "std": [0.229, 0.224, 0.225],
+            },
+            "observation.state": {
+                "min": [-1.9361e+00, -7.7640e-01, -7.7094e-01, -2.9709e+00, -8.5656e-01,
+                        1.0764e+00, -1.2680e+00, 0.0000e+00, 0.0000e+00, -9.3448e+00,
+                        -3.3828e+00, -3.8420e+00, -5.2553e+00, -3.4154e+00, -6.5082e+00,
+                        -6.0500e+00, -8.7193e+00, -8.2337e+00, -3.4650e-01, -4.9441e-01,
+                        8.3516e-03, -3.1114e-01, -9.9700e-01, -2.3471e-01, -2.7137e-01],
+                "max": [0.8644, 1.4306, 1.8520, -0.7578, 0.9508, 3.4901, 1.9381, 0.0400,
+                        0.0400, 5.0885, 4.7156, 7.9393, 7.9100, 2.9796, 5.7720, 4.7163,
+                        7.8145, 9.7415, 0.2422, 0.4505, 0.6306, 0.2622, 1.0000, 0.5135,
+                        0.4001],
+            },
+            "action": {
+                "min": [-0.03, -0.03],
+                "max": [0.03, 0.03],
+            },
+        }
+    )
