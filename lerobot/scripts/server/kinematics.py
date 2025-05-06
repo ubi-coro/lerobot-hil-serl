@@ -489,7 +489,7 @@ class MRKinematics(RobotKinematics):
     }
 
     def __init__(self, robot_model):
-        # can also be initialized via "robot_type", which default to the standard aloha follower
+        # can also be initialized via "robot_type", which defaults to the standard aloha follower
         if robot_model == "aloha":
             robot_model = "vx300s"
 
@@ -552,8 +552,8 @@ class MRKinematics(RobotKinematics):
     def fk_gripper_tip(self, robot_pos_deg):
         """Forward kinematics for the gripper tip frame."""
         return mr.FKinSpace(
-            self.gripper_desc["M"],
-            self.gripper_desc["Slist"],
+            self.gripper_tip_desc["M"],
+            self.gripper_tip_desc["Slist"],
             self.apply_joint_correction(robot_pos_deg)
         )
 
@@ -576,8 +576,8 @@ class MRKinematics(RobotKinematics):
             M=desc["M"],
             T=desired_ee_pose,
             thetalist0=self.apply_joint_correction(current_joint_state),
-            ev=1e-3,
-            eomg=1e10 if position_only else 1e-3,
+            ev=1e-6,
+            eomg=1e10 if position_only else 1e-6,
         )
 
         if success:

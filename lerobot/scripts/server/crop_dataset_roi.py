@@ -208,12 +208,12 @@ def convert_lerobot_dataset_to_cropper_lerobot_dataset(
 
             new_frame[key] = value
 
-        new_dataset.add_frame(new_frame)
-
         if frame["episode_index"].item() != prev_episode_index:
             # Save the episode
             new_dataset.save_episode()
             prev_episode_index = frame["episode_index"].item()
+
+        new_dataset.add_frame(new_frame)
 
     if push_to_hub:
         new_dataset.push_to_hub()

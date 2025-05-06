@@ -50,6 +50,11 @@ class Classifier(PreTrainedPolicy):
         super().__init__(config)
         self.config = config
 
+        if config.image_keys is None:
+            self.image_keys = [key for key in self.config.input_features if key.startswith(OBS_IMAGE)]
+        else:
+            self.image_keys = config.image_keys
+
         # Initialize normalization (standardized with the policy framework)
         self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
         self.normalize_targets = Normalize(
@@ -196,6 +201,7 @@ class Classifier(PreTrainedPolicy):
         images = [batch[key] for key in self.config.input_features if key.startswith(OBS_IMAGE)]
         if self.config.num_classes == 2:
             probs = self.predict(images).probabilities
+            print(probs)
             logging.debug(f"Predicted reward images: {probs}")
             return (probs > threshold).float()
         else:
@@ -203,11 +209,11 @@ class Classifier(PreTrainedPolicy):
 
     def get_optim_params(self) -> dict:
         """Return optimizer parameters for the policy."""
-        return {
+        return [{
             "params": self.parameters(),
             "lr": getattr(self.config, "learning_rate", 1e-4),
             "weight_decay": getattr(self.config, "weight_decay", 0.01),
-        }
+        }]
 
     def select_action(self, batch: Dict[str, Tensor]) -> Tensor:
         """

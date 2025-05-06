@@ -25,13 +25,14 @@ from torch.amp import GradScaler
 from torch.optim import Optimizer
 
 from lerobot.common.datasets.factory import make_dataset
-from lerobot.common.datasets.sampler import EpisodeAwareSampler
+from lerobot.common.datasets.sampler import EpisodeAwareSampler, create_balanced_sampler
 from lerobot.common.datasets.utils import cycle
 from lerobot.common.envs.factory import make_env
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.policies.factory import make_policy
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.utils import get_device_from_parameters
+from lerobot.common.policies.reward_model.modeling_classifier import RewardClassifierConfig
 from lerobot.common.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.common.utils.random_utils import set_seed
 from lerobot.common.utils.train_utils import (
@@ -170,6 +171,9 @@ def train(cfg: TrainPipelineConfig):
             drop_n_last_frames=cfg.policy.drop_n_last_frames,
             shuffle=True,
         )
+    elif isinstance(cfg.policy, RewardClassifierConfig):
+        shuffle = False
+        sampler = create_balanced_sampler(dataset, cfg)
     else:
         shuffle = True
         sampler = None

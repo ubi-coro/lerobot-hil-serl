@@ -8,10 +8,10 @@ from lerobot.common.robot_devices.control_utils import is_headless
 from lerobot.common.robot_devices.robots.configs import RobotConfig
 from lerobot.common.robot_devices.robots.utils import make_robot_from_config
 from lerobot.configs import parser
-from lerobot.scripts.server.kinematics import RobotKinematics
+from lerobot.scripts.server.kinematics import RobotKinematics, get_kinematics
 
-follower_port = "/dev/tty.usbmodem58760431631"
-leader_port = "/dev/tty.usbmodem585A0077921"
+follower_port = "/dev/ttyDXL_follower_left"
+leader_port = "/dev/ttyDXL_leader_left"
 
 
 def find_joint_bounds(
@@ -56,6 +56,7 @@ def find_ee_bounds(
         robot.connect()
 
     start_episode_t = time.perf_counter()
+    pos_list = []
     ee_list = []
     while True:
         observation, action = robot.teleop_step(record_data=True)
@@ -64,9 +65,12 @@ def find_ee_bounds(
         if time.perf_counter() - start_episode_t < 5:
             continue
 
-        kinematics = RobotKinematics(robot.robot_type)
+        kinematics = get_kinematics(robot.config, robot_type="follower")
         joint_positions = robot.follower_arms["main"].read("Present_Position")
         print(f"Joint positions: {joint_positions}")
+        print(kinematics.fk_gripper_tip(joint_positions)[:3, 3])
+        print("======")
+        pos_list.append(joint_positions)
         ee_list.append(kinematics.fk_gripper_tip(joint_positions)[:3, 3])
 
         if display_cameras and not is_headless():
@@ -80,6 +84,10 @@ def find_ee_bounds(
             min = np.min(np.stack(ee_list), 0)
             print(f"Max ee position {max}")
             print(f"Min ee position {min}")
+            max = np.max(np.stack(pos_list), 0)
+            min = np.min(np.stack(pos_list), 0)
+            print(f"Max angle position per joint {max}")
+            print(f"Min angle position per joint {min}")
             break
 
 

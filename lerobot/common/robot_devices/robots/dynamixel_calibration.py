@@ -78,60 +78,113 @@ def run_arm_calibration(arm: MotorsBus, robot_type: str, arm_name: str, arm_type
     ```
     """
     if (arm.read("Torque_Enable") != TorqueMode.DISABLED.value).any():
-        raise ValueError("To run calibration, the torque must be disabled on all motors.")
+        raise ValueError(
+            "To run calibration, the torque must be disabled on all motors."
+        )
 
     print(f"\nRunning calibration of {robot_type} {arm_name} {arm_type}...")
-
-    print("\nMove arm to zero position")
-    print("See: " + URL_TEMPLATE.format(robot=robot_type, arm=arm_type, position="zero"))
-    input("Press Enter to continue...")
 
     # We arbitrarily chose our zero target position to be a straight horizontal position with gripper upwards and closed.
     # It is easy to identify and all motors are in a "quarter turn" position. Once calibration is done, this position will
     # correspond to every motor angle being 0. If you set all 0 as Goal Position, the arm will move in this position.
     zero_target_pos = convert_degrees_to_steps(ZERO_POSITION_DEGREE, arm.motor_models)
-
-    # Compute homing offset so that `present_position + homing_offset ~= target_position`.
-    zero_pos = arm.read("Present_Position")
-    zero_nearest_pos = compute_nearest_rounded_position(zero_pos, arm.motor_models)
-    homing_offset = zero_target_pos - zero_nearest_pos
-
-    # The rotated target position corresponds to a rotation of a quarter turn from the zero position.
-    # This allows to identify the rotation direction of each motor.
-    # For instance, if the motor rotates 90 degree, and its value is -90 after applying the homing offset, then we know its rotation direction
-    # is inverted. However, for the calibration being successful, we need everyone to follow the same target position.
-    # Sometimes, there is only one possible rotation direction. For instance, if the gripper is closed, there is only one direction which
-    # corresponds to opening the gripper. When the rotation direction is ambiguous, we arbitrarily rotate clockwise from the point of view
-    # of the previous motor in the kinetic chain.
-    print("\nMove arm to rotated target position")
-    print("See: " + URL_TEMPLATE.format(robot=robot_type, arm=arm_type, position="rotated"))
-    input("Press Enter to continue...")
-
     rotated_target_pos = convert_degrees_to_steps(ROTATED_POSITION_DEGREE, arm.motor_models)
-
-    # Find drive mode by rotating each motor by a quarter of a turn.
-    # Drive mode indicates if the motor rotation direction should be inverted (=1) or not (=0).
-    rotated_pos = arm.read("Present_Position")
-    drive_mode = (rotated_pos < zero_pos).astype(np.int32)
-
-    # Re-compute homing offset to take into account drive mode
-    rotated_drived_pos = apply_drive_mode(rotated_pos, drive_mode)
-    rotated_nearest_pos = compute_nearest_rounded_position(rotated_drived_pos, arm.motor_models)
-    homing_offset = rotated_target_pos - rotated_nearest_pos
-
-    print("\nMove arm to rest position")
-    print("See: " + URL_TEMPLATE.format(robot=robot_type, arm=arm_type, position="rest"))
-    input("Press Enter to continue...")
-    print()
 
     # Joints with rotational motions are expressed in degrees in nominal range of [-180, 180]
     calib_mode = [CalibrationMode.DEGREE.name] * len(arm.motor_names)
 
-    # TODO(rcadene): make type of joints (DEGREE or LINEAR) configurable from yaml?
-    if robot_type in ["aloha"] and "gripper" in arm.motor_names:
-        # Joints with linear motions (like gripper of Aloha) are expressed in nominal range of [0, 100]
-        calib_idx = arm.motor_names.index("gripper")
-        calib_mode[calib_idx] = CalibrationMode.LINEAR.name
+    # Drive mode indicates if the motor rotation direction should be inverted (=1) or not (=0).
+    drive_mode = np.array([0] * len(arm.motor_names))
+
+    # Effective zero position
+    homing_offset = np.array([0] * len(arm.motor_names))
+
+    if robot_type.lower().startswith('aloha'):
+        # Read current positions from the motors.
+        present_position = np.array(arm.read("Present_Position"), dtype=np.float64)
+        # Initialize start and end positions, homing offsets and drive modes.
+        zero_pos = present_position.copy()
+        rotated_pos = present_position.copy()
+
+        for i, motor in enumerate(arm.motor_names):
+            if motor != "gripper":
+                # Convert motor positions from steps (0–4096) to degrees (0° to 360°)
+                zero_pos[i] = 0.0
+                rotated_pos[i] = 4096.0 / 4  # quarter turn
+                homing_offset[i] = -2048.0  # to match 'value_of_zero_radian_position' in the dynamixel_sdk
+            else:
+                # For the gripper, use a linear calibration.
+                calib_mode[i] = CalibrationMode.LINEAR.name
+
+                # Prompt the user to calibrate the gripper’s closed (default/zero) position.
+                print("\nGripper calibration: Move the gripper to its closed position.")
+                input("Press Enter when ready...")
+                closed_value = float(arm.read("Present_Position")[i])
+                print(f"Gripper closed position recorded: {closed_value}")
+
+                # Prompt the user to calibrate the gripper’s open position.
+                # Note: The open gripper position corresponds to the 'rotated' position for other joints.
+                print("\nGripper calibration: Move the gripper to its open position.")
+                input("Press Enter when ready...")
+                open_value = float(arm.read("Present_Position")[i])
+                print(f"Gripper open position recorded: {open_value}")
+
+                # Store the closed value as start_pos and the open value as end_pos.
+                zero_pos[i] = closed_value
+                rotated_pos[i] = open_value
+
+                # Re-compute homing offset to take into account drive mode
+                rotated_drived_pos = apply_drive_mode(rotated_pos[i], drive_mode[i])
+                rotated_nearest_pos = compute_nearest_rounded_position(
+                    np.array([rotated_drived_pos]), [arm.motor_models[i]]
+                )[0]
+                homing_offset[i] = rotated_target_pos[i] - rotated_nearest_pos
+
+    else:
+        print("\nMove arm to zero position")
+        print(
+            "See: " + URL_TEMPLATE.format(robot=robot_type, arm=arm_type, position="zero")
+        )
+        input("Press Enter to continue...")
+
+        # Compute homing offset so that `present_position + homing_offset ~= target_position`.
+        zero_pos = arm.read("Present_Position")
+        zero_nearest_pos = compute_nearest_rounded_position(zero_pos, arm.motor_models)
+        homing_offset = zero_target_pos - zero_nearest_pos
+
+        # The rotated target position corresponds to a rotation of a quarter turn from the zero position.
+        # This allows to identify the rotation direction of each motor.
+        # For instance, if the motor rotates 90 degree, and its value is -90 after applying the homing offset, then we know its rotation direction
+        # is inverted. However, for the calibration being successful, we need everyone to follow the same target position.
+        # Sometimes, there is only one possible rotation direction. For instance, if the gripper is closed, there is only one direction which
+        # corresponds to opening the gripper. When the rotation direction is ambiguous, we arbitrarely rotate clockwise from the point of view
+        # of the previous motor in the kinetic chain.
+        print("\nMove arm to rotated target position")
+        print(
+            "See: "
+            + URL_TEMPLATE.format(robot=robot_type, arm=arm_type, position="rotated")
+        )
+        input("Press Enter to continue...")
+
+        # Find drive mode by rotating each motor by a quarter of a turn.
+        rotated_pos = arm.read("Present_Position")
+
+        print("\nMove arm to rest position")
+        print(
+            "See: " + URL_TEMPLATE.format(robot=robot_type, arm=arm_type, position="rest")
+        )
+        input("Press Enter to continue...")
+        print()
+
+        # Drive mode indicates if the motor rotation direction should be inverted (=1) or not (=0).
+        drive_mode = (rotated_pos < zero_pos).astype(np.int32)
+
+        # Re-compute homing offset to take into account drive mode
+        rotated_drived_pos = apply_drive_mode(rotated_pos, drive_mode)
+        rotated_nearest_pos = compute_nearest_rounded_position(
+            rotated_drived_pos, arm.motor_models
+        )
+        homing_offset = rotated_target_pos - rotated_nearest_pos
 
     calib_data = {
         "homing_offset": homing_offset.tolist(),

@@ -257,6 +257,7 @@ class HILSerlRobotEnvConfig(EnvConfig):
     fps: int = 10
     name: str = "real_robot"
     mode: str = None  # Either "record", "replay", None
+    resume: bool = False
     repo_id: Optional[str] = None
     dataset_root: Optional[str] = None
     task: str = ""
@@ -331,7 +332,7 @@ class HILSerlRobotEnvConfig(EnvConfig):
         )
 
         if self.wrapper.smoothing_range_factor is not None:
-            env = SmoothActionWrapper(env, smoothing_range_factor=self.wrapper.smoothing_range_factor)
+            env = SmoothActionWrapper(env, smoothing_range_factor=self.wrapper.smoothing_range_factor, device=self.device)
 
         if self.wrapper.ee_action_space_params.control_mode == "gamepad":
             env = wrapper.GamepadControlWrapper(
@@ -401,11 +402,17 @@ class HILSerlRobotEnvConfig(EnvConfig):
 @dataclass
 class PushCubeRobotEnvConfig(HILSerlRobotEnvConfig):
 
-    robot: AlohaRobotConfig = AlohaRobotConfig()
+    repo_id: str = "jannick-st/push-cube-offline-demos-eval"
+    dataset_root: str = "/media/nvme1/jstranghoener/lerobot/data/jannick-st//push-cube-offline-demos-eval"
+    reward_classifier_pretrained_path: Optional[str] = "/media/nvme1/jstranghoener/lerobot/models/jannick-st/push-cube/classifier-300425/checkpoints/last/pretrained_model/"
+
+    robot: AlohaRobotConfig = AlohaRobotConfig(
+        calibration_dir="/home/jstranghoener/PycharmProjects/lerobot-hil-serl/.cache/calibration/aloha_default"
+    )
     features: dict[str, PolicyFeature] = field(
         default_factory=lambda: {
-            "action": PolicyFeature(type=FeatureType.ACTION, shape=(18,)),
-            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(18,)),
+            "action": PolicyFeature(type=FeatureType.ACTION, shape=(3,)),
+            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(15,)),
             "observation.image.cam_low": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
             "observation.image.cam_high": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
             "observation.image.cam_left_wrist": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128))
@@ -421,30 +428,57 @@ class PushCubeRobotEnvConfig(HILSerlRobotEnvConfig):
         }
     )
     wrapper: EnvWrapperConfig = EnvWrapperConfig(
+        display_cameras=True,
+        control_time_s=300.0,
         add_ee_pose_to_observation=True,
         crop_params_dict={
-            "observation.images.cam_low": (171, 207, 116, 251),
-            "observation.images.cam_right_wrist": (232, 200, 142, 204)
+            "observation.images.cam_high": [
+                194,
+                1,
+                284,
+                317
+            ],
+            "observation.images.cam_left_wrist": [
+                2,
+                17,
+                475,
+                621
+            ],
+            "observation.images.cam_low": [
+                212,
+                296,
+                268,
+                341
+            ]
         },
         resize_size=(128, 128),
-        fixed_reset_joint_positions=[0.0, -31.728516, -31.464844, 52.910156, 52.646484, 3.7792969, 22.58789, -5.888670],
-        smoothing_range_factor=0.2,
+        fixed_reset_joint_positions=[ 0.0,  -24.609375,   -24.433594,    52.558594,    52.822266, -0.43945312,  56.953125,    -2.8125,       4.6242776 ],
+        smoothing_range_factor=0.3,
         ee_action_space_params=EEActionSpaceConfig(
-            x_step_size=0.05,
-            y_step_size=0.05,
-            z_step_size=0.05,
+            x_step_size=0.02,
+            y_step_size=0.02,
+            z_step_size=0.02,
             bounds={
-                "max": [0.38753916, 0.16131382, 0.13],
-                "min": [ 0.281119,  -0.27317196,  0.08]
+                "max": [0.32,  0.22, 0.10],
+                "min": [ 0.16, -0.09,  0.08]
             },
-            control_mode="leader_automatic"
+            control_mode="leader"
         )
     )
     task: str = "Push the cube over the line"
-    num_episodes: int = 20  # only for record mode
+    num_episodes: int = 40  # only for record mode
     episode: int = 0
     device: str = "cuda"
     push_to_hub: bool = False
+    fps: int = 10
+
+    def __post_init__(self):
+        if self.mode == "record":
+            #self.wrapper.ee_action_space_params = None
+            self.wrapper.crop_params_dict = None
+
+        #for cam in self.robot.cameras:
+        #    self.robot.cameras[cam].fps = self.fps
 
 
 @EnvConfig.register_subclass("maniskill_push")

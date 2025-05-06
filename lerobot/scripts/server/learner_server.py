@@ -57,6 +57,7 @@ from lerobot.common.utils.utils import (
 from lerobot.common.utils.wandb_utils import WandBLogger
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
+from lerobot.experiments import *
 from lerobot.scripts.server import learner_service
 from lerobot.scripts.server.buffer import ReplayBuffer, concatenate_batch_transitions
 from lerobot.scripts.server.network_utils import (
@@ -466,10 +467,9 @@ def add_actor_information_and_train(
         optimizers["critic"].step()
 
         # Initialize training info dictionary
-        training_infos = {
-            "loss_critic": loss_critic.item(),
-            "critic_grad_norm": critic_grad_norm,
-        }
+        training_infos = critic_output["training_infos"]
+        training_infos["loss_critic"] = loss_critic.item()
+        training_infos["critic_grad_norm"] = critic_grad_norm
 
         # Discrete critic optimization (if available)
         if policy.config.num_discrete_actions is not None:
@@ -1007,7 +1007,7 @@ def get_observation_features(
         tuple: observation_features, next_observation_features
     """
 
-    if policy.config.vision_encoder_name is None or not policy.config.freeze_vision_encoder:
+    if policy.config.vision_encoder_name is None or not policy.config.freeze_vision_encoder or not policy.actor.encoder.has_images:
         return None, None
 
     with torch.no_grad():
@@ -1085,8 +1085,8 @@ def process_interaction_message(
     message["Interaction step"] += interaction_step_shift
 
     # Log if logger available
-    if wandb_logger:
-        wandb_logger.log_dict(d=message, mode="train", custom_step_key="Interaction step")
+    #if wandb_logger:
+    #    wandb_logger.log_dict(d=message, mode="train", custom_step_key="Interaction step")
 
     return message
 

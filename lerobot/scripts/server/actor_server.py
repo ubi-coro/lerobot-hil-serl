@@ -36,6 +36,7 @@ from lerobot.common.utils.utils import (
 )
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
+from lerobot.experiments import *
 from lerobot.scripts.server import hilserl_pb2, hilserl_pb2_grpc, learner_service
 from lerobot.scripts.server.buffer import Transition
 from lerobot.scripts.server.network_utils import (

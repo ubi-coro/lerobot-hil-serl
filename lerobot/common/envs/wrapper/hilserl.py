@@ -100,15 +100,17 @@ class RewardWrapper(gym.Wrapper):
         """
         self.env = env
 
+        if isinstance(device, str):
+            device = torch.device(device)
         self.device = device
 
         self.reward_classifier = torch.compile(reward_classifier)
         self.reward_classifier.to(self.device)
 
     def step(self, action):
-        observation, _, terminated, truncated, info = self.env.step(action)
+        observation, reward, terminated, truncated, info = self.env.step(action)
         images = {
-            key: observation[key].to(self.device, non_blocking=self.device.type == "cuda")
+            key: observation[key].to(self.device, non_blocking=self.device.type == "cuda").unsqueeze(0)
             for key in observation
             if "image" in key
         }
@@ -235,13 +237,24 @@ class ConvertToLeRobotObservation(gym.ObservationWrapper):
     def __init__(self, env, device: str = "cpu"):
         super().__init__(env)
 
+        example_obs = env.unwrapped.robot.capture_observation()
+        for key in env.observation_space:
+            if "image" in key:
+                env.observation_space[key] = gym.spaces.Box(
+                    low=0.0,
+                    high=1.0,
+                    shape=example_obs[key].permute(2, 0, 1).shape,
+                    dtype=np.float32
+                )
         self.device = torch.device(device)
 
     def observation(self, observation):
         for key in observation:
             observation[key] = observation[key].float()
             if "image" in key:
-                observation[key] = observation[key].permute(2, 0, 1)
+                h, w, c = observation[key].shape
+                if c < h and c < w:
+                    observation[key] = observation[key].permute(2, 0, 1)
                 observation[key] /= 255.0
         observation = {
             key: observation[key].to(self.device, non_blocking=self.device.type == "cuda")
@@ -391,6 +404,7 @@ class EEActionWrapper(gym.ActionWrapper):
         # Initialize kinematics instance for the appropriate robot type
         self.kinematics = get_kinematics(env.unwrapped.robot.config, robot_type="follower")
         self.fk_function = self.kinematics.fk_gripper_tip
+        self.initial_ee_pos = None
 
         action_space_bounds = np.array(
             [
@@ -417,7 +431,6 @@ class EEActionWrapper(gym.ActionWrapper):
         self.bounds = ee_action_space_params.bounds
 
     def action(self, action):
-        desired_ee_pos = np.eye(4)
 
         if self.use_gripper:
             gripper_command = action[-1]
@@ -425,21 +438,33 @@ class EEActionWrapper(gym.ActionWrapper):
 
         current_joint_pos = self.unwrapped.robot.follower_arms["main"].read("Present_Position")
         current_ee_pos = self.fk_function(current_joint_pos)
+        if self.initial_ee_pos is None:
+            self.initial_ee_pos = current_ee_pos.copy()
+
+        # we keep the orientation of the reset pose and only update position
+        desired_ee_pos = self.initial_ee_pos.copy()
         desired_ee_pos[:3, 3] = np.clip(
             current_ee_pos[:3, 3] + action,
             self.bounds["min"],
             self.bounds["max"],
         )
+
         target_joint_pos = self.kinematics.ik(
             current_joint_pos,
             desired_ee_pos,
             position_only=True,
             fk_func=self.fk_function,
         )
+
         if self.use_gripper:
             target_joint_pos[-1] = gripper_command
 
         return target_joint_pos
+
+    def reset(self, **kwargs):
+        obs, info = super().reset(**kwargs)
+        self.initial_ee_pos = None
+        return obs, info
 
 
 class EEObservationWrapper(gym.ObservationWrapper):
@@ -457,7 +482,6 @@ class EEObservationWrapper(gym.ObservationWrapper):
         )
 
         # Initialize kinematics instance for the appropriate robot type
-        robot_type = getattr(env.unwrapped.robot.config, "robot_type", "so100")
         self.kinematics = get_kinematics(env.unwrapped.robot.config, robot_type="follower")
         self.fk_function = self.kinematics.fk_gripper_tip
 
@@ -493,12 +517,20 @@ class BaseLeaderControlWrapper(gym.Wrapper):
         self.use_ee_action_space = ee_action_space_params is not None
         self.use_gripper: bool = use_gripper
 
+        if self.use_ee_action_space:
+            self.action_bounds = np.array([
+                self.ee_action_space_params.x_step_size,
+                self.ee_action_space_params.y_step_size,
+                self.ee_action_space_params.z_step_size,
+            ], dtype=np.float32)
+
         # Set up keyboard event tracking
         self._init_keyboard_events()
         self.event_lock = Lock()  # Thread-safe access to events
 
         # Initialize robot control
-        self.kinematics = get_kinematics(env.unwrapped.robot.config, robot_type="leader")
+        self.leader_kinematics = get_kinematics(env.unwrapped.robot.config, robot_type="leader")
+        self.follower_kinematics = get_kinematics(env.unwrapped.robot.config, robot_type="follower")
         self.prev_leader_ee = None
         self.prev_leader_pos = None
         self.leader_torque_enabled = True
@@ -509,9 +541,9 @@ class BaseLeaderControlWrapper(gym.Wrapper):
         # With higher gains, it would be dangerous and difficult to modify the leader's pose while torque is enabled
         # Default value for P_coeff is 32
         self.robot_leader.write("Torque_Enable", 1)
-        self.robot_leader.write("P_Coefficient", 4)
-        self.robot_leader.write("I_Coefficient", 0)
-        self.robot_leader.write("D_Coefficient", 4)
+        self.robot_leader.write("Position_P_Gain", 50)
+        self.robot_leader.write("Position_I_Gain", 0)
+        self.robot_leader.write("Position_D_Gain", 0)
 
         self._init_keyboard_listener()
 
@@ -521,6 +553,7 @@ class BaseLeaderControlWrapper(gym.Wrapper):
             "episode_success": False,
             "episode_end": False,
             "rerecord_episode": False,
+            "manual_intervention": False
         }
 
     def _handle_key_press(self, key, keyboard):
@@ -531,11 +564,16 @@ class BaseLeaderControlWrapper(gym.Wrapper):
                 return
             if key == keyboard.Key.left:
                 self.keyboard_events["rerecord_episode"] = True
+                print("Rerecord Episode")
                 return
             if hasattr(key, "char") and key.char == "s":
                 logging.info("Key 's' pressed. Episode success triggered.")
                 self.keyboard_events["episode_success"] = True
                 return
+            if key == keyboard.Key.space:
+                self.keyboard_events["manual_intervention"] = not self.keyboard_events["manual_intervention"]
+                return
+
         except Exception as e:
             logging.error(f"Error handling key press: {e}")
 
@@ -574,8 +612,8 @@ class BaseLeaderControlWrapper(gym.Wrapper):
         follower_pos = self.robot_follower.read("Present_Position")
 
         # [:3, 3] Last column of the transformation matrix corresponds to the xyz translation
-        leader_ee = self.kinematics.fk_gripper_tip(leader_pos)[:3, 3]
-        follower_ee = self.kinematics.fk_gripper_tip(follower_pos)[:3, 3]
+        follower_ee = self.follower_kinematics.fk_gripper_tip(follower_pos)[:3, 3]
+        leader_ee = self.follower_kinematics.fk_gripper_tip(leader_pos)[:3, 3]
 
         if self.prev_leader_ee is None:
             self.prev_leader_ee = leader_ee
@@ -583,8 +621,17 @@ class BaseLeaderControlWrapper(gym.Wrapper):
         # NOTE: Using the leader's position delta for teleoperation is too noisy
         # Instead, we move the follower to match the leader's absolute position,
         # and record the leader's position changes as the intervention action
-        action = leader_ee - follower_ee
-        action_intervention = leader_ee - self.prev_leader_ee
+        action = (leader_ee - follower_ee).astype(np.float32)
+
+        action = np.clip(
+            action,
+            -self.action_bounds,
+            self.action_bounds
+        )
+
+        #action_intervention = leader_ee - self.prev_leader_ee
+        action_intervention = torch.tensor(action)
+
         self.prev_leader_ee = leader_ee
 
         if self.use_gripper:
@@ -632,11 +679,18 @@ class BaseLeaderControlWrapper(gym.Wrapper):
 
         # Add intervention info
         info["is_intervention"] = is_intervention
-        info["action_intervention"] = action_intervention if is_intervention else None
+        if is_intervention:
+            info["action_intervention"] = action_intervention
+        info["rerecord_episode"] = self.keyboard_events["rerecord_episode"]
 
         # Check for success or manual termination
         success = self.keyboard_events["episode_success"]
-        terminated = terminated or self.keyboard_events["episode_end"] or success
+        terminated = (
+                terminated or
+                self.keyboard_events["episode_end"] or
+                self.keyboard_events["rerecord_episode"] or
+                success
+        )
 
         if success:
             reward = 1.0
@@ -695,7 +749,7 @@ class GearedLeaderAutomaticControlWrapper(BaseLeaderControlWrapper):
         env,
         ee_action_space_params=None,
         use_gripper=False,
-        intervention_threshold=1.7,
+        intervention_threshold=0.034,
         release_threshold=0.01,
         queue_size=10,
     ):
@@ -722,9 +776,11 @@ class GearedLeaderAutomaticControlWrapper(BaseLeaderControlWrapper):
         # Get current positions
         leader_positions = self.robot_leader.read("Present_Position")
         follower_positions = self.robot_follower.read("Present_Position")
+        leader_ee = self.leader_kinematics.fk_gripper_tip(leader_positions)[:3, 3]
+        follower_ee = self.follower_kinematics.fk_gripper_tip(follower_positions)[:3, 3]
 
         # Calculate error and error rate
-        error = np.linalg.norm(leader_positions - follower_positions)
+        error = np.linalg.norm(leader_ee - follower_ee)
         error_over_time = np.abs(error - self.previous_error)
 
         # Add to queue for running average
@@ -736,7 +792,7 @@ class GearedLeaderAutomaticControlWrapper(BaseLeaderControlWrapper):
 
         # Calculate averages if we have enough data
         if len(self.error_over_time_queue) >= self.queue_size:
-            avg_error_over_time = np.mean(self.error_over_time_queue)
+            avg_error_over_time = np.mean(self.error_queue)
 
             # Debug info
             if self.is_intervention_active:
@@ -753,7 +809,7 @@ class GearedLeaderAutomaticControlWrapper(BaseLeaderControlWrapper):
                 self.is_intervention_active = False
                 logging.info(f"Ending automatic intervention: error rate {avg_error_over_time:.4f}")
 
-        return self.is_intervention_active
+        return self.is_intervention_active or self.keyboard_events["manual_intervention"]
 
     def reset(self, **kwargs):
         """Reset error tracking on environment reset."""

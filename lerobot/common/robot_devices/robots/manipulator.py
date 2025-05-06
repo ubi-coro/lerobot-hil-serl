@@ -352,7 +352,7 @@ class ManipulatorRobot:
                 print(f"Missing calibration file '{arm_calib_path}'")
 
                 if not all(arm.read("Torque_Enable") == TorqueMode.DISABLED.value):
-                    print(f"Press <enter> to disable the torque of {self.robot_type} {name} {arm_type}... ")
+                    input(f"Press <enter> to disable the torque of {self.robot_type} {name} {arm_type}... ")
                     arm.write("Torque_Enable", TorqueMode.DISABLED.value)
 
                 if self.robot_type in ["koch", "koch_bimanual", "aloha"]:
@@ -567,6 +567,7 @@ class ManipulatorRobot:
 
         # Read follower position
         follower_pos = {}
+        #follower_vel = {}
         for name in self.follower_arms:
             before_fread_t = time.perf_counter()
             follower_pos[name] = self.follower_arms[name].read("Present_Position")
@@ -574,21 +575,21 @@ class ManipulatorRobot:
             self.logs[f"read_follower_{name}_pos_dt_s"] = (
                 time.perf_counter() - before_fread_t
             )
-            follower_vel[name] = self.follower_arms[name].read("Present_Velocity")
-            follower_vel[name] = torch.from_numpy(follower_vel[name])
-            self.logs[f"read_follower_{name}_vel_dt_s"] = (
-                time.perf_counter() - before_fread_t
-            )
+            #follower_vel[name] = self.follower_arms[name].read("Present_Velocity")
+            #follower_vel[name] = torch.from_numpy(follower_vel[name])
+            #self.logs[f"read_follower_{name}_vel_dt_s"] = (
+            #    time.perf_counter() - before_fread_t
+            #)
 
         # Create state by concatenating follower current position
         state = []
-        vel = []
+        #vel = []
         for name in self.follower_arms:
             if name in follower_pos:
                 state.append(follower_pos[name])
-                vel.append(follower_vel[name])
+                #vel.append(follower_vel[name])
         state = torch.cat(state)
-        vel = torch.cat(vel)
+        #vel = torch.cat(vel)
 
         # Capture images from cameras
         images = {}

@@ -1,6 +1,7 @@
 import gymnasium as gym
 import numpy as np
 import torch
+from sympy.physics.units import action
 
 
 class SmoothActionWrapper(gym.Wrapper):
@@ -15,6 +16,17 @@ class SmoothActionWrapper(gym.Wrapper):
         self.device = device
 
         action_space = self.action_space[0] if isinstance(self.action_space, gym.spaces.Tuple) else self.action_space
+
+        # Extend observation space to include end effector pose
+        prev_space = self.observation_space["observation.state"]
+
+        self.observation_space["observation.state"] = gym.spaces.Box(
+            low=np.concatenate([prev_space.low, action_space.low]),
+            high=np.concatenate([prev_space.high, action_space.high]),
+            shape=(prev_space.shape[0] + action_space.shape[0],),
+            dtype=np.float32,
+        )
+
         self.action_dim = action_space.shape
         self.smoothing_penalty = smoothing_penalty
         self.max_delta = smoothing_range_factor * action_space.high
@@ -34,7 +46,6 @@ class SmoothActionWrapper(gym.Wrapper):
         delta_action = action - self.prev_action
         exceeds_limits = any(delta_action > self.max_delta) or any(delta_action < self.min_delta)
         if exceeds_limits:
-            print(f"Clamp {delta_action} to {self.max_delta}")
             delta_action = np.clip(delta_action, self.min_delta, self.max_delta)
 
         smoothed_action = self.prev_action + delta_action
@@ -52,6 +63,6 @@ class SmoothActionWrapper(gym.Wrapper):
             state_tensor = obs["observation.state"]
             if not torch.is_tensor(state_tensor):
                 state_tensor = torch.tensor(state_tensor, dtype=torch.float32)
-            prev_tensor = torch.tensor(self.prev_action[np.newaxis, :], dtype=torch.float32).to(self.device)
+            prev_tensor = torch.tensor(self.prev_action, dtype=torch.float32).to(self.device)
             obs["observation.state"] = torch.cat([state_tensor, prev_tensor], dim=-1)
         return obs

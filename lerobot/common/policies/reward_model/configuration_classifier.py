@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 from lerobot.common.optim.optimizers import AdamWConfig, OptimizerConfig
 from lerobot.common.optim.schedulers import LRSchedulerConfig
@@ -19,15 +19,16 @@ class RewardClassifierConfig(PreTrainedConfig):
     model_name: str = "helper2424/resnet10"
     device: str = "cpu"
     model_type: str = "cnn"  # "transformer" or "cnn"
-    num_cameras: int = 2
+    num_cameras: int = 3
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
-    grad_clip_norm: float = 1.0
+    grad_clip_norm: float = 10
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
             "VISUAL": NormalizationMode.MEAN_STD,
         }
     )
+    image_keys: Optional[List[str]] = None
 
     @property
     def observation_delta_indices(self) -> List | None:

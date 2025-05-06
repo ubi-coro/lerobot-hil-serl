@@ -16,6 +16,7 @@
 from typing import Iterator, Union
 
 import torch
+from torch.utils.data import WeightedRandomSampler
 
 
 class EpisodeAwareSampler:
@@ -59,3 +60,28 @@ class EpisodeAwareSampler:
 
     def __len__(self) -> int:
         return len(self.indices)
+
+
+def create_balanced_sampler(dataset, cfg):
+    # Get underlying dataset if using Subset
+    original_dataset = dataset.dataset if isinstance(dataset, torch.utils.data.Subset) else dataset
+
+    # Get indices if using Subset (for slicing)
+    indices = dataset.indices if isinstance(dataset, torch.utils.data.Subset) else None
+
+    # Get labels from Hugging Face dataset
+    if indices is not None:
+        # Get subset of labels using Hugging Face's select()
+        hf_subset = original_dataset.hf_dataset.select(indices)
+        labels = hf_subset["next.reward"]
+    else:
+        # Get all labels directly
+        labels = original_dataset.hf_dataset["next.reward"]
+
+    labels = torch.stack(labels).type(torch.int64)
+    _, counts = torch.unique(labels, return_counts=True)
+    class_weights = 1.0 / counts.float()
+    sample_weights = class_weights[labels]
+
+    return WeightedRandomSampler(weights=sample_weights, num_samples=len(sample_weights), replacement=True)
+

@@ -31,7 +31,6 @@ def record_dataset(env, policy, cfg):
     from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
     # Setup initial action (zero action if using teleop)
-    action = env.action_space.sample() * 0.0
 
     # Configure dataset features based on environment spaces
     features = {
@@ -59,23 +58,30 @@ def record_dataset(env, policy, cfg):
             }
 
     # Create dataset
-    dataset = LeRobotDataset.create(
-        cfg.repo_id,
-        cfg.fps,
-        root=cfg.dataset_root,
-        use_videos=True,
-        image_writer_threads=4,
-        image_writer_processes=0,
-        features=features,
-    )
+    if cfg.resume:
+        dataset = LeRobotDataset(cfg.repo_id, root=cfg.dataset_root)
+        dataset.start_image_writer(
+            num_processes=2,
+            num_threads=4 * len(cfg.robot.cameras),
+        )
+    else:
+        dataset = LeRobotDataset.create(
+            cfg.repo_id,
+            cfg.fps,
+            root=cfg.dataset_root,
+            use_videos=True,
+            image_writer_threads=4 * len(cfg.robot.cameras),
+            image_writer_processes=2,
+            features=features,
+        )
 
     # Record episodes
-    episode_index = 0
-    recorded_action = None
-    while episode_index < cfg.num_episodes:
+    while dataset.num_episodes < cfg.num_episodes:
         obs, _ = env.reset()
+        busy_wait(0.1)
+
         start_episode_t = time.perf_counter()
-        log_say(f"Recording episode {episode_index}", play_sounds=True)
+        log_say(f"Recording episode {dataset.num_episodes}", play_sounds=True)
 
         # Run episode steps
         while time.perf_counter() - start_episode_t < cfg.wrapper.control_time_s:
@@ -84,6 +90,8 @@ def record_dataset(env, policy, cfg):
             # Get action from policy if available
             if cfg.pretrained_policy_name_or_path is not None:
                 action = policy.select_action(obs)
+            else:
+                action = env.action_space.sample()
 
             # Step environment
             obs, reward, terminated, truncated, info = env.step(action)
@@ -92,10 +100,18 @@ def record_dataset(env, policy, cfg):
             if info.get("rerecord_episode", False):
                 break
 
-            # For teleop, get action from intervention
-            recorded_action = {
-                "action": info["action_intervention"].cpu().squeeze(0).float() if policy is None else action
-            }
+            #if not info["is_intervention"]:
+            #    continue
+
+            if info["is_intervention"]:
+                # For teleop, get action from intervention
+                recorded_action = {
+                    "action": info["action_intervention"] if policy is None else action
+                }
+            else:
+                recorded_action = {
+                    "action": action
+                }
 
             # Process observation for dataset
             obs = {k: v.cpu().squeeze(0).float() for k, v in obs.items()}
@@ -118,11 +134,10 @@ def record_dataset(env, policy, cfg):
         # Handle episode recording
         if info.get("rerecord_episode", False):
             dataset.clear_episode_buffer()
-            logging.info(f"Re-recording episode {episode_index}")
+            logging.info(f"Re-recording episode {dataset.num_episodes}")
             continue
 
-        dataset.save_episode(cfg.task)
-        episode_index += 1
+        dataset.save_episode()
 
     # Finalize dataset
     # dataset.consolidate(run_compute_stats=True)
@@ -149,7 +164,13 @@ def replay_episode(env, cfg):
 
 
 def main():
-    cfg = PushCubeRobotEnvConfig()
+    from lerobot.experiments.reach_pose_sparse import RealReachPoseSparseEnvConfig
+
+    cfg = RealReachPoseSparseEnvConfig(
+        mode="record",
+        episode=10,
+        resume=False
+    )
     env = cfg.make()
 
     if cfg.mode == "record":

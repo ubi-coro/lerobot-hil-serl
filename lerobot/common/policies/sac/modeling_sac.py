@@ -26,6 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor
 from torch.distributions import MultivariateNormal, TanhTransform, Transform, TransformedDistribution
+from triton.language import tensor
 
 from lerobot.common.policies.normalize import Normalize, Unnormalize
 from lerobot.common.policies.pretrained import PreTrainedPolicy
@@ -137,7 +138,7 @@ class SACPolicy(
         self,
         batch: dict[str, Tensor | dict[str, Tensor]],
         model: Literal["actor", "critic", "temperature", "discrete_critic"] = "critic",
-    ) -> dict[str, Tensor]:
+    ) -> dict[str, Tensor | dict]:
         """Compute the loss for the given model
 
         Args:
@@ -166,7 +167,7 @@ class SACPolicy(
             done: Tensor = batch["done"]
             next_observation_features: Tensor = batch.get("next_observation_feature")
 
-            loss_critic = self.compute_loss_critic(
+            loss_critic, training_infos = self.compute_loss_critic(
                 observations=observations,
                 actions=actions,
                 rewards=rewards,
@@ -176,7 +177,7 @@ class SACPolicy(
                 next_observation_features=next_observation_features,
             )
 
-            return {"loss_critic": loss_critic}
+            return {"loss_critic": loss_critic, "training_infos": training_infos}
 
         if model == "discrete_critic" and self.config.num_discrete_actions is not None:
             # Extract critic-specific components
@@ -248,7 +249,7 @@ class SACPolicy(
         done,
         observation_features: Tensor | None = None,
         next_observation_features: Tensor | None = None,
-    ) -> Tensor:
+    ) -> tuple[dict[str, Tensor]]:
         with torch.no_grad():
             next_action_preds, next_log_probs, _ = self.actor(next_observations, next_observation_features)
 
@@ -299,7 +300,18 @@ class SACPolicy(
                 reduction="none",
             ).mean(dim=1)
         ).sum()
-        return critics_loss
+
+        # log key metrics to measure overestimation, stability and uncertainty
+        training_infos = {
+            "mean_q_ensemble_disagreement": q_preds.std(dim=0)[0].mean().item(),
+            "mean_q_ensemble_var": q_preds.std(dim=1).mean().item(),
+            "max_q_ensemble_range": (q_preds.max(dim=0)[0] - q_preds.min(dim=0)[0]).mean().item(),
+            "mean_q": q_preds.mean().item(),
+            "max_q": q_preds.max().item(),
+            "min_q": q_preds.min().item()
+        }
+
+        return critics_loss, training_infos
 
     def compute_loss_discrete_critic(
         self,
@@ -440,8 +452,8 @@ class SACPolicy(
         )
         self.critic_target.load_state_dict(self.critic_ensemble.state_dict())
 
-        self.critic_ensemble = torch.compile(self.critic_ensemble)
-        self.critic_target = torch.compile(self.critic_target)
+        self.critic_ensemble = self.critic_ensemble # torch.compile(self.critic_ensemble)
+        self.critic_target = self.critic_target #torch.compile(self.critic_target)
 
         if self.config.num_discrete_actions is not None:
             self._init_discrete_critics()

@@ -338,6 +338,7 @@ class OpenCVCamera:
             self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.capture_width)
         if self.capture_height is not None:
             self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.capture_height)
+        self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 0)
 
         actual_fps = self.camera.get(cv2.CAP_PROP_FPS)
         actual_width = self.camera.get(cv2.CAP_PROP_FRAME_WIDTH)

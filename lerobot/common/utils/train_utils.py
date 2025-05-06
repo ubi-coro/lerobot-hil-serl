@@ -50,6 +50,11 @@ def get_step_checkpoint_dir(output_dir: Path, total_steps: int, step: int) -> Pa
     return output_dir / CHECKPOINTS_DIR / step_identifier
 
 
+def get_best_checkpoint_dir(output_dir: Path) -> Path:
+    """Returns the checkpoint sub-directory corresponding to the step number."""
+    return output_dir / CHECKPOINTS_DIR / "best"
+
+
 def save_training_step(step: int, save_dir: Path) -> None:
     write_json({"step": step}, save_dir / TRAINING_STEP)
 
