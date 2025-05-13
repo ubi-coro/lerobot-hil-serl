@@ -75,6 +75,8 @@ LOG_PREFIX = "[LEARNER]"
 
 logging.basicConfig(level=logging.INFO)
 
+torch._dynamo.config.suppress_errors = True
+
 #################################################
 # MAIN ENTRY POINTS AND CORE ALGORITHM FUNCTIONS #
 #################################################
@@ -1085,8 +1087,8 @@ def process_interaction_message(
     message["Interaction step"] += interaction_step_shift
 
     # Log if logger available
-    #if wandb_logger:
-    #    wandb_logger.log_dict(d=message, mode="train", custom_step_key="Interaction step")
+    if wandb_logger:
+        wandb_logger.log_dict(d=message, mode="train", custom_step_key="Interaction step")
 
     return message
 

@@ -9,7 +9,7 @@ from lerobot.common.envs.configs import (
     EnvWrapperConfig,
     EEActionSpaceConfig
 )
-from lerobot.common.policies.sac.configuration_sac import ConcurrencyConfig, SACConfig
+from lerobot.common.policies.sac.configuration_sac import SACConfig
 from lerobot.common.robot_devices.robots.configs import AlohaRobotConfig, RobotConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType, PolicyFeature

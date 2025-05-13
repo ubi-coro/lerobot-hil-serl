@@ -241,15 +241,18 @@ def act_with_policy(
                 label="Policy inference time",
                 log=False,
             ) as timer:  # noqa: F841
-                action = policy.select_action(batch=obs)
+                action, q_value = policy.select_action(batch=obs)
             policy_fps = 1.0 / (list_policy_time[-1] + 1e-9)
 
             log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
 
         else:
             action = online_env.action_space.sample()
+            q_value = 0.0
 
         next_obs, reward, done, truncated, info = online_env.step(action)
+
+        del next_obs["observation.state"]
 
         sum_reward_episode += float(reward)
         # Increment total steps counter for intervention rate
@@ -268,6 +271,7 @@ def act_with_policy(
             Transition(
                 state=obs,
                 action=action,
+                q_value=q_value,
                 reward=reward,
                 next_state=next_obs,
                 done=done,

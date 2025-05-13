@@ -2,14 +2,18 @@ from dataclasses import dataclass, field
 
 import gymnasium as gym
 
-from lerobot.common.constants import ACTION, OBS_ENV, OBS_IMAGE, OBS_IMAGES, OBS_ROBOT
+from lerobot.common.constants import ACTION, OBS_ROBOT, OBS_IMAGE
 from lerobot.common.envs.configs import (
     EnvConfig,
     HILSerlRobotEnvConfig,
     EnvWrapperConfig,
     EEActionSpaceConfig
 )
+from lerobot.common.envs.wrapper.reward import SuccessRepeatWrapper
+from lerobot.common.policies.sac.configuration_sac import SACConfig
+from lerobot.common.robot_devices.cameras.configs import OpenCVCameraConfig, IntelRealSenseCameraConfig
 from lerobot.common.robot_devices.robots.configs import AlohaRobotConfig, RobotConfig
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType, PolicyFeature
 
 
@@ -47,28 +51,22 @@ class TargetPoseWrapper(gym.Wrapper):
 @EnvConfig.register_subclass("real_reach_pose_sparse")
 @dataclass
 class RealReachPoseSparseEnvConfig(HILSerlRobotEnvConfig):
-    repo_id: str = "jannick-st/reach-pose-sparse-offline-demos"
-    dataset_root: str = "/media/nvme1/jstranghoener/lerobot/data/jannick-st/reach-pose-sparse/offline-demos"
-    target_ee_pos: list[float] = field(default_factory=lambda: [0.27, 0.0, 0.15])
+    repo_id: str = "jannick-st/reach-pose-sparse-offline-demos-repeat"
+    dataset_root: str = "/media/nvme1/jstranghoener/lerobot/data/jannick-st/reach-pose-sparse-repeat/offline-demos"
+    task: str = "Reach the target pose"
+    num_episodes: int = 20  # only for record mode
+    episode: int = 0
+    device: str = "cuda"
+    push_to_hub: bool = False
+    fps: int = 10
+
+    target_ee_pos: list[float] = field(default_factory=lambda: [0.31, 0.0, 0.15])
     axis: int = 0
     penalty_per_step: float = 0.005
+    num_success_repeats: int = 3
+    vision_only: bool = False
+    state_only: bool = False
 
-    robot: RobotConfig = AlohaRobotConfig(
-        cameras=dict(),
-        calibration_dir="/home/jstranghoener/PycharmProjects/lerobot-hil-serl/.cache/calibration/aloha_default"
-    )
-    features: dict[str, PolicyFeature] = field(
-        default_factory=lambda: {
-            "action": PolicyFeature(type=FeatureType.ACTION, shape=(3,)),
-            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(15,)),
-        }
-    )
-    features_map: dict[str, str] = field(
-        default_factory=lambda: {
-            "action": ACTION,
-            "observation.state": OBS_ROBOT,
-        }
-    )
     wrapper: EnvWrapperConfig = EnvWrapperConfig(
         display_cameras=True,
         control_time_s=10.0,
@@ -81,17 +79,70 @@ class RealReachPoseSparseEnvConfig(HILSerlRobotEnvConfig):
             z_step_size=0.02,
             bounds={
                 "max": [0.32, 0.15, 0.25],
-                "min": [0.16, -0.15, 0.08]
+                "min": [0.16, -0.15, 0.09]
             },
             control_mode="leader"
-        )
+        ),
+        crop_params_dict={
+            "observation.images.cam_top": (57, 23, 401, 295),
+        #    #"observation.images.cam_left_wrist": (25, 86, 450, 547)
+        },
+        resize_size=(64, 64)
     )
-    task: str = "Reach the target pose"
-    num_episodes: int = 40  # only for record mode
-    episode: int = 0
-    device: str = "cuda"
-    push_to_hub: bool = False
-    fps: int = 10
+
+    robot: RobotConfig = field(default_factory=lambda: AlohaRobotConfig(
+        cameras={
+            "cam_top": OpenCVCameraConfig(
+                camera_index="/dev/CAM_HIGH",
+                fps=30,
+                width=640,
+                height=480,
+            ),
+            #"cam_left_wrist": IntelRealSenseCameraConfig(
+            #    serial_number=218722270675,
+            #    fps=30,
+            #    width=640,
+            #    height=480,
+            #)
+        },
+        calibration_dir="/home/jstranghoener/PycharmProjects/lerobot-hil-serl/.cache/calibration/aloha_default"
+    )
+                               )
+    features: dict[str, PolicyFeature] = field(
+        default_factory=lambda: {
+            "action": PolicyFeature(type=FeatureType.ACTION, shape=(3,)),
+            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(15,)),
+            #"observation.images.cam_left_wrist": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
+            "observation.images.cam_top": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 64, 64))
+        }
+    )
+
+    features_map: dict[str, str] = field(
+        default_factory=lambda: {
+            "action": ACTION,
+            "observation.state": OBS_ROBOT,
+            #"observation.images.cam_left_wrist": f"{OBS_IMAGE}s.cam_left_wrist",
+            "observation.images.cam_top": f"{OBS_IMAGE}s.cam_top"
+        }
+    )
+
+    def __post_init__(self):
+        if self.vision_only and self.state_only:
+            raise ValueError("vision_only and state_only cannot be both True")
+
+        if self.vision_only:
+            del self.features["observation.state"]
+            del self.features_map["observation.state"]
+
+        if self.state_only:
+            del self.features["observation.images.cam_left_wrist"]
+            del self.features["observation.images.cam_top"]
+            del self.features_map["observation.images.cam_left_wrist"]
+            del self.features_map["observation.images.cam_top"]
+            self.robot.cameras = dict()
+
+        if self.mode == "record":
+            self.crop_params_dict = dict()
 
     def make(self):
         import lerobot.common.envs.wrapper.hilserl as wrapper
@@ -116,10 +167,17 @@ class RealReachPoseSparseEnvConfig(HILSerlRobotEnvConfig):
 
         env = wrapper.ConvertToLeRobotObservation(env=env, device=self.device)
 
+        if self.wrapper.crop_params_dict is not None:
+            env = wrapper.ImageCropResizeWrapper(
+                env=env,
+                crop_params_dict=self.wrapper.crop_params_dict,
+                resize_size=self.wrapper.resize_size,
+            )
+
+        # reward and termination
         env = TargetPoseWrapper(env, self.target_ee_pos, axis=self.axis)
-
         env = TimePenaltyWrapper(env, penalty_per_step=self.penalty_per_step)
-
+        env = SuccessRepeatWrapper(env, num_repeats=self.num_success_repeats)
         env = wrapper.TimeLimitWrapper(env=env, control_time_s=self.wrapper.control_time_s, fps=self.fps)
 
         env = wrapper.EEActionWrapper(
@@ -164,3 +222,47 @@ class RealReachPoseSparseEnvConfig(HILSerlRobotEnvConfig):
         env = wrapper.TorchActionWrapper(env=env, device=self.device)
 
         return env
+
+
+@PreTrainedConfig.register_subclass("sac_real_reach_pose_sparse")
+@dataclass
+class SACRealReachPoseSparseConfig(SACConfig):
+    # tuning recipe:
+    # try to hit 30 fps
+    # keep ratio of utd_ratio:num_critics at 3:2, increase as much as possible
+    # freeze and share the encoder
+    # if possible, use "cuda" as the storage device
+
+    online_step_before_learning: int = 20
+    camera_number: int = 1  # also affects fps linearly, resolution affects quadratically
+    utd_ratio: int = 6  # affects fps linearly
+    storage_device: str = "cuda"  # destabilizes fps, sometimes cuts 10 fps
+    shared_encoder: bool = True  # does not affect fps much
+    num_critics: int = 4  # affects fps sub-linearly
+    target_entropy: float = -1.5
+    use_backup_entropy: bool = False  # as per lil'km
+    freeze_vision_encoder: bool = True
+
+    online_buffer_capacity: int = 10000
+    offline_buffer_capacity: int = 10000
+
+    dataset_stats: dict[str, dict[str, list[float]]] | None = field(
+        default_factory=lambda: {
+            "observation.state": {
+                "min": [0.16, -0.15, 0.08, 0.0, -0.02, -0.02, -0.02],
+                "max": [0.32, 0.15, 0.25, 3.0, 0.02, 0.02, 0.02],
+            },
+            "observation.images.cam_top": {
+                "mean": [0.485, 0.456, 0.406],
+                "std": [0.229, 0.224, 0.225],
+            },
+            "observation.images.cam_left_wrist": {
+                "mean": [0.485, 0.456, 0.406],
+                "std": [0.229, 0.224, 0.225],
+            },
+            "action": {
+                "min": [-0.02, -0.02, -0.02],
+                "max": [0.02, 0.02, 0.02],
+            },
+        }
+    )

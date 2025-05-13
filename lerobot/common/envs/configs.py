@@ -24,6 +24,7 @@ import numpy as np
 from lerobot.common.constants import ACTION, OBS_ENV, OBS_IMAGE, OBS_IMAGES, OBS_ROBOT
 from lerobot.common.robot_devices.robots.configs import RobotConfig, AlohaRobotConfig
 from lerobot.configs.types import FeatureType, PolicyFeature
+from lerobot.common.envs.wrapper.reward import SuccessRepeatWrapper
 
 
 @dataclass
@@ -267,6 +268,7 @@ class HILSerlRobotEnvConfig(EnvConfig):
     push_to_hub: bool = True
     pretrained_policy_name_or_path: Optional[str] = None
     reward_classifier_pretrained_path: Optional[str] = None
+    num_success_repeats: int = 0
 
     def gym_kwargs(self) -> dict:
         return {}
@@ -316,6 +318,10 @@ class HILSerlRobotEnvConfig(EnvConfig):
         reward_classifier = self.init_reward_classifier()
         if reward_classifier is not None:
             env = wrapper.RewardWrapper(env=env, reward_classifier=reward_classifier, device=self.device)
+
+        if self.num_success_repeats > 0:
+            env = SuccessRepeatWrapper(env=env, num_repeats=self.num_success_repeats)
+
         env = wrapper.TimeLimitWrapper(env=env, control_time_s=self.wrapper.control_time_s, fps=self.fps)
         if self.wrapper.use_gripper:
             env = wrapper.GripperActionWrapper(env=env, quantization_threshold=self.wrapper.gripper_quantization_threshold)
@@ -332,7 +338,12 @@ class HILSerlRobotEnvConfig(EnvConfig):
         )
 
         if self.wrapper.smoothing_range_factor is not None:
-            env = SmoothActionWrapper(env, smoothing_range_factor=self.wrapper.smoothing_range_factor, device=self.device)
+            env = SmoothActionWrapper(
+                env=env,
+                smoothing_range_factor=self.wrapper.smoothing_range_factor,
+                use_gripper=self.wrapper.use_gripper,
+                device=self.device
+            )
 
         if self.wrapper.ee_action_space_params.control_mode == "gamepad":
             env = wrapper.GamepadControlWrapper(

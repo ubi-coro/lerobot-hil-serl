@@ -91,7 +91,7 @@ def train_epoch(model, train_loader, optimizer, grad_scaler, device, logger, ste
             "dataloading_s": time.perf_counter() - start_time,
         }
 
-        wlogger.log_dict(train_info, step + batch_idx, mode="train")
+        logger.log_dict(train_info, step + batch_idx, mode="train")
         pbar.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{output_dict['accuracy']:.2f}%"})
 
 

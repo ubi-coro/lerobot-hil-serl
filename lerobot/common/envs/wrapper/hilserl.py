@@ -11,6 +11,7 @@ import torch
 import torchvision.transforms.functional as F  # noqa: N812
 from scipy.spatial.transform import Rotation as R
 
+from lerobot.common.envs.wrapper.utils import get_wrapper_callable
 from lerobot.common.robot_devices.control_utils import (
     busy_wait,
     is_headless,
@@ -20,7 +21,7 @@ from lerobot.common.utils.utils import log_say
 from lerobot.scripts.server.kinematics import get_kinematics
 
 logging.basicConfig(level=logging.INFO)
-MAX_GRIPPER_COMMAND = 40
+MAX_GRIPPER_COMMAND = 80
 
 
 class AddJointVelocityToObservation(gym.ObservationWrapper):
@@ -203,11 +204,11 @@ class ImageCropResizeWrapper(gym.Wrapper):
                 # Calculate standard deviation across spatial dimensions (H, W)
                 # If any channel has std=0, all pixels in that channel have the same value
                 # This is helpful if one camera mistakenly covered or the image is black
-                std_per_channel = torch.std(flattened_spatial_dims, dim=2)
-                if (std_per_channel <= 0.02).any():
-                    logging.warning(
-                        f"Potential hardware issue detected: All pixels have the same value in observation {k}"
-                    )
+                #std_per_channel = torch.std(flattened_spatial_dims, dim=2)
+                #if (std_per_channel <= 0.02).any():
+                #    logging.warning(
+                #        f"Potential hardware issue detected: All pixels have the same value in observation {k}"
+                #    )
 
             if device == torch.device("mps:0"):
                 obs[k] = obs[k].cpu()
@@ -377,15 +378,18 @@ class GripperActionWrapper(gym.ActionWrapper):
         # we want to quantize them to -1, 0 or 1
         gripper_command = gripper_command - 1.0
 
+        gripper_state = self.unwrapped.robot.follower_arms["main"].read("Present_Position")[-1] / 100.0
+
         if self.quantization_threshold is not None:
             # Quantize gripper command to -1, 0 or 1
             gripper_command = (
                 np.sign(gripper_command) if abs(gripper_command) > self.quantization_threshold else 0.0
             )
         gripper_command = gripper_command * MAX_GRIPPER_COMMAND
-        gripper_state = self.unwrapped.robot.follower_arms["main"].read("Present_Position")[-1]
+
         gripper_action = np.clip(gripper_state + gripper_command, 0, MAX_GRIPPER_COMMAND)
-        action[-1] = gripper_action.item()
+
+        action[-1] = gripper_action
         return action
 
     def reset(self, **kwargs):
@@ -404,7 +408,7 @@ class EEActionWrapper(gym.ActionWrapper):
         # Initialize kinematics instance for the appropriate robot type
         self.kinematics = get_kinematics(env.unwrapped.robot.config, robot_type="follower")
         self.fk_function = self.kinematics.fk_gripper_tip
-        self.initial_ee_pos = None
+        self._target_ee_pos = None
 
         action_space_bounds = np.array(
             [
@@ -437,21 +441,19 @@ class EEActionWrapper(gym.ActionWrapper):
             action = action[:-1]
 
         current_joint_pos = self.unwrapped.robot.follower_arms["main"].read("Present_Position")
-        current_ee_pos = self.fk_function(current_joint_pos)
-        if self.initial_ee_pos is None:
-            self.initial_ee_pos = current_ee_pos.copy()
+        if self._target_ee_pos is None:
+            self._target_ee_pos = self.fk_function(current_joint_pos)
 
-        # we keep the orientation of the reset pose and only update position
-        desired_ee_pos = self.initial_ee_pos.copy()
-        desired_ee_pos[:3, 3] = np.clip(
-            current_ee_pos[:3, 3] + action,
+        # increment the internal target EE position
+        self._target_ee_pos[:3, 3] = np.clip(
+            self._target_ee_pos[:3, 3] + action,
             self.bounds["min"],
             self.bounds["max"],
         )
 
         target_joint_pos = self.kinematics.ik(
             current_joint_pos,
-            desired_ee_pos,
+            self._target_ee_pos,
             position_only=True,
             fk_func=self.fk_function,
         )
@@ -463,8 +465,12 @@ class EEActionWrapper(gym.ActionWrapper):
 
     def reset(self, **kwargs):
         obs, info = super().reset(**kwargs)
-        self.initial_ee_pos = None
+        self._target_ee_pos = None
         return obs, info
+
+    @property
+    def target_ee_pos(self):
+        return self._target_ee_pos
 
 
 class EEObservationWrapper(gym.ObservationWrapper):
@@ -474,10 +480,16 @@ class EEObservationWrapper(gym.ObservationWrapper):
         # Extend observation space to include end effector pose
         prev_space = self.observation_space["observation.state"]
 
+        #self.observation_space["observation.state"] = gym.spaces.Box(
+        #    low=np.concatenate([prev_space.low, ee_pose_limits["min"]]),
+        #    high=np.concatenate([prev_space.high, ee_pose_limits["max"]]),
+        #    shape=(prev_space.shape[0] + 3,),
+        #    dtype=np.float32,
+        #)
         self.observation_space["observation.state"] = gym.spaces.Box(
-            low=np.concatenate([prev_space.low, ee_pose_limits["min"]]),
-            high=np.concatenate([prev_space.high, ee_pose_limits["max"]]),
-            shape=(prev_space.shape[0] + 3,),
+            low=np.array(ee_pose_limits["min"]),
+            high=np.array(ee_pose_limits["max"]),
+            shape=(3,),
             dtype=np.float32,
         )
 
@@ -488,13 +500,14 @@ class EEObservationWrapper(gym.ObservationWrapper):
     def observation(self, observation):
         current_joint_pos = self.unwrapped.robot.follower_arms["main"].read("Present_Position")
         current_ee_pos = self.fk_function(current_joint_pos)
-        observation["observation.state"] = torch.cat(
-            [
-                observation["observation.state"],
-                torch.from_numpy(current_ee_pos[:3, 3]),
-            ],
-            dim=-1,
-        )
+        #observation["observation.state"] = torch.cat(
+        #    [
+        #        observation["observation.state"],
+        #        torch.from_numpy(current_ee_pos[:3, 3]),
+        #    ],
+        #    dim=-1,
+        #)
+        observation["observation.state"] = torch.from_numpy(current_ee_pos[:3, 3])
         return observation
 
 
@@ -516,6 +529,7 @@ class BaseLeaderControlWrapper(gym.Wrapper):
         self.ee_action_space_params = ee_action_space_params
         self.use_ee_action_space = ee_action_space_params is not None
         self.use_gripper: bool = use_gripper
+        self.use_target_ee_pos = hasattr(self, "target_ee_pos")
 
         if self.use_ee_action_space:
             self.action_bounds = np.array([
@@ -540,10 +554,19 @@ class BaseLeaderControlWrapper(gym.Wrapper):
         # With lower gains we can manually move the leader arm without risk of injury to ourselves or the robot
         # With higher gains, it would be dangerous and difficult to modify the leader's pose while torque is enabled
         # Default value for P_coeff is 32
+        xm_motors = [
+            "waist",
+            "shoulder",
+            "shoulder_shadow",
+            "elbow",
+            "elbow_shadow",
+            "forearm_roll",
+            "wrist_angle",
+        ]
         self.robot_leader.write("Torque_Enable", 1)
-        self.robot_leader.write("Position_P_Gain", 50)
-        self.robot_leader.write("Position_I_Gain", 0)
-        self.robot_leader.write("Position_D_Gain", 0)
+        self.robot_leader.write("Position_P_Gain", 200, motor_names=xm_motors)
+        self.robot_leader.write("Position_I_Gain", 0, motor_names=xm_motors)
+        self.robot_leader.write("Position_D_Gain", 0, motor_names=xm_motors)
 
         self._init_keyboard_listener()
 
@@ -608,12 +631,16 @@ class BaseLeaderControlWrapper(gym.Wrapper):
             self.robot_leader.write("Torque_Enable", 0)
             self.leader_torque_enabled = False
 
-        leader_pos = self.robot_leader.read("Present_Position")
         follower_pos = self.robot_follower.read("Present_Position")
-
-        # [:3, 3] Last column of the transformation matrix corresponds to the xyz translation
-        follower_ee = self.follower_kinematics.fk_gripper_tip(follower_pos)[:3, 3]
+        leader_pos = self.robot_leader.read("Present_Position")
         leader_ee = self.follower_kinematics.fk_gripper_tip(leader_pos)[:3, 3]
+
+        # if the env has a EEActionWrapper, we use the internal target value as a reference
+        if self.use_target_ee_pos and self.target_ee_pos is not None:
+            follower_ee = self.target_ee_pos[:3, 3]
+        else:
+            follower_ee = self.follower_kinematics.fk_gripper_tip(follower_pos)[:3, 3]
+
 
         if self.prev_leader_ee is None:
             self.prev_leader_ee = leader_ee
@@ -621,7 +648,7 @@ class BaseLeaderControlWrapper(gym.Wrapper):
         # NOTE: Using the leader's position delta for teleoperation is too noisy
         # Instead, we move the follower to match the leader's absolute position,
         # and record the leader's position changes as the intervention action
-        action = (leader_ee - follower_ee).astype(np.float32)
+        action = leader_ee - follower_ee
 
         action = np.clip(
             action,
@@ -630,7 +657,7 @@ class BaseLeaderControlWrapper(gym.Wrapper):
         )
 
         #action_intervention = leader_ee - self.prev_leader_ee
-        action_intervention = torch.tensor(action)
+        action_intervention = action
 
         self.prev_leader_ee = leader_ee
 
@@ -638,6 +665,7 @@ class BaseLeaderControlWrapper(gym.Wrapper):
             # Get gripper action delta based on leader pose
             leader_gripper = leader_pos[-1]
             follower_gripper = follower_pos[-1]
+
             gripper_delta = leader_gripper - follower_gripper
 
             # Normalize by max angle and quantize to {0,1,2}
@@ -650,9 +678,9 @@ class BaseLeaderControlWrapper(gym.Wrapper):
                 gripper_action = 1
 
             action = np.append(action, gripper_action)
-            action_intervention = np.append(action_intervention, gripper_delta)
+            action_intervention = np.append(action_intervention, gripper_action)
 
-        return action, action_intervention
+        return action, torch.Tensor(action_intervention)
 
     def _handle_leader_teleoperation(self):
         """Handle leader teleoperation (non-intervention) operation."""
@@ -661,7 +689,17 @@ class BaseLeaderControlWrapper(gym.Wrapper):
             self.leader_torque_enabled = True
 
         follower_pos = self.robot_follower.read("Present_Position")
-        self.robot_leader.write("Goal_Position", follower_pos)
+        leader_pos = self.robot_leader.read("Present_Position")
+
+        target_joint_pos = self.leader_kinematics.ik(
+            leader_pos,
+            self.follower_kinematics.fk_gripper_tip(follower_pos),
+            position_only=True,
+            fk_func=self.leader_kinematics.fk_gripper_tip,
+            gripper_pos=follower_pos[-1]
+        )
+
+        self.robot_leader.write("Goal_Position", target_joint_pos)
 
     def step(self, action):
         """Execute environment step with possible intervention."""

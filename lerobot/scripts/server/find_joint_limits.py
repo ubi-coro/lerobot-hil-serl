@@ -104,6 +104,7 @@ def make_robot(robot_type="so100"):
 
     # Get the appropriate robot config class based on robot_type
     robot_config = RobotConfig.get_choice_class(robot_type)(mock=False)
+    robot_config.cameras = dict()
     robot_config.leader_arms["main"].port = leader_port
     robot_config.follower_arms["main"].port = follower_port
 

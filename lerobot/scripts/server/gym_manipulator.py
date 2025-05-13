@@ -91,7 +91,7 @@ def record_dataset(env, policy, cfg):
             if cfg.pretrained_policy_name_or_path is not None:
                 action = policy.select_action(obs)
             else:
-                action = env.action_space.sample()
+                action = env.action_space.sample() #* 0.0
 
             # Step environment
             obs, reward, terminated, truncated, info = env.step(action)
@@ -164,12 +164,11 @@ def replay_episode(env, cfg):
 
 
 def main():
-    from lerobot.experiments.reach_pose_sparse import RealReachPoseSparseEnvConfig
+    from lerobot.experiments import RealGraspCubeEnvConfig
 
-    cfg = RealReachPoseSparseEnvConfig(
+    cfg = RealGraspCubeEnvConfig(
         mode="record",
-        episode=10,
-        resume=False
+        resume=False,
     )
     env = cfg.make()
 

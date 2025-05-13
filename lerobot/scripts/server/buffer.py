@@ -29,6 +29,7 @@ from lerobot.scripts.server.utils import Transition
 class BatchTransition(TypedDict):
     state: dict[str, torch.Tensor]
     action: torch.Tensor
+    q_value: torch.Tensor
     reward: torch.Tensor
     next_state: dict[str, torch.Tensor]
     done: torch.Tensor
@@ -124,7 +125,7 @@ class ReplayBuffer:
 
         if image_augmentation_function is None:
             base_function = functools.partial(random_shift, pad=4)
-            self.image_augmentation_function = torch.compile(base_function)
+            self.image_augmentation_function = base_function  # torch.compile(base_function)
         self.use_drq = use_drq
 
     def _initialize_storage(
@@ -144,6 +145,7 @@ class ReplayBuffer:
             for key, shape in state_shapes.items()
         }
         self.actions = torch.empty((self.capacity, *action_shape), device=self.storage_device)
+        self.q_values = torch.empty((self.capacity,), device=self.storage_device)
         self.rewards = torch.empty((self.capacity,), device=self.storage_device)
 
         if not self.optimize_memory:
@@ -189,6 +191,7 @@ class ReplayBuffer:
         self,
         state: dict[str, torch.Tensor],
         action: torch.Tensor,
+        q_value: float,
         reward: float,
         next_state: dict[str, torch.Tensor],
         done: bool,
@@ -209,6 +212,7 @@ class ReplayBuffer:
                 self.next_states[key][self.position].copy_(next_state[key].squeeze(dim=0))
 
         self.actions[self.position].copy_(action.squeeze(dim=0))
+        self.q_values[self.position] = q_value
         self.rewards[self.position] = reward
         self.dones[self.position] = done
         self.truncateds[self.position] = truncated
@@ -263,7 +267,9 @@ class ReplayBuffer:
             all_images = []
             for key in image_keys:
                 all_images.append(batch_state[key])
-                all_images.append(batch_next_state[key])
+                #all_images.append(batch_next_state[key])
+
+                # augmenting observations for td targets is noisy and may destabilize training as per SVEA
 
             # Optimization: Batch all images and apply augmentation once
             all_images_tensor = torch.cat(all_images, dim=0)
@@ -272,12 +278,14 @@ class ReplayBuffer:
             # Split the augmented images back to their sources
             for i, key in enumerate(image_keys):
                 # State images are at even indices (0, 2, 4...)
-                batch_state[key] = augmented_images[i * 2 * batch_size : (i * 2 + 1) * batch_size]
+                #batch_state[key] = augmented_images[i * 2 * batch_size : (i * 2 + 1) * batch_size]
                 # Next state images are at odd indices (1, 3, 5...)
-                batch_next_state[key] = augmented_images[(i * 2 + 1) * batch_size : (i + 1) * 2 * batch_size]
+                #batch_next_state[key] = augmented_images[(i * 2 + 1) * batch_size : (i + 1) * 2 * batch_size]
+                batch_state[key] = augmented_images[i * batch_size: (i + 1) * batch_size]
 
         # Sample other tensors
         batch_actions = self.actions[idx].to(self.device)
+        batch_q_values = self.q_values[idx].to(self.device)
         batch_rewards = self.rewards[idx].to(self.device)
         batch_dones = self.dones[idx].to(self.device).float()
         batch_truncateds = self.truncateds[idx].to(self.device).float()
@@ -292,6 +300,7 @@ class ReplayBuffer:
         return BatchTransition(
             state=batch_state,
             action=batch_actions,
+            q_value=batch_q_values,
             reward=batch_rewards,
             next_state=batch_next_state,
             done=batch_dones,
@@ -485,6 +494,7 @@ class ReplayBuffer:
             replay_buffer.add(
                 state=data["state"],
                 action=action,
+                q_value=0.0,
                 reward=data["reward"],
                 next_state=data["next_state"],
                 done=data["done"],
@@ -521,8 +531,9 @@ class ReplayBuffer:
         act_info = guess_feature_info(t=sample_action, name="action")
         features["action"] = act_info
 
-        # Add "reward" and "done"
+        # Add "reward", "done" and the current "q_value"
         features["next.reward"] = {"dtype": "float32", "shape": (1,)}
+        features["q_value"] = {"dtype": "float32", "shape": (1,)}
         features["next.done"] = {"dtype": "bool", "shape": (1,)}
 
         # Add state keys
@@ -570,6 +581,7 @@ class ReplayBuffer:
 
             # Fill action, reward, done
             frame_dict["action"] = self.actions[actual_idx].cpu()
+            frame_dict["q_value"] = torch.tensor([self.q_values[actual_idx]], dtype=torch.float32).cpu()
             frame_dict["next.reward"] = torch.tensor([self.rewards[actual_idx]], dtype=torch.float32).cpu()
             frame_dict["next.done"] = torch.tensor([self.dones[actual_idx]], dtype=torch.bool).cpu()
 

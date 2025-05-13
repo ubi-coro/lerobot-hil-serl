@@ -78,22 +78,24 @@ class SACPolicy(
         pass
 
     @torch.no_grad()
-    def select_action(self, batch: dict[str, Tensor]) -> Tensor:
+    def select_action(self, batch: dict[str, Tensor]) -> tuple[Tensor, float]:
         """Select action for inference/evaluation"""
-        observations_features = None
+        observation_features = None
         if self.shared_encoder:
             # Cache and normalize image features
-            observations_features = self.actor.encoder.get_cached_image_features(batch, normalize=True)
+            observation_features = self.actor.encoder.get_cached_image_features(batch, normalize=True)
 
-        actions, _, _ = self.actor(batch, observations_features)
+
+        actions, _, _ = self.actor(batch, observation_features)
         actions = self.unnormalize_outputs({"action": actions})["action"]
+        q_pred = self.critic_forward(batch, actions, use_target=False, observation_features=observation_features)
 
         if self.config.num_discrete_actions is not None:
-            discrete_action_value = self.discrete_critic(batch, observations_features)
+            discrete_action_value = self.discrete_critic(batch, observation_features)
             discrete_action = torch.argmax(discrete_action_value, dim=-1, keepdim=True)
             actions = torch.cat([actions, discrete_action], dim=-1)
 
-        return actions
+        return actions, q_pred.min().detach().item()
 
     def critic_forward(
         self,

@@ -1,25 +1,9 @@
 import logging
-import sys
-import time
-from collections import deque
-from threading import Lock
-from typing import Annotated, Any, Dict, Sequence, Tuple
+from typing import Any, Dict, Tuple
 
 import gymnasium as gym
 import numpy as np
 import torch
-import torchvision.transforms.functional as F  # noqa: N812
-
-from lerobot.common.envs.configs import EnvConfig
-from lerobot.common.robot_devices.control_utils import (
-    busy_wait,
-    is_headless,
-    reset_follower_position,
-)
-from lerobot.common.robot_devices.robots.utils import make_robot_from_config
-from lerobot.common.utils.utils import log_say
-from lerobot.configs import parser
-from lerobot.scripts.server.kinematics import get_kinematics
 
 logging.basicConfig(level=logging.INFO)
 MAX_GRIPPER_COMMAND = 40
