@@ -1,2 +1,3 @@
 from .reach_pose import SACRealReachPoseConfig, RealReachPoseEnvConfig
-from .reach_pose_sparse import RealReachPoseSparseEnvConfig
+from .reach_pose_sparse import SACRealReachPoseSparseConfig, RealReachPoseSparseEnvConfig
+from .grasp_cube import SACRealGraspCubeConfig, RealGraspCubeEnvConfig
