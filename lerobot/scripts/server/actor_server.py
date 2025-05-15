@@ -252,8 +252,6 @@ def act_with_policy(
 
         next_obs, reward, done, truncated, info = online_env.step(action)
 
-        del next_obs["observation.state"]
-
         sum_reward_episode += float(reward)
         # Increment total steps counter for intervention rate
         episode_total_steps += 1

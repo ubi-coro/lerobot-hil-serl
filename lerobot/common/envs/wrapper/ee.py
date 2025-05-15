@@ -80,24 +80,37 @@ class EEActionWrapper(gym.ActionWrapper):
 
 
 class EEObservationWrapper(gym.ObservationWrapper):
-    def __init__(self, env, ee_pose_limits):
+    def __init__(self, env, ee_pose_limits, keep_joints: bool = False, use_gripper: bool = False):
         super().__init__(env)
+        self.keep_joints = keep_joints
+        self.use_gripper = use_gripper
 
         # Extend observation space to include end effector pose
         prev_space = self.observation_space["observation.state"]
 
-        #self.observation_space["observation.state"] = gym.spaces.Box(
-        #    low=np.concatenate([prev_space.low, ee_pose_limits["min"]]),
-        #    high=np.concatenate([prev_space.high, ee_pose_limits["max"]]),
-        #    shape=(prev_space.shape[0] + 3,),
-        #    dtype=np.float32,
-        #)
-        self.observation_space["observation.state"] = gym.spaces.Box(
-            low=np.array(ee_pose_limits["min"]),
-            high=np.array(ee_pose_limits["max"]),
-            shape=(3,),
-            dtype=np.float32,
-        )
+        if keep_joints:
+            self.observation_space["observation.state"] = gym.spaces.Box(
+                low=np.concatenate([prev_space.low, ee_pose_limits["min"]]),
+                high=np.concatenate([prev_space.high, ee_pose_limits["max"]]),
+                shape=(prev_space.shape[0] + 3,),
+                dtype=np.float32,
+            )
+        else:
+            if use_gripper:
+                high = np.concatenate([ee_pose_limits["max"], [2.0]])
+                low = np.concatenate([ee_pose_limits["min"], [0.0]])
+                shape = (4,)
+            else:
+                high = ee_pose_limits["max"]
+                low = ee_pose_limits["min"]
+                shape = (3,)
+
+            self.observation_space["observation.state"] = gym.spaces.Box(
+                low=low,
+                high=high,
+                shape=shape,
+                dtype=np.float32,
+            )
 
         # Initialize kinematics instance for the appropriate robot type
         self.kinematics = get_kinematics(env.unwrapped.robot.config, robot_type="follower")
@@ -106,12 +119,19 @@ class EEObservationWrapper(gym.ObservationWrapper):
     def observation(self, observation):
         current_joint_pos = self.unwrapped.robot.follower_arms["main"].read("Present_Position")
         current_ee_pos = self.fk_function(current_joint_pos)
-        #observation["observation.state"] = torch.cat(
-        #    [
-        #        observation["observation.state"],
-        #        torch.from_numpy(current_ee_pos[:3, 3]),
-        #    ],
-        #    dim=-1,
-        #)
-        observation["observation.state"] = torch.from_numpy(current_ee_pos[:3, 3])
+
+        if self.keep_joints:
+            observation["observation.state"] = torch.cat(
+                [
+                    observation["observation.state"],
+                    torch.from_numpy(current_ee_pos[:3, 3]),
+                ],
+                dim=-1,
+            )
+        else:
+            state = current_ee_pos[:3, 3]
+            if self.use_gripper:
+                state = np.concatenate([state, observation["observation.state"][-1:]])
+            observation["observation.state"] = torch.from_numpy(state)
+
         return observation

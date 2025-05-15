@@ -1,11 +1,22 @@
 import logging
 import time
+from dataclasses import dataclass
 
 import numpy as np
 
-from lerobot.common.envs.configs import PushCubeRobotEnvConfig
+import lerobot.experiments
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.common.envs import EnvConfig
+from lerobot.common.envs.configs import HILSerlRobotEnvConfig
 from lerobot.common.robot_devices.control_utils import busy_wait
 from lerobot.common.utils.utils import log_say
+from lerobot.configs import parser
+
+
+@dataclass
+class RecordControlConfig:
+    mode: str = "record"
+    env: EnvConfig = HILSerlRobotEnvConfig()
 
 
 ###########################################################
@@ -28,10 +39,6 @@ def record_dataset(env, policy, cfg):
         task_description: Description of the task being recorded
         policy: Optional policy to generate actions (if None, uses teleop)
     """
-    from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
-
-    # Setup initial action (zero action if using teleop)
-
     # Configure dataset features based on environment spaces
     features = {
         "observation.state": {
@@ -103,9 +110,6 @@ def record_dataset(env, policy, cfg):
             if info.get("rerecord_episode", False):
                 break
 
-            #if not info["is_intervention"]:
-            #    continue
-
             if info["is_intervention"]:
                 # For teleop, get action from intervention
                 recorded_action = {
@@ -143,7 +147,6 @@ def record_dataset(env, policy, cfg):
         dataset.save_episode()
 
     # Finalize dataset
-    # dataset.consolidate(run_compute_stats=True)
     if cfg.push_to_hub:
         dataset.push_to_hub()
 
@@ -166,69 +169,34 @@ def replay_episode(env, cfg):
         busy_wait(1 / 10 - dt_s)
 
 
-def main():
-    from lerobot.experiments import RealGraspCubeEnvConfig
-
-    cfg = RealGraspCubeEnvConfig(
-        mode="record",
-        resume=False,
-        dataset_root=RealGraspCubeEnvConfig().dataset_root + "-eval"
-    )
-    env = cfg.make()
+@parser.wrap()
+def main(cfg: RecordControlConfig):
+    env = cfg.env.make()
 
     if cfg.mode == "record":
         policy = None
-        if cfg.pretrained_policy_name_or_path is not None:
+        if cfg.env.pretrained_policy_name_or_path is not None:
             from lerobot.common.policies.sac.modeling_sac import SACPolicy
 
-            policy = SACPolicy.from_pretrained(cfg.pretrained_policy_name_or_path)
-            policy.to(cfg.device)
+            policy = SACPolicy.from_pretrained(cfg.env.pretrained_policy_name_or_path)
+            policy.to(cfg.env.device)
             policy.eval()
 
         record_dataset(
             env,
             policy=policy,
-            cfg=cfg,
+            cfg=cfg.env,
         )
         exit()
 
     if cfg.mode == "replay":
         replay_episode(
             env,
-            cfg=cfg,
+            cfg=cfg.env,
         )
         exit()
 
     env.reset()
-
-    # Initialize the smoothed action as a random sample.
-    smoothed_action = env.action_space.sample()
-
-    # Smoothing coefficient (alpha) defines how much of the new random sample to mix in.
-    # A value close to 0 makes the trajectory very smooth (slow to change), while a value close to 1 is less smooth.
-    alpha = 1.0
-
-    num_episode = 0
-    successes = []
-    while num_episode < 20:
-        start_loop_s = time.perf_counter()
-        # Sample a new random action from the robot's action space.
-        new_random_action = env.action_space.sample()
-        # Update the smoothed action using an exponential moving average.
-        smoothed_action = alpha * new_random_action + (1 - alpha) * smoothed_action
-
-        # Execute the step: wrap the NumPy action in a torch tensor.
-        obs, reward, terminated, truncated, info = env.step(smoothed_action)
-        if terminated or truncated:
-            successes.append(reward)
-            env.reset()
-            num_episode += 1
-
-        dt_s = time.perf_counter() - start_loop_s
-        busy_wait(1 / cfg.fps - dt_s)
-
-    logging.info(f"Success after 20 steps {successes}")
-    logging.info(f"success rate {sum(successes) / len(successes)}")
 
 
 if __name__ == "__main__":

@@ -708,7 +708,7 @@ if __name__ == "__main__":
     from lerobot.common.envs.configs import EEActionSpaceConfig, EnvWrapperConfig, HILSerlRobotEnvConfig
     from lerobot.common.robot_devices.robots.configs import RobotConfig
     from lerobot.common.robot_devices.robots.utils import make_robot_from_config
-    from lerobot.scripts.server.gym_manipulator import make_robot_env
+    from lerobot.scripts.server.record_episodes import make_robot_env
 
     parser = argparse.ArgumentParser(description="Test end-effector control")
     parser.add_argument(

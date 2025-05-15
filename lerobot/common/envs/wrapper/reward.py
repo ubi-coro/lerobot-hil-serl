@@ -27,7 +27,6 @@ class SuccessRepeatWrapper(gym.Wrapper):
 
         if reward > 0.0:
             self.num_success += 1
-            print(self.num_success)
 
         terminated = (self.num_success + 1) >= self.num_repeats
         obs = self._append_success_cnt(obs)
@@ -83,7 +82,6 @@ class RewardClassifierWrapper(gym.Wrapper):
                 if self.reward_classifier is not None
                 else 0.0
             )
-            print(success)
         info["Reward classifier frequency"] = 1 / (time.perf_counter() - start_time)
 
         if success == 1.0:

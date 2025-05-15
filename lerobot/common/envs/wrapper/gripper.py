@@ -7,30 +7,29 @@ MAX_GRIPPER_COMMAND = 80
 
 
 class GripperPenaltyWrapper(gym.RewardWrapper):
-    def __init__(self, env, penalty: float = -0.1):
+    def __init__(self, env, penalty: float = -0.05):
         super().__init__(env)
         self.penalty = penalty
         self.last_gripper_state = None
 
-    def reward(self, reward, action):
+    def reward(self, reward, action, info):
         gripper_state_normalized = self.last_gripper_state / MAX_GRIPPER_COMMAND
+        action_normalized = action - 1.0
 
-        action_normalized = action - 1.0  # action / MAX_GRIPPER_COMMAND
-
-        gripper_penalty_bool = (gripper_state_normalized < 0.5 and action_normalized > 0.5) or (
-            gripper_state_normalized > 0.75 and action_normalized < -0.5
+        gripper_penalty_bool = (
+            (gripper_state_normalized < 0.5 and action_normalized > 0.5) or
+            (gripper_state_normalized > 0.75 and action_normalized < -0.5)
         )
 
-        return reward + self.penalty * int(gripper_penalty_bool)
+        gripper_penalty = self.penalty * int(gripper_penalty_bool)
+        info["gripper_penalty"] = gripper_penalty
+        return reward + gripper_penalty, info
 
     def step(self, action):
         self.last_gripper_state = self.unwrapped.robot.follower_arms["main"].read("Present_Position")[-1]
         gripper_action = action[-1]
         obs, reward, terminated, truncated, info = self.env.step(action)
-        gripper_penalty = self.reward(reward, gripper_action)
-
-        info["discrete_penalty"] = gripper_penalty
-
+        reward, info = self.reward(reward, gripper_action, info)
         return obs, reward, terminated, truncated, info
 
     def reset(self, **kwargs):

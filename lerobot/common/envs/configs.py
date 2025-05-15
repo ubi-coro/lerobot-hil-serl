@@ -251,24 +251,29 @@ class EEActionSpaceConfig:
 @dataclass
 class EnvWrapperConfig:
     """Configuration for environment wrappers."""
-
-    ee_action_space_params: EEActionSpaceConfig = field(default_factory=EEActionSpaceConfig)
-    foot_switches: dict[str, dict] | None = None
-
     display_cameras: bool = False
+    foot_switches: dict[str, dict] | None = None
+    control_time_s: float = 20.0
+    ee_action_space_params: EEActionSpaceConfig = field(default_factory=EEActionSpaceConfig)
+    num_success_repeats: int = 0
+
+    fixed_reset_joint_positions: Optional[Any] = None
+    reset_time_s: float = 5.0
+
     add_joint_velocity_to_observation: bool = False
     add_current_to_observation: bool = False
     add_ee_pose_to_observation: bool = False
+    keep_joints_in_observation: bool = False
+
     crop_params_dict: Optional[Dict[str, Tuple[int, int, int, int]]] = None
     resize_size: Optional[Tuple[int, int]] = None
-    control_time_s: float = 20.0
-    fixed_reset_joint_positions: Optional[Any] = None
-    reset_time_s: float = 5.0
+
     use_gripper: bool = False
     gripper_quantization_threshold: float | None = 0.8
-    gripper_penalty: float = 0.0
-    gripper_penalty_in_reward: bool = False
+    gripper_penalty: Optional[float] = -0.05
+
     smoothing_range_factor: Optional[float] = None
+    smoothing_penalty: float = -0.03
 
 
 @EnvConfig.register_subclass(name="gym_manipulator")
@@ -291,37 +296,30 @@ class HILSerlRobotEnvConfig(EnvConfig):
     push_to_hub: bool = True
     pretrained_policy_name_or_path: Optional[str] = None
     reward_classifier_pretrained_path: Optional[str] = None
-    num_success_repeats: int = 0
 
     def gym_kwargs(self) -> dict:
         return {}
 
     def make(self, **kwargs) -> gym.vector.VectorEnv:
         """
-        Factory function to create a vectorized robot environment.
-
-        cfg.
-            robot: Robot instance to control
-            reward_classifier: Classifier model for computing rewards
-            cfg: Configuration object containing environment parameters
-
-        Returns:
-            A vectorized gym environment with all the necessary wrappers applied.
+        Factory function to create a robot environment.
         """
-        robot = make_robot_from_config(self.robot)
-        # Create base environment
         env = RobotEnv(
-            robot=robot,
+            robot=make_robot_from_config(self.robot),
             display_cameras=self.wrapper.display_cameras,
         )
 
-        # Add observation and image processing
         if self.wrapper.add_joint_velocity_to_observation:
             env = AddJointVelocityToObservation(env=env, fps=self.fps)
         if self.wrapper.add_current_to_observation:
             env = AddCurrentToObservation(env=env)
         if self.wrapper.add_ee_pose_to_observation:
-            env = EEObservationWrapper(env=env, ee_pose_limits=self.wrapper.ee_action_space_params.bounds)
+            env = EEObservationWrapper(
+                env=env,
+                ee_pose_limits=self.wrapper.ee_action_space_params.bounds,
+                keep_joints=self.wrapper.keep_joints_in_observation,
+                use_gripper=self.wrapper.use_gripper
+            )
 
         env = ConvertToLeRobotObservation(env=env, device=self.device)
 
@@ -332,12 +330,12 @@ class HILSerlRobotEnvConfig(EnvConfig):
                 resize_size=self.wrapper.resize_size,
             )
 
-        # Add reward computation and control wrappers
         reward_classifier = self.init_reward_classifier()
         if reward_classifier is not None:
             env = RewardClassifierWrapper(env=env, reward_classifier=reward_classifier, device=self.device)
 
         env = TimeLimitWrapper(env=env, control_time_s=self.wrapper.control_time_s, fps=self.fps)
+
         if self.wrapper.use_gripper:
             env = GripperActionWrapper(env=env, quantization_threshold=self.wrapper.gripper_quantization_threshold)
             if self.wrapper.gripper_penalty is not None:
@@ -356,6 +354,7 @@ class HILSerlRobotEnvConfig(EnvConfig):
             env = SmoothActionWrapper(
                 env=env,
                 smoothing_range_factor=self.wrapper.smoothing_range_factor,
+                smoothing_penalty=self.wrapper.smoothing_penalty,
                 use_gripper=self.wrapper.use_gripper,
                 device=self.device
             )
@@ -384,8 +383,8 @@ class HILSerlRobotEnvConfig(EnvConfig):
         else:
             raise ValueError(f"Invalid control mode: {self.wrapper.ee_action_space_params.control_mode}")
 
-        if self.num_success_repeats > 0:
-            env = SuccessRepeatWrapper(env=env, num_repeats=self.num_success_repeats)
+        if self.wrapper.num_success_repeats > 0:
+            env = SuccessRepeatWrapper(env=env, num_repeats=self.wrapper.num_success_repeats)
 
         env = ResetWrapper(
             env=env,
