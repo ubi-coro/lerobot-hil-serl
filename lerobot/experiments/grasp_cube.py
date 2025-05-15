@@ -21,7 +21,7 @@ class RealGraspCubeEnvConfig(HILSerlRobotEnvConfig):
     repo_id: str = "jannick-st/grasp-cube-offline-demos"
     dataset_root: str = "/media/nvme1/jstranghoener/lerobot/data/jannick-st/grasp-cube/offline-demos"
     task: str = "Grasp the cube"
-    num_episodes: int = 20  # only for record mode
+    num_episodes: int = 30  # only for record mode
     episode: int = 0
     device: str = "cuda"
     push_to_hub: bool = False
@@ -93,7 +93,7 @@ class RealGraspCubeEnvConfig(HILSerlRobotEnvConfig):
     features: dict[str, PolicyFeature] = field(
         default_factory=lambda: {
             "action": PolicyFeature(type=FeatureType.ACTION, shape=(4,)),
-            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(7,)),
+            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(8,)),
             "observation.images.cam_low": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 64, 64)),
             "observation.images.cam_left_wrist": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 64, 64))
         }
@@ -136,8 +136,8 @@ class SACRealGraspCubeConfig(SACConfig):
     dataset_stats: dict[str, dict[str, list[float]]] | None = field(
         default_factory=lambda: {
             "observation.state": {
-                "min": [0.36, 0.12, 0.10, -0.02, -0.02, -0.02, 0.0],
-                "max": [0.25, -0.12, 0.07, 0.02, 0.02, 0.02, 4.0]
+                "min": [0.36, 0.12, 0.10, 100.0, -0.02, -0.02, -0.02, 0.0],
+                "max": [0.25, -0.12, 0.07, 0.0, 0.02, 0.02, 0.02, 4.0]
             },
             "action": {
                 "min": [-0.02, -0.02, -0.02, 0.0],
