@@ -22,9 +22,30 @@ import gymnasium as gym
 import numpy as np
 
 from lerobot.common.constants import ACTION, OBS_ENV, OBS_IMAGE, OBS_IMAGES, OBS_ROBOT
+from lerobot.common.envs.robot_env import RobotEnv
+from lerobot.common.envs.wrapper.ee import EEObservationWrapper, EEActionWrapper
+from lerobot.common.envs.wrapper.gripper import GripperPenaltyWrapper, GripperActionWrapper
+from lerobot.common.envs.wrapper.hilserl import (
+    AddJointVelocityToObservation,
+    AddCurrentToObservation,
+    ResetWrapper,
+    BatchCompatibleWrapper,
+    TorchActionWrapper,
+    TimeLimitWrapper,
+    ImageCropResizeWrapper,
+    ConvertToLeRobotObservation
+)
+from lerobot.common.envs.wrapper.leader import (
+    GearedLeaderAutomaticControlWrapper,
+    GearedLeaderControlWrapper,
+    GamepadControlWrapper
+)
+from lerobot.common.envs.wrapper.reward import SuccessRepeatWrapper, RewardClassifierWrapper
+from lerobot.common.envs.wrapper.smoothing import SmoothActionWrapper
 from lerobot.common.robot_devices.robots.configs import RobotConfig, AlohaRobotConfig
+from lerobot.common.robot_devices.robots.utils import make_robot_from_config
 from lerobot.configs.types import FeatureType, PolicyFeature
-from lerobot.common.envs.wrapper.reward import SuccessRepeatWrapper
+
 
 
 @dataclass
@@ -232,6 +253,8 @@ class EnvWrapperConfig:
     """Configuration for environment wrappers."""
 
     ee_action_space_params: EEActionSpaceConfig = field(default_factory=EEActionSpaceConfig)
+    foot_switches: dict[str, dict] | None = None
+
     display_cameras: bool = False
     add_joint_velocity_to_observation: bool = False
     add_current_to_observation: bool = False
@@ -285,11 +308,6 @@ class HILSerlRobotEnvConfig(EnvConfig):
         Returns:
             A vectorized gym environment with all the necessary wrappers applied.
         """
-        import lerobot.common.envs.wrapper.hilserl as wrapper
-        from lerobot.common.envs.robot_env import RobotEnv
-        from lerobot.common.envs.wrapper.smoothing import SmoothActionWrapper
-        from lerobot.common.robot_devices.robots.utils import make_robot_from_config
-
         robot = make_robot_from_config(self.robot)
         # Create base environment
         env = RobotEnv(
@@ -299,16 +317,16 @@ class HILSerlRobotEnvConfig(EnvConfig):
 
         # Add observation and image processing
         if self.wrapper.add_joint_velocity_to_observation:
-            env = wrapper.AddJointVelocityToObservation(env=env, fps=self.fps)
+            env = AddJointVelocityToObservation(env=env, fps=self.fps)
         if self.wrapper.add_current_to_observation:
-            env = wrapper.AddCurrentToObservation(env=env)
+            env = AddCurrentToObservation(env=env)
         if self.wrapper.add_ee_pose_to_observation:
-            env = wrapper.EEObservationWrapper(env=env, ee_pose_limits=self.wrapper.ee_action_space_params.bounds)
+            env = EEObservationWrapper(env=env, ee_pose_limits=self.wrapper.ee_action_space_params.bounds)
 
-        env = wrapper.ConvertToLeRobotObservation(env=env, device=self.device)
+        env = ConvertToLeRobotObservation(env=env, device=self.device)
 
         if self.wrapper.crop_params_dict is not None:
-            env = wrapper.ImageCropResizeWrapper(
+            env = ImageCropResizeWrapper(
                 env=env,
                 crop_params_dict=self.wrapper.crop_params_dict,
                 resize_size=self.wrapper.resize_size,
@@ -317,21 +335,18 @@ class HILSerlRobotEnvConfig(EnvConfig):
         # Add reward computation and control wrappers
         reward_classifier = self.init_reward_classifier()
         if reward_classifier is not None:
-            env = wrapper.RewardWrapper(env=env, reward_classifier=reward_classifier, device=self.device)
+            env = RewardClassifierWrapper(env=env, reward_classifier=reward_classifier, device=self.device)
 
-        if self.num_success_repeats > 0:
-            env = SuccessRepeatWrapper(env=env, num_repeats=self.num_success_repeats)
-
-        env = wrapper.TimeLimitWrapper(env=env, control_time_s=self.wrapper.control_time_s, fps=self.fps)
+        env = TimeLimitWrapper(env=env, control_time_s=self.wrapper.control_time_s, fps=self.fps)
         if self.wrapper.use_gripper:
-            env = wrapper.GripperActionWrapper(env=env, quantization_threshold=self.wrapper.gripper_quantization_threshold)
+            env = GripperActionWrapper(env=env, quantization_threshold=self.wrapper.gripper_quantization_threshold)
             if self.wrapper.gripper_penalty is not None:
-                env = wrapper.GripperPenaltyWrapper(
+                env = GripperPenaltyWrapper(
                     env=env,
                     penalty=self.wrapper.gripper_penalty,
                 )
 
-        env = wrapper.EEActionWrapper(
+        env = EEActionWrapper(
             env=env,
             ee_action_space_params=self.wrapper.ee_action_space_params,
             use_gripper=self.wrapper.use_gripper,
@@ -346,7 +361,7 @@ class HILSerlRobotEnvConfig(EnvConfig):
             )
 
         if self.wrapper.ee_action_space_params.control_mode == "gamepad":
-            env = wrapper.GamepadControlWrapper(
+            env = GamepadControlWrapper(
                 env=env,
                 x_step_size=self.wrapper.ee_action_space_params.x_step_size,
                 y_step_size=self.wrapper.ee_action_space_params.y_step_size,
@@ -354,13 +369,14 @@ class HILSerlRobotEnvConfig(EnvConfig):
                 use_gripper=self.wrapper.use_gripper,
             )
         elif self.wrapper.ee_action_space_params.control_mode == "leader":
-            env = wrapper.GearedLeaderControlWrapper(
+            env = GearedLeaderControlWrapper(
                 env=env,
                 ee_action_space_params=self.wrapper.ee_action_space_params,
                 use_gripper=self.wrapper.use_gripper,
+                foot_switches=self.wrapper.foot_switches
             )
         elif self.wrapper.ee_action_space_params.control_mode == "leader_automatic":
-            env = wrapper.GearedLeaderAutomaticControlWrapper(
+            env = GearedLeaderAutomaticControlWrapper(
                 env=env,
                 ee_action_space_params=self.wrapper.ee_action_space_params,
                 use_gripper=self.wrapper.use_gripper,
@@ -368,13 +384,16 @@ class HILSerlRobotEnvConfig(EnvConfig):
         else:
             raise ValueError(f"Invalid control mode: {self.wrapper.ee_action_space_params.control_mode}")
 
-        env = wrapper.ResetWrapper(
+        if self.num_success_repeats > 0:
+            env = SuccessRepeatWrapper(env=env, num_repeats=self.num_success_repeats)
+
+        env = ResetWrapper(
             env=env,
             reset_pose=self.wrapper.fixed_reset_joint_positions,
             reset_time_s=self.wrapper.reset_time_s,
         )
-        env = wrapper.BatchCompatibleWrapper(env=env)
-        env = wrapper.TorchActionWrapper(env=env, device=self.device)
+        env = BatchCompatibleWrapper(env=env)
+        env = TorchActionWrapper(env=env, device=self.device)
 
         return env
 

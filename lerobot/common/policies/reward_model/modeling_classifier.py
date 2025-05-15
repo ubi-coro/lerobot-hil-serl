@@ -201,7 +201,6 @@ class Classifier(PreTrainedPolicy):
         images = [batch[key] for key in self.config.input_features if key.startswith(OBS_IMAGE)]
         if self.config.num_classes == 2:
             probs = self.predict(images).probabilities
-            print(probs)
             logging.debug(f"Predicted reward images: {probs}")
             return (probs > threshold).float()
         else:

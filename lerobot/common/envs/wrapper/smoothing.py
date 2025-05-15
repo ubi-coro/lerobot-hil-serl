@@ -30,12 +30,21 @@ class SmoothActionWrapper(gym.Wrapper):
         self.min_delta = smoothing_range_factor * action_space.low
         self.prev_action = np.zeros(self.action_dim, dtype=np.float32)
 
+        if self.use_gripper:
+            new_low = action_space.low[:-1]
+            new_high = action_space.high[:-1]
+            new_shape = action_space.shape[0] - 1
+        else:
+            new_low = action_space.low
+            new_high = action_space.high
+            new_shape = action_space.shape[0]
+
         # extend observation space to include end effector pose
         prev_obs_space = self.observation_space["observation.state"]
         self.observation_space["observation.state"] = gym.spaces.Box(
-            low=np.concatenate([prev_obs_space.low, action_space.low]),
-            high=np.concatenate([prev_obs_space.high, action_space.high]),
-            shape=(prev_obs_space.shape[0] + action_space.shape[0],),
+            low=np.concatenate([prev_obs_space.low, new_low]),
+            high=np.concatenate([prev_obs_space.high, new_high]),
+            shape=(prev_obs_space.shape[0] + new_shape,),
             dtype=np.float32,
         )
 
@@ -54,6 +63,7 @@ class SmoothActionWrapper(gym.Wrapper):
 
         smoothed_action = self.prev_action + delta_action
 
+        # Gripper actions are not smoothed
         if self.use_gripper:
             smoothed_action[-1] = action[-1]
 
@@ -71,6 +81,11 @@ class SmoothActionWrapper(gym.Wrapper):
             state_tensor = obs["observation.state"]
             if not torch.is_tensor(state_tensor):
                 state_tensor = torch.tensor(state_tensor, dtype=torch.float32)
-            prev_tensor = torch.tensor(self.prev_action, dtype=torch.float32).to(self.device)
+
+            # Only append non-gripper actions
+            if self.use_gripper:
+                prev_tensor = torch.tensor(self.prev_action[:-1], dtype=torch.float32).to(self.device)
+            else:
+                prev_tensor = torch.tensor(self.prev_action, dtype=torch.float32).to(self.device)
             obs["observation.state"] = torch.cat([state_tensor, prev_tensor], dim=-1)
         return obs

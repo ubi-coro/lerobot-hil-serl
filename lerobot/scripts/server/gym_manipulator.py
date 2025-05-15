@@ -91,7 +91,10 @@ def record_dataset(env, policy, cfg):
             if cfg.pretrained_policy_name_or_path is not None:
                 action = policy.select_action(obs)
             else:
-                action = env.action_space.sample() #* 0.0
+                action = env.action_space.sample() * 0.0
+
+                if hasattr(cfg, "wrapper") and cfg.wrapper.use_gripper:
+                    action[-1] = 1.0  # neutral gripper action
 
             # Step environment
             obs, reward, terminated, truncated, info = env.step(action)
@@ -169,6 +172,7 @@ def main():
     cfg = RealGraspCubeEnvConfig(
         mode="record",
         resume=False,
+        dataset_root=RealGraspCubeEnvConfig().dataset_root + "-eval"
     )
     env = cfg.make()
 

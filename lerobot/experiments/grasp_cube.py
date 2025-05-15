@@ -28,12 +28,12 @@ class RealGraspCubeEnvConfig(HILSerlRobotEnvConfig):
     fps: int = 10
 
     pretrained_policy_name_or_path: Optional[str] = None
-    reward_classifier_pretrained_path: Optional[str] = None
-    num_success_repeats = 3
+    reward_classifier_pretrained_path: Optional[str] = "/media/nvme1/jstranghoener/lerobot/models/jannick-st/grasp-cube/classifier-150525/checkpoints/005940/pretrained_model/"
+    num_success_repeats: int = 4
 
     wrapper: EnvWrapperConfig = EnvWrapperConfig(
         display_cameras=True,
-        control_time_s=10000.0,
+        control_time_s=7000.0,
         add_ee_pose_to_observation=True,
         use_gripper=True,
         fixed_reset_joint_positions=[0.52734375, -8.349609, -8.0859375, 68.203125, 68.55469, -1.5820312, -27.773438, -2.9003906, 90.0],
@@ -48,18 +48,35 @@ class RealGraspCubeEnvConfig(HILSerlRobotEnvConfig):
             },
             control_mode="leader"
         ),
-        crop_params_dict={},
-        resize_size=(128, 128)
+        crop_params_dict={
+            "observation.images.cam_left_wrist": (
+                2,
+                133,
+                384,
+                446
+            ),
+            "observation.images.cam_low": (
+                185,
+                306,
+                293,
+                331
+            )
+        },
+        resize_size=(64, 64),
+        foot_switches={
+            "episode_success": {"device": 18, "toggle": False},
+            "human_intervention_step": {"device": 21, "toggle": True}
+        }
     )
 
     robot: RobotConfig = field(default_factory=lambda: AlohaRobotConfig(
             cameras={
-                "cam_top": OpenCVCameraConfig(
-                    camera_index="/dev/CAM_HIGH",
-                    fps=30,
-                    width=640,
-                    height=480,
-                ),
+                #"cam_top": OpenCVCameraConfig(
+                #    camera_index="/dev/CAM_HIGH",
+                #    fps=30,
+                #    width=640,
+                #    height=480,
+                #),
                 "cam_low": OpenCVCameraConfig(
                     camera_index="/dev/CAM_LOW",
                     fps=30,
@@ -81,9 +98,9 @@ class RealGraspCubeEnvConfig(HILSerlRobotEnvConfig):
     features: dict[str, PolicyFeature] = field(
         default_factory=lambda: {
             "action": PolicyFeature(type=FeatureType.ACTION, shape=(4,)),
-            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(15,)),
+            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(7,)),
             "observation.images.cam_low": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
-            "observation.images.cam_top": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
+            #"observation.images.cam_top": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
             "observation.images.cam_left_wrist": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128))
         }
     )
@@ -93,15 +110,15 @@ class RealGraspCubeEnvConfig(HILSerlRobotEnvConfig):
             "action": ACTION,
             "observation.state": OBS_ROBOT,
             "observation.images.cam_low": f"{OBS_IMAGE}s.cam_low",
-            "observation.images.cam_top": f"{OBS_IMAGE}s.cam_top",
+            #"observation.images.cam_top": f"{OBS_IMAGE}s.cam_top",
             "observation.images.cam_left_wrist": f"{OBS_IMAGE}s.cam_left_wrist"
         }
     )
 
-    def __post_init__(self):
-        if self.mode == "record":
-            self.wrapper.crop_params_dict = dict()
-            self.wrapper.resize_size = None
+    #def __post_init__(self):
+    #    if self.mode == "record":
+    #        self.wrapper.crop_params_dict = dict()
+    #        self.wrapper.resize_size = None
 
 
 
@@ -116,7 +133,7 @@ class SACRealGraspCubeConfig(SACConfig):
     # if possible, use "cuda" as the storage device
 
     online_step_before_learning: int = 50
-    camera_number: int = 3  # also affects fps linearly, resolution affects quadratically
+    camera_number: int = 2  # also affects fps linearly, resolution affects quadratically
     utd_ratio: int = 2  # affects fps linearly
     storage_device: str = "cuda"  # destabilizes fps, sometimes cuts 10 fps
     shared_encoder: bool = True  # does not affect fps much
@@ -132,7 +149,7 @@ class SACRealGraspCubeConfig(SACConfig):
         default_factory=lambda: {
             "observation.state": {
                 "min": [0.36, 0.12, 0.10, -0.02, -0.02, -0.02, 0.0],
-                "max": [0.25, -0.12, 0.07, 0.02, 0.02, 0.02, 2.0]
+                "max": [0.25, -0.12, 0.07, 0.02, 0.02, 0.02, 4.0]
             },
             "action": {
                 "min": [-0.02, -0.02, -0.02, 0.0],
@@ -142,10 +159,10 @@ class SACRealGraspCubeConfig(SACConfig):
                 "mean": [0.485, 0.456, 0.406],
                 "std": [0.229, 0.224, 0.225],
             },
-            "observation.images.cam_top": {
-                "mean": [0.485, 0.456, 0.406],
-                "std": [0.229, 0.224, 0.225],
-            },
+            #"observation.images.cam_top": {
+            #    "mean": [0.485, 0.456, 0.406],
+            #    "std": [0.229, 0.224, 0.225],
+            #},
             "observation.images.cam_left_wrist": {
                 "mean": [0.485, 0.456, 0.406],
                 "std": [0.229, 0.224, 0.225],

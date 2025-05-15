@@ -18,11 +18,14 @@ from contextlib import nullcontext
 from pprint import pformat
 from typing import Any
 
+import numpy as np
 import torch
+import wandb
 from termcolor import colored
 from torch.amp import GradScaler
+from torch.autograd import profiler
 from torch.optim import Optimizer
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, RandomSampler
 from tqdm import tqdm
 
 from lerobot.common.datasets.factory import make_dataset
@@ -67,9 +70,7 @@ def train_epoch(model, train_loader, optimizer, grad_scaler, device, logger, ste
         start_time = time.perf_counter()
         new_batch = {img_key: batch[img_key].to(device) for img_key in model.image_keys}
         new_batch = {img_key: random_shift(new_batch[img_key], 4) for img_key in new_batch}
-
-        labels = batch["next.reward"].float().to(device)
-        new_batch["next.reward"] = labels
+        new_batch["next.reward"] = batch["next.reward"].float().to(device)
 
         # Forward pass with optional AMP
         with torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext():
@@ -91,7 +92,8 @@ def train_epoch(model, train_loader, optimizer, grad_scaler, device, logger, ste
             "dataloading_s": time.perf_counter() - start_time,
         }
 
-        logger.log_dict(train_info, step + batch_idx, mode="train")
+        if logger is not None:
+            logger.log_dict(train_info, step + batch_idx, mode="train")
         pbar.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{output_dict['accuracy']:.2f}%"})
 
 
@@ -110,12 +112,13 @@ def validate(model, val_loader, device, logger, cfg):
         torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext(),
     ):
         for batch in tqdm(val_loader, desc="Validation"):
-            images = [batch[img_key].to(device) for img_key in cfg.policy.image_keys]
+            new_batch = {img_key: batch[img_key].to(device) for img_key in model.image_keys}
             labels = batch["next.reward"].float().to(device)
+            new_batch["next.reward"] = labels
 
-            loss, output_dict = model.forward(images)
+            loss, output_dict = model.forward(new_batch)
 
-            correct += output_dict["accuracy"] * labels.size(0)
+            correct += output_dict["accuracy"] / 100.0 * labels.size(0)
             total += labels.size(0)
             running_loss += loss.item()
 
@@ -131,7 +134,7 @@ def validate(model, val_loader, device, logger, cfg):
             data=[list(s.values()) for s in samples],
             columns=list(samples[0].keys()),
         )
-        if logger._cfg.wandb.enable
+        if logger is not None
         else None,
     }
 
@@ -167,7 +170,7 @@ def benchmark_inference_time(model, dataset, logger, cfg, device, step):
     with torch.no_grad():
         for _ in tqdm(range(iters), desc="Benchmarking inference time"):
             x = next(iter(loader))
-            x = [x[img_key].to(device) for img_key in cfg.training.image_keys]
+            x = [x[img_key].to(device) for img_key in model.image_keys]
 
             # Warm up
             for _ in range(10):
@@ -261,9 +264,6 @@ def train(cfg: TrainPipelineConfig):
     step = 0
     best_val_acc = 0
 
-    if cfg.resume:
-        step, optimizer, lr_scheduler = load_training_state(cfg.checkpoint_path, optimizer, lr_scheduler)
-
     logging.info("Creating policy")
     model = make_policy(
         cfg=cfg.policy,
@@ -279,9 +279,6 @@ def train(cfg: TrainPipelineConfig):
     num_total_params = sum(p.numel() for p in model.parameters())
     logging.info(f"Learnable parameters: {format_big_number(num_learnable_params)}")
     logging.info(f"Total parameters: {format_big_number(num_total_params)}")
-
-    if cfg.resume:
-        step = logger.load_last_training_state(optimizer, None)
 
     # Training loop with validation and checkpointing
     for epoch in range(cfg.steps):
@@ -307,12 +304,14 @@ def train(cfg: TrainPipelineConfig):
                 wandb_logger,
                 cfg,
             )
-            wandb_logger.log_dict(eval_info, step + len(train_loader), mode="eval")
+
+            if wandb_logger is not None:
+                wandb_logger.log_dict(eval_info, step + len(train_loader), mode="eval")
 
             # Save best model
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                checkpoint_dir = get_best_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+                checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
                 save_checkpoint(checkpoint_dir, step, cfg, model, optimizer, None)
 
         # Periodic checkpointing
@@ -322,7 +321,7 @@ def train(cfg: TrainPipelineConfig):
 
         step += len(train_loader)
 
-    benchmark_inference_time(model, dataset, wandb_logger, cfg, device, step)
+    #benchmark_inference_time(model, dataset, wandb_logger, cfg, device, step)
 
     logging.info("Training completed")
 

@@ -274,7 +274,7 @@ if __name__ == "__main__":
         crop_params_dict=rois,
         new_repo_id=new_repo_id,
         new_dataset_root=new_dataset_root,
-        resize_size=(128, 128),
+        resize_size=(64, 64),
         push_to_hub=args.push_to_hub,
     )
 

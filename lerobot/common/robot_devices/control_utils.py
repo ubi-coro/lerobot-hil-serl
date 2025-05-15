@@ -18,12 +18,14 @@
 
 
 import logging
+import threading
 import time
 import traceback
 from contextlib import nullcontext
 from copy import copy
 from functools import cache
 
+import evdev
 import numpy as np
 import rerun as rr
 import torch
@@ -370,3 +372,44 @@ def sanity_check_dataset_robot_compatibility(
         raise ValueError(
             "Dataset metadata compatibility check failed with mismatches:\n" + "\n".join(mismatches)
         )
+
+
+class FootSwitchHandler:
+    def __init__(self, device_path="/dev/input/event18", event_name="episode_success", toggle: bool = False):
+        self.device = evdev.InputDevice(device_path)
+        self.keyboard_events = {event_name: False}
+        self.toggle = toggle
+        self.event_name = event_name
+        self.running = True
+
+    def start(self):
+        thread = threading.Thread(target=self._run, daemon=True)
+        thread.start()
+
+    def _run(self):
+        logging.info(f"Listening for foot switch events from {self.device.name} ({self.device.path})...")
+        for event in self.device.read_loop():
+            if not self.running:
+                break
+            if event.type == evdev.ecodes.EV_KEY:
+                key_event = evdev.categorize(event)
+                if key_event.keystate == 1:  # Key down
+                    if self.toggle:
+                        if self.keyboard_events[self.event_name]:
+                            logging.info(f"Foot switch pressed again - {self.event_name} OFF")
+                            self.keyboard_events[self.event_name] = False
+                        else:
+                            logging.info(f"Foot switch pressed - {self.event_name} ON")
+                            self.keyboard_events[self.event_name] = True
+                    else:
+                        logging.info(f"Foot switch pressed - {self.event_name} ON")
+                        self.keyboard_events[self.event_name]  = True
+                elif key_event.keystate == 0 and not self.toggle:  # Key release
+                    logging.info(f"Foot switch pressed - {self.event_name} OFF")
+                    self.keyboard_events[self.event_name] = False
+
+    def stop(self):
+        self.running = False
+
+    def reset(self):
+        self.keyboard_events = {self.event_name: False}

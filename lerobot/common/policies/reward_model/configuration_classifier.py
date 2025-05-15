@@ -19,7 +19,7 @@ class RewardClassifierConfig(PreTrainedConfig):
     model_name: str = "helper2424/resnet10"
     device: str = "cpu"
     model_type: str = "cnn"  # "transformer" or "cnn"
-    num_cameras: int = 3
+    num_cameras: int = 2
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     grad_clip_norm: float = 10

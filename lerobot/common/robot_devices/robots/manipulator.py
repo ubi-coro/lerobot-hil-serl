@@ -295,8 +295,10 @@ class ManipulatorRobot:
 
         # Disable torque on all leaders, enable torque on all follower arms
         for name in self.leader_arms:
-            print(f"Deactivating torque on {name} leader arm.")
-            self.leader_arms[name].write("Torque_Enable", TorqueMode.DISABLED.value)
+            #print(f"Deactivating torque on {name} leader arm.")
+            #self.leader_arms[name].write("Torque_Enable", TorqueMode.DISABLED.value)
+            print(f"Activating torque on {name} leader arm.")
+            self.leader_arms[name].write("Torque_Enable", 1)
         for name in self.follower_arms:
             print(f"Activating torque on {name} follower arm.")
             self.follower_arms[name].write("Torque_Enable", 1)

@@ -1,3 +1,5 @@
+import time
+
 import gymnasium as gym
 import numpy as np
 import torch
@@ -25,6 +27,7 @@ class SuccessRepeatWrapper(gym.Wrapper):
 
         if reward > 0.0:
             self.num_success += 1
+            print(self.num_success)
 
         terminated = (self.num_success + 1) >= self.num_repeats
         obs = self._append_success_cnt(obs)
@@ -45,3 +48,49 @@ class SuccessRepeatWrapper(gym.Wrapper):
             torch.tensor([self.num_success]).to(obs["observation.state"].device)
         ))
         return obs
+
+
+class RewardClassifierWrapper(gym.Wrapper):
+    def __init__(self, env, reward_classifier, device: torch.device = "cuda"):
+        """
+        Wrapper to add reward prediction to the environment, it use a trained classifier.
+
+        cfg.
+            env: The environment to wrap
+            reward_classifier: The reward classifier model
+            device: The device to run the model on
+        """
+        super().__init__(env)
+
+        if isinstance(device, str):
+            device = torch.device(device)
+        self.device = device
+
+        self.reward_classifier = torch.compile(reward_classifier)
+        self.reward_classifier.to(self.device)
+
+    def step(self, action):
+        observation, reward, terminated, truncated, info = self.env.step(action)
+        images = {
+            key: observation[key].to(self.device, non_blocking=self.device.type == "cuda").unsqueeze(0)
+            for key in observation
+            if "image" in key
+        }
+        start_time = time.perf_counter()
+        with torch.inference_mode():
+            success = (
+                self.reward_classifier.predict_reward(images, threshold=0.8)
+                if self.reward_classifier is not None
+                else 0.0
+            )
+            print(success)
+        info["Reward classifier frequency"] = 1 / (time.perf_counter() - start_time)
+
+        if success == 1.0:
+            terminated = True
+            reward = 1.0
+
+        return observation, reward, terminated, truncated, info
+
+    def reset(self, seed=None, options=None):
+        return self.env.reset(seed=seed, options=options)
