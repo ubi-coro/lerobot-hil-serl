@@ -22,6 +22,9 @@ def find_joint_bounds(
     if not robot.is_connected:
         robot.connect()
 
+    for name in robot.leader_arms:
+        robot.leader_arms[name].write("Torque_Enable", 0)
+
     start_episode_t = time.perf_counter()
     pos_list = []
     while True:
@@ -54,6 +57,9 @@ def find_ee_bounds(
 ):
     if not robot.is_connected:
         robot.connect()
+
+    for name in robot.leader_arms:
+        robot.leader_arms[name].write("Torque_Enable", 0)
 
     start_episode_t = time.perf_counter()
     pos_list = []

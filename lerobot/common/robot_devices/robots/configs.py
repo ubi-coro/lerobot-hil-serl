@@ -150,21 +150,6 @@ class AlohaRobotConfig(ManipulatorRobotConfig):
                     "gripper": [9, "xm430-w350"],
                 },
             ),
-            "main": DynamixelMotorsBusConfig(
-                port="/dev/ttyDXL_follower_left",
-                motors={
-                    # name: (index, model)
-                    "waist": [1, "xm540-w270"],
-                    "shoulder": [2, "xm540-w270"],
-                    "shoulder_shadow": [3, "xm540-w270"],
-                    "elbow": [4, "xm540-w270"],
-                    "elbow_shadow": [5, "xm540-w270"],
-                    "forearm_roll": [6, "xm540-w270"],
-                    "wrist_angle": [7, "xm540-w270"],
-                    "wrist_rotate": [8, "xm430-w350"],
-                    "gripper": [9, "xm430-w350"],
-                },
-            ),
         }
     )
 
