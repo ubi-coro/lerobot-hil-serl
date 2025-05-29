@@ -26,11 +26,18 @@ import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor
 from torch.distributions import MultivariateNormal, TanhTransform, Transform, TransformedDistribution
-from triton.language import tensor
 
+from lerobot.common.policies.act.modeling_act import (
+    ACTConfig,
+    ACTEncoder,
+    ACTDecoder,
+    ACTDecoderLayer,
+    ACTSinusoidalPositionEmbedding2d as SinusoidalPositionEmbedding2d,
+    ACTTemporalEnsembler as TemporalEnsembler
+)
 from lerobot.common.policies.normalize import Normalize, Unnormalize
 from lerobot.common.policies.pretrained import PreTrainedPolicy
-from lerobot.common.policies.iql.configuration_iql import IQLConfig
+from lerobot.common.policies.iql.configuration_iql import IQLConfig, MLPConfig, TransformerConfig
 from lerobot.common.policies.utils import get_device_from_parameters
 
 DISCRETE_DIMENSION_INDEX = -1  # Gripper is always the last dimension
@@ -425,20 +432,30 @@ class IQLPolicy(
 
     def _init_encoders(self):
         """Initialize shared or separate encoders for actor and critic."""
+        policy_needs_tokens = isinstance(self.config.policy_kwargs, TransformerConfig)
+        critic_needs_tokens = isinstance(self.config.critic_network_kwargs, TransformerConfig)
+        discrete_critic_needs_tokens = isinstance(self.config.discrete_critic_network_kwargs, TransformerConfig)
+
+        if self.config.num_discrete_actions is not None and critic_needs_tokens != discrete_critic_needs_tokens:
+            raise ValueError("If the continuous critic is a transformer, so must be the discrete critic, and vice-versa.")
+        if self.config.shared_encoder and policy_needs_tokens != critic_needs_tokens:
+            raise ValueError("If encoder should be shared, they should both be either MLPs or transformers.")
+
         self.shared_encoder = self.config.shared_encoder
-        self.encoder_critic = SACObservationEncoder(self.config, self.normalize_inputs)
+        self.encoder_critic = IQLObservationEncoder(self.config, self.normalize_inputs, tokenize=critic_needs_tokens)
         self.encoder_actor = (
             self.encoder_critic
             if self.shared_encoder
-            else SACObservationEncoder(self.config, self.normalize_inputs)
+            else IQLObservationEncoder(self.config, self.normalize_inputs, tokenize=policy_needs_tokens)
         )
 
     def _init_critics(self, continuous_action_dim):
         """Build critic ensemble, targets, and optional discrete critic."""
         heads = [
             CriticHead(
-                input_dim=self.encoder_critic.output_dim + continuous_action_dim,
-                **asdict(self.config.critic_network_kwargs),
+                input_dim=self.encoder_critic.output_dim,
+                action_dim=continuous_action_dim,
+                network_kwargs=self.config.critic_network_kwargs,
             )
             for _ in range(self.config.num_critics)
         ]
@@ -447,8 +464,9 @@ class IQLPolicy(
         )
         target_heads = [
             CriticHead(
-                input_dim=self.encoder_critic.output_dim + continuous_action_dim,
-                **asdict(self.config.critic_network_kwargs),
+                input_dim=self.encoder_critic.output_dim,
+                action_dim=continuous_action_dim,
+                network_kwargs=self.config.critic_network_kwargs,
             )
             for _ in range(self.config.num_critics)
         ]
@@ -501,13 +519,14 @@ class IQLPolicy(
         self.temperature = self.log_alpha.exp().item()
 
 
-class SACObservationEncoder(nn.Module):
+class IQLObservationEncoder(nn.Module):
     """Encode image and/or state vector observations."""
 
-    def __init__(self, config: SACConfig, input_normalizer: nn.Module) -> None:
+    def __init__(self, config: IQLConfig, input_normalizer: nn.Module, tokenize: bool = False) -> None:
         super().__init__()
         self.config = config
         self.input_normalization = input_normalizer
+        self.tokenize = tokenize
         self._init_image_layers()
         self._init_state_layers()
         self._compute_output_dim()
@@ -523,28 +542,41 @@ class SACObservationEncoder(nn.Module):
         else:
             self.image_encoder = DefaultImageEncoder(self.config)
 
-        if self.config.freeze_vision_encoder:
-            freeze_image_encoder(self.image_encoder)
-
         dummy = torch.zeros(1, *self.config.input_features[self.image_keys[0]].shape)
         with torch.no_grad():
-            _, channels, height, width = self.image_encoder(dummy).shape
+            if self.image_encoder.is_vit:
+                _, n_tokens, _ = self.image_encoder(dummy).shape
+            else:
+                _, channels, height, width = self.image_encoder(dummy).shape
+                n_tokens = height * width
 
+                # if the CNN feature maps are tokenized, all spatial information is lost
+                # we add sinusoidal position embedding
+                if self.tokenize:
+                    self.image_encoder_pos_embed = SinusoidalPositionEmbedding2d(channels // 2)
+
+        self.n_image_tokens = n_tokens
         self.spatial_embeddings = nn.ModuleDict()
         self.post_encoders = nn.ModuleDict()
 
         for key in self.image_keys:
             name = key.replace(".", "_")
-            self.spatial_embeddings[name] = SpatialLearnedEmbeddings(
-                height=height,
-                width=width,
-                channel=channels,
-                num_features=self.config.image_embedding_pooling_dim,
-            )
+
+            if not self.image_encoder.is_vit and not self.tokenize:
+                self.spatial_embeddings[name] = SpatialLearnedEmbeddings(
+                    height=height,
+                    width=width,
+                    channel=channels,
+                    num_features=self.config.image_embedding_pooling_dim,
+                )
+                embedding_dim = channels * self.config.image_embedding_pooling_dim
+            else:
+                embedding_dim = self.image_encoder.image_enc_out_shape
+
             self.post_encoders[name] = nn.Sequential(
                 nn.Dropout(0.1),
                 nn.Linear(
-                    in_features=channels * self.config.image_embedding_pooling_dim,
+                    in_features=embedding_dim,
                     out_features=self.config.latent_dim,
                 ),
                 nn.LayerNorm(normalized_shape=self.config.latent_dim),
@@ -570,14 +602,26 @@ class SACObservationEncoder(nn.Module):
             )
 
     def _compute_output_dim(self) -> None:
-        out = 0
-        if self.has_images:
-            out += len(self.image_keys) * self.config.latent_dim
-        if self.has_env:
-            out += self.config.latent_dim
-        if self.has_state:
-            out += self.config.latent_dim
-        self._out_dim = out
+
+        if self.tokenize:
+            out = 0
+            if self.has_images:
+                out += len(self.image_keys) * self.config.latent_dim
+            if self.has_env:
+                out += self.config.latent_dim
+            if self.has_state:
+                out += self.config.latent_dim
+            self._out_shape = [out, ]
+
+        else:
+            n_tokens = 0
+            if self.has_images:
+                n_tokens += len(self.image_keys) * self.n_image_tokens
+            if self.has_env:
+                n_tokens += 1
+            if self.has_state:
+                n_tokens += 1
+            self._out_shape = [n_tokens, self.config.latent_dim]
 
     def forward(
         self, obs: dict[str, Tensor], cache: Optional[dict[str, Tensor]] = None, detach: bool = False
@@ -587,17 +631,22 @@ class SACObservationEncoder(nn.Module):
         if self.has_images:
             if cache is None:
                 cache = self.get_cached_image_features(obs, normalize=False)
-            parts.append(self._encode_images(cache, detach))
+
+            parts.extend(self._encode_images(cache, detach))
         if self.has_env:
             parts.append(self.env_encoder(obs["observation.environment_state"]))
         if self.has_state:
             parts.append(self.state_encoder(obs["observation.state"]))
-        if parts:
-            return torch.cat(parts, dim=-1)
 
-        raise ValueError(
-            "No parts to concatenate, you should have at least one image or environment state or state"
-        )
+        if not parts:
+            raise ValueError(
+                "No parts to concatenate, you should have at least one image or environment state or state"
+            )
+
+        if self.tokenize:
+            return torch.stack(parts, dim=1)
+        else:
+            return torch.cat(parts, dim=-1)
 
     def get_cached_image_features(self, obs: dict[str, Tensor], normalize: bool = False) -> dict[str, Tensor]:
         """Extract and optionally cache image features from observations.
@@ -654,16 +703,68 @@ class SACObservationEncoder(nn.Module):
         feats = []
         for k, feat in cache.items():
             safe_key = k.replace(".", "_")
-            x = self.spatial_embeddings[safe_key](feat)
-            x = self.post_encoders[safe_key](x)
+
+            if not self.image_encoder.is_vit:
+                if self.tokenize:
+                    pos_embed = self.image_encoder_pos_embed(feat).to(dtype=feat.device)
+                    feat = torch.einsum('b c h w -> b (h w) c', feat)
+                    pos_embed = torch.einsum('b c h w -> b (h w) c', pos_embed)
+                    feat = feat + pos_embed
+                else:
+                    feat = self.spatial_embeddings[safe_key](feat)
+
+            x = self.post_encoders[safe_key](feat)
             if detach:
                 x = x.detach()
             feats.append(x)
-        return torch.cat(feats, dim=-1)
+
+        if self.tokenize:
+            return torch.stack(feats, dim=1)
+        else:
+            return torch.cat(feats, dim=-1)
 
     @property
     def output_dim(self) -> int:
         return self._out_dim
+
+
+
+class TransformerEncoder(nn.Module):
+    def __init__(
+        self,
+        config: TransformerConfig,
+        action_dim: int,
+        obs_dim: int,
+        init_final: Optional[float] = None,
+    ):
+        config = _convert_config(config)
+        self.model = ACTEncoder(config)
+        self.action_proj = nn.Linear(action_dim, obs_dim)
+        self.output_layer = nn.Linear(in_features=self.config.dim_model, out_features=1)
+        self.cls_token = nn.Parameter(torch.randn(1, 1, self.config.dim_model))
+
+        if init_final is not None:
+            nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
+            nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
+        else:
+            orthogonal_init()(self.output_layer.weight)
+
+    def forward(self, encoder_out: Tensor, action: Tensor):
+        B = encoder_out.size(0)
+        action_embed = self.action_proj(action).unsqueeze(1)  # (B, 1, D)
+        cls = self.cls_token.expand(B, -1, -1)  # (B, 1, D)
+        tokens = torch.cat([encoder_out, action_embed, cls], dim=1)  # (B, L+2, D)
+        tokens = tokens.transpose(0, 1)  # (B, L+2, D) → (L+2, B, D)
+        out = self.model(tokens)  # (L+2, B, D)
+        cls_out = out[0]  # (B, D)
+        return self.output_layer(cls_out)
+
+
+
+
+class TransformerDecoder(nn.Module):
+
+
 
 
 class MLP(nn.Module):
@@ -854,7 +955,7 @@ class DiscreteCritic(nn.Module):
 class Policy(nn.Module):
     def __init__(
         self,
-        encoder: SACObservationEncoder,
+        encoder: IQLObservationEncoder,
         network: nn.Module,
         action_dim: int,
         log_std_min: float = -5,
@@ -865,7 +966,7 @@ class Policy(nn.Module):
         encoder_is_shared: bool = False,
     ):
         super().__init__()
-        self.encoder: SACObservationEncoder = encoder
+        self.encoder: IQLObservationEncoder = encoder
         self.network = network
         self.action_dim = action_dim
         self.log_std_min = log_std_min
@@ -939,9 +1040,11 @@ class Policy(nn.Module):
 
 
 class DefaultImageEncoder(nn.Module):
-    def __init__(self, config: SACConfig):
+    def __init__(self, config: IQLConfig):
         super().__init__()
         image_key = next(key for key in config.input_features.keys() if key.startswith("observation.image"))  # noqa: SIM118
+        self.is_vit = False
+        self.image_enc_out_shape = config.image_encoder_hidden_dim
         self.image_enc_layers = nn.Sequential(
             nn.Conv2d(
                 in_channels=config.input_features[image_key].shape[0],
@@ -986,28 +1089,94 @@ def freeze_image_encoder(image_encoder: nn.Module):
 
 
 class PretrainedImageEncoder(nn.Module):
+    """Wrapper that transparently supports CNN and ViT back-ends.
+
+    * CNNs (e.g. ResNet, ConvNeXt): behaviour unchanged – returns a feature map
+      with shape (B, C, H, W).
+    * ViT-family models (e.g. DINOv2): supports three reduction modes controlled
+      via ``config.vision_encoder_reduce_method``:
+        * "cls"       – return CLS token (default).
+        * "cross_att" – learnable pooling by cross-attention.
+        * "grid"      – reshape patch tokens to a (H, W) grid.
+    """
     def __init__(self, config: IQLConfig):
         super().__init__()
+        self.config = config
 
-        self.image_enc_layers, self.image_enc_out_shape = self._load_pretrained_vision_encoder(config)
+        # ---- load model (and processor if ViT) --------------------------------
+        self.backbone: AutoModel = AutoModel.from_pretrained(
+            config.vision_encoder_name, trust_remote_code=True
+        )
+        backbone_cfg = self.image_enc_layers.config
+        self.is_vit = hasattr(backbone_cfg, "patch_size") or backbone_cfg.model_type.lower() in {"vit", "dinov2"}
 
-    def _load_pretrained_vision_encoder(self, config: IQLConfig):
-        """Set up CNN encoder"""
-        from transformers import AutoModel
-
-        self.image_enc_layers = AutoModel.from_pretrained(config.vision_encoder_name, trust_remote_code=True)
-
-        if hasattr(self.image_enc_layers.config, "hidden_sizes"):
-            self.image_enc_out_shape = self.image_enc_layers.config.hidden_sizes[-1]  # Last channel dimension
-        elif hasattr(self.image_enc_layers, "fc"):
-            self.image_enc_out_shape = self.image_enc_layers.fc.in_features
+        if self.is_vit:
+            # I don't think I need the processor
+            self.processor = AutoImageProcessor.from_pretrained(config.vision_encoder_name)
+            self.image_enc_out_shape = backbone_cfg.hidden_size  # dim of each token
         else:
-            raise ValueError("Unsupported vision encoder architecture, make sure you are using a CNN")
-        return self.image_enc_layers, self.image_enc_out_shape
+            # CNN branch – try to infer output channel dimension
+            if hasattr(backbone_cfg, "hidden_sizes"):
+                self.image_enc_out_shape = backbone_cfg.hidden_sizes[-1]  # Last channel dimension
+            elif hasattr(self.image_enc_layers, "fc"):
+                self.image_enc_out_shape = self.image_enc_layers.fc.in_features
+            else:
+                raise ValueError("Unsupported vision encoder architecture, make sure you are using a CNN")
+
+        # Setup learnable queries for cross-att
+        if self.is_vit and not self.config.use_cls_token:
+            n_q = getattr(config, "vit_n_queries", 1)
+            heads = getattr(config, "vit_attn_heads", 8)
+            # (n_q, hidden_dim)
+            self.query_tokens = nn.Parameter(torch.randn(n_q, self.hidden_dim))
+            self.cross_attn = nn.MultiheadAttention(
+                embed_dim=self.hidden_dim,
+                num_heads=heads,
+                batch_first=True,
+            )
+        else:
+            self.query_tokens = None
+            self.cross_attn = None
+
+        if getattr(config, "freeze_vision_encoder", False):
+            freeze_image_encoder(self.backbone)
 
     def forward(self, x):
-        enc_feat = self.image_enc_layers(x).last_hidden_state
-        return enc_feat
+        """Encode a batch of images.
+
+        Args:
+            x: Tensor of shape (B, 3, H, W) in **[0, 1]** range.
+
+        Returns:
+            * CNN backbone → (B, C, H', W')
+            * ViT backbone → depending on *reduce_method*:
+                * "cls"       → (B, C, 1, 1)
+                * "cross_att" → (B, C, 1, 1)
+                * "grid"      → (B, C, H', W')  (H'⋅W' = #patches)
+        """
+        if not self.is_transformer:
+            # ------------------- CNN branch -------------------
+            return self.image_enc_layers(x).last_hidden_state
+
+        # ------------------- ViT / DINOv2 branch -------------------
+        B = x.size(0)
+        device = x.device
+        inputs = self.processor(images=x, return_tensors="pt").to(device)
+        seq = self.backbone(**inputs).last_hidden_state  # (B, 1+N, D)
+
+        # CLS token
+        if self.config.use_cls_token:
+            pooled = seq[:, 0, :].unsqeeze(1)
+        else:
+            # Cross-att with learnable queries
+            assert self.query_tokens is not None and self.cross_attn is not None
+            # expand queries: (B, n_q, D)
+            q = self.query_tokens.unsqueeze(0).expand(B, -1, -1)
+            # patch tokens include CLS or drop it: we attend over all tokens
+            kv = seq[:, 1:, :]
+            pooled, _ = self.cross_attn(q, kv, kv)
+
+        return pooled
 
 
 def orthogonal_init():
@@ -1139,6 +1308,27 @@ def _convert_normalization_params_to_tensor(normalization_params: dict) -> dict:
 
     return converted_params
 
+
+def _convert_config(config: TransformerConfig) -> ACTConfig:
+    return ACTConfig(
+        n_heads=config.n_heads,
+        n_layers=config.n_layers,
+        dim_model=config.dim_model,
+        dim_feedforward=config.dim_feedforward,
+        feedforward_activation=config.feedforward_activation
+    )
+
+
+def _remove_layernorm(decoder: ACTDecoder) -> None:
+    # Replace the top-level norm
+    decoder.norm = nn.Identity()
+
+    # Replace all LayerNorms in each decoder layer
+    for layer in decoder.layers:
+        if isinstance(layer, ACTDecoderLayer):
+            layer.norm1 = nn.Identity()
+            layer.norm2 = nn.Identity()
+            layer.norm3 = nn.Identity()
 
 def _expectile(self, x: torch.Tensor, expectile: float) -> torch.Tensor:
     """Scalar expectile regression loss used by IQL."""
