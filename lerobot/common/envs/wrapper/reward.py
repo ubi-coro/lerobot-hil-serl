@@ -1,8 +1,11 @@
 import time
+from typing import Optional
 
 import gymnasium as gym
 import numpy as np
 import torch
+
+from lerobot.common.policies.gcr.modeling_gcr import GCR
 
 
 class SuccessRepeatWrapper(gym.Wrapper):
@@ -92,3 +95,75 @@ class RewardClassifierWrapper(gym.Wrapper):
 
     def reset(self, seed=None, options=None):
         return self.env.reset(seed=seed, options=options)
+
+
+class ShapingRewardWrapper(gym.Wrapper):
+    """
+    Gym-style wrapper that augments the environment reward with a dense
+    shaping term produced by a GCR model.
+
+    Args
+    ----
+    env              : the base gym.Env
+    reward_model     : GCR instance (already on the correct device)
+    obs_key          : key in the observation dict that contains the RGB image
+    goal_image       : reference goal image (3,H,W)  *or*  pre-computed embedding.
+                       If None, the wrapper expects the environment to return
+                       a 'goal_image' entry inside its observations.
+    weight           : scalar multiplier for the shaping reward.
+    """
+
+    def __init__(self,
+                 env: gym.Env,
+                 reward_model: GCR,
+                 obs_key: str = "image",
+                 goal_image: Optional[Any] = None,
+                 weight: float = 1.0):
+        super().__init__(env)
+        self.reward_model = reward_model
+        self.obs_key = obs_key
+        self.weight = weight
+        self.device = reward_model.config.device
+
+        # pre-encode goal image once if provided
+        if goal_image is not None:
+            with torch.no_grad():
+                self.goal_emb = reward_model.predict(goal_image, goal_image, goal_image, normalize=False) * 0
+                #            ↑ dummy call just to put it on the right device
+                self.goal_emb = reward_model.model(goal_image.unsqueeze(0).to(self.device), modality="vision").squeeze(0)
+        else:
+            self.goal_emb = None  # will be filled on first reset()
+
+        self._last_obs = None
+
+    def reset(self, **kwargs):
+        obs = self.env.reset(**kwargs)
+        self._last_obs = obs
+        # lazily grab / encode goal if not supplied
+        if self.goal_emb is None:
+            assert "goal_image" in obs, "Provide goal_image=… or supply it in observations."
+            with torch.no_grad():
+                self.goal_emb = self.reward_model.model(
+                    obs["goal_image"].unsqueeze(0).to(self.device),
+                    modality="vision"
+                ).squeeze(0)
+        return obs
+
+    def step(self, action):
+        obs, r_env, done, info = self.env.step(action)
+
+        # compute shaping reward
+        with torch.no_grad():
+            r_shape = self.reward_model.predict(
+                self._last_obs[self.obs_key],
+                obs[self.obs_key],
+                self.goal_emb,
+                normalize=True
+            ).item()
+
+        total_reward = r_env + self.weight * r_shape
+        info["shaping_reward"] = r_shape
+        info["reward_env"]     = r_env
+
+        self._last_obs = obs
+        return obs, total_reward, done, info
