@@ -37,15 +37,13 @@ from lerobot.common.policies.act.modeling_act import (
 )
 from lerobot.common.policies.normalize import Normalize, Unnormalize
 from lerobot.common.policies.pretrained import PreTrainedPolicy
-from lerobot.common.policies.iql.configuration_iql import IQLConfig, MLPConfig, TransformerConfig
+from lerobot.common.policies.iql.configuration_iql import IQLConfig, MLPConfig, NetworkConfig, TransformerConfig
 from lerobot.common.policies.utils import get_device_from_parameters
 
 DISCRETE_DIMENSION_INDEX = -1  # Gripper is always the last dimension
 
 
-class IQLPolicy(
-    PreTrainedPolicy,
-):
+class IQLPolicy(PreTrainedPolicy):
     config_class = IQLConfig
     name = "iql"
 
@@ -453,9 +451,9 @@ class IQLPolicy(
         """Build critic ensemble, targets, and optional discrete critic."""
         heads = [
             CriticHead(
-                input_dim=self.encoder_critic.output_dim,
+                input_dim=self.encoder_critic.output_shape[-1],
                 action_dim=continuous_action_dim,
-                network_kwargs=self.config.critic_network_kwargs,
+                network_config=self.config.critic_network_kwargs,
             )
             for _ in range(self.config.num_critics)
         ]
@@ -464,9 +462,9 @@ class IQLPolicy(
         )
         target_heads = [
             CriticHead(
-                input_dim=self.encoder_critic.output_dim,
+                input_dim=self.encoder_critic.output_shape[-1],
                 action_dim=continuous_action_dim,
-                network_kwargs=self.config.critic_network_kwargs,
+                network_config=self.config.critic_network_kwargs,
             )
             for _ in range(self.config.num_critics)
         ]
@@ -485,15 +483,15 @@ class IQLPolicy(
         """Build discrete discrete critic ensemble and target networks."""
         self.discrete_critic = DiscreteCritic(
             encoder=self.encoder_critic,
-            input_dim=self.encoder_critic.output_dim,
+            input_dim=self.encoder_critic.output_shape[-1],
             output_dim=self.config.num_discrete_actions,
-            **asdict(self.config.discrete_critic_network_kwargs),
+            network_config=self.config.discrete_critic_network_config
         )
         self.discrete_critic_target = DiscreteCritic(
             encoder=self.encoder_critic,
-            input_dim=self.encoder_critic.output_dim,
+            input_dim=self.encoder_critic.output_shape[-1],
             output_dim=self.config.num_discrete_actions,
-            **asdict(self.config.discrete_critic_network_kwargs),
+            network_config=self.config.discrete_critic_network_config
         )
 
         # TODO: (maractingi, azouitine) Compile the discrete critic
@@ -503,10 +501,10 @@ class IQLPolicy(
         """Initialize policy actor network and default target entropy."""
         self.actor = Policy(
             encoder=self.encoder_actor,
-            network=MLP(input_dim=self.encoder_actor.output_dim, **asdict(self.config.actor_network_kwargs)),
+            input_dim=self.encoder_actor.output_shape[-1],
             action_dim=continuous_action_dim,
-            encoder_is_shared=self.shared_encoder,
-            **asdict(self.config.policy_kwargs),
+            network_config=self.config.actor_network_config,
+            **asdict(self.config.policy_kwargs)
         )
         if self.config.target_entropy is None:
             dim = continuous_action_dim + (1 if self.config.num_discrete_actions is not None else 0)
@@ -529,7 +527,7 @@ class IQLObservationEncoder(nn.Module):
         self.tokenize = tokenize
         self._init_image_layers()
         self._init_state_layers()
-        self._compute_output_dim()
+        self._compute_output_shape()
 
     def _init_image_layers(self) -> None:
         self.image_keys = [k for k in self.config.input_features if k.startswith("observation.image")]
@@ -601,7 +599,7 @@ class IQLObservationEncoder(nn.Module):
                 nn.Tanh(),
             )
 
-    def _compute_output_dim(self) -> None:
+    def _compute_output_shape(self) -> None:
 
         if self.tokenize:
             out = 0
@@ -725,45 +723,41 @@ class IQLObservationEncoder(nn.Module):
 
     @property
     def output_dim(self) -> int:
-        return self._out_dim
+        return self._out_shape[-1]
 
 
 
 class TransformerEncoder(nn.Module):
     def __init__(
         self,
-        config: TransformerConfig,
-        action_dim: int,
-        obs_dim: int,
-        init_final: Optional[float] = None,
+        input_dim: int,
+        config: Optional[TransformerConfig] = None
     ):
-        config = _convert_config(config)
-        self.model = ACTEncoder(config)
-        self.action_proj = nn.Linear(action_dim, obs_dim)
-        self.output_layer = nn.Linear(in_features=self.config.dim_model, out_features=1)
+        super().__init__()
+
+        if config is None:
+            config = TransformerConfig()
+        self.config = config
+
+        self.model = ACTEncoder(_convert_config(self.config))
+        self.input_proj = nn.Linear(input_dim, config.dim_model)
         self.cls_token = nn.Parameter(torch.randn(1, 1, self.config.dim_model))
 
-        if init_final is not None:
-            nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
-            nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
-        else:
-            orthogonal_init()(self.output_layer.weight)
-
-    def forward(self, encoder_out: Tensor, action: Tensor):
+    def forward(self, x: Tensor):
+        x = self.input_proj(x)
         B = encoder_out.size(0)
-        action_embed = self.action_proj(action).unsqueeze(1)  # (B, 1, D)
         cls = self.cls_token.expand(B, -1, -1)  # (B, 1, D)
-        tokens = torch.cat([encoder_out, action_embed, cls], dim=1)  # (B, L+2, D)
-        tokens = tokens.transpose(0, 1)  # (B, L+2, D) → (L+2, B, D)
-        out = self.model(tokens)  # (L+2, B, D)
+        tokens = torch.cat([x, cls], dim=1)  # (B, L+1, D)
+        tokens = tokens.transpose(0, 1)  # (B, L+1, D) → (L+1, B, D)
+        out = self.model(tokens)  # (L+1, B, D)
         cls_out = out[0]  # (B, D)
-        return self.output_layer(cls_out)
+        return cls_out
 
 
 
 
 class TransformerDecoder(nn.Module):
-
+    pass
 
 
 
@@ -791,28 +785,29 @@ class MLP(nn.Module):
     def __init__(
         self,
         input_dim: int,
-        hidden_dims: list[int],
-        activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.SiLU(),
-        activate_final: bool = False,
-        dropout_rate: Optional[float] = None,
-        final_activation: Callable[[torch.Tensor], torch.Tensor] | str | None = None,
+        config: Optional[MLPConfig] = None
     ):
         super().__init__()
+
+        if config is None:
+            config = MLPConfig
+        self.config = config
+
         layers: list[nn.Module] = []
         in_dim = input_dim
-        total = len(hidden_dims)
+        total = len(self.config.hidden_dims)
 
-        for idx, out_dim in enumerate(hidden_dims):
+        for idx, out_dim in enumerate(self.config.hidden_dims):
             # 1) linear transform
             layers.append(nn.Linear(in_dim, out_dim))
 
             is_last = idx == total - 1
             # 2-4) optionally add dropout, normalization, and activation
-            if not is_last or activate_final:
-                if dropout_rate and dropout_rate > 0:
-                    layers.append(nn.Dropout(p=dropout_rate))
+            if not is_last or self.config.activate_final:
+                if self.config.dropout_rate and self.config.dropout_rate > 0:
+                    layers.append(nn.Dropout(p=self.config.dropout_rate))
                 layers.append(nn.LayerNorm(out_dim))
-                act_cls = final_activation if is_last and final_activation else activations
+                act_cls = self.config.final_activation if is_last and self.config.final_activation else self.config.activations
                 act = act_cls if isinstance(act_cls, nn.Module) else getattr(nn, act_cls)()
                 layers.append(act)
 
@@ -828,26 +823,17 @@ class CriticHead(nn.Module):
     def __init__(
         self,
         input_dim: int,
-        hidden_dims: list[int],
-        activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.SiLU(),
-        activate_final: bool = False,
-        dropout_rate: Optional[float] = None,
-        init_final: Optional[float] = None,
-        final_activation: Callable[[torch.Tensor], torch.Tensor] | str | None = None,
+        action_dim: int,
+        network_config: NetworkConfig = MLPConfig
     ):
         super().__init__()
-        self.net = MLP(
-            input_dim=input_dim,
-            hidden_dims=hidden_dims,
-            activations=activations,
-            activate_final=activate_final,
-            dropout_rate=dropout_rate,
-            final_activation=final_activation,
-        )
-        self.output_layer = nn.Linear(in_features=hidden_dims[-1], out_features=1)
-        if init_final is not None:
-            nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
-            nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
+        self.action_dim = action_dim
+        self.net, self.out_dim = _build_critic_net(input_dim, action_dim, network_config)
+
+        self.output_layer = nn.Linear(in_features=out_dim, out_features=1)
+        if network_config.init_final is not None:
+            nn.init.uniform_(self.output_layer.weight, -network_config.init_final, network_config.init_final)
+            nn.init.uniform_(self.output_layer.bias, -network_config.init_final, network_config.init_final)
         else:
             orthogonal_init()(self.output_layer.weight)
 
@@ -870,7 +856,7 @@ class CriticEnsemble(nn.Module):
 
     def __init__(
         self,
-        encoder: SACObservationEncoder,
+        encoder: IQLObservationEncoder,
         ensemble: List[CriticHead],
         output_normalization: nn.Module,
         init_final: Optional[float] = None,
@@ -880,6 +866,9 @@ class CriticEnsemble(nn.Module):
         self.init_final = init_final
         self.output_normalization = output_normalization
         self.critics = nn.ModuleList(ensemble)
+        self.stack_action = isinstance(ensemble[0].net, TransformerEncoder)
+        if self.stack_action:
+            self.action_proj = nn.Linear(ensemble[0].action_dim, encoder.output_shape[-1])
 
     def forward(
         self,
@@ -898,7 +887,11 @@ class CriticEnsemble(nn.Module):
 
         obs_enc = self.encoder(observations, cache=observation_features)
 
-        inputs = torch.cat([obs_enc, actions], dim=-1)
+        if self.stack_action:
+            actions = self.action_proj(actions)
+            inputs = torch.stack([obs_enc, actions], dim=1)
+        else:
+            inputs = torch.cat([obs_enc, actions], dim=-1)
 
         # Loop through critics and collect outputs
         q_values = []
@@ -915,29 +908,16 @@ class DiscreteCritic(nn.Module):
         self,
         encoder: nn.Module,
         input_dim: int,
-        hidden_dims: list[int],
-        output_dim: int = 3,
-        activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.SiLU(),
-        activate_final: bool = False,
-        dropout_rate: Optional[float] = None,
-        init_final: Optional[float] = None,
-        final_activation: Callable[[torch.Tensor], torch.Tensor] | str | None = None,
+        action_dim: int = 3,
+        network_config: NetworkConfig = MLPConfig
     ):
         super().__init__()
         self.encoder = encoder
-        self.output_dim = output_dim
+        self.action_dim = action_dim
+        self.net, self.out_dim = _build_critic_net(input_dim, 0, network_config)
 
-        self.net = MLP(
-            input_dim=input_dim,
-            hidden_dims=hidden_dims,
-            activations=activations,
-            activate_final=activate_final,
-            dropout_rate=dropout_rate,
-            final_activation=final_activation,
-        )
-
-        self.output_layer = nn.Linear(in_features=hidden_dims[-1], out_features=self.output_dim)
-        if init_final is not None:
+        self.output_layer = nn.Linear(in_features=out_dim, out_features=self.action_dim)
+        if network_config.init_final is not None:
             nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
             nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
         else:
@@ -956,18 +936,27 @@ class Policy(nn.Module):
     def __init__(
         self,
         encoder: IQLObservationEncoder,
-        network: nn.Module,
+        input_dim: int,
         action_dim: int,
+        network_config: NetworkConfig = MLPConfig,
         log_std_min: float = -5,
         log_std_max: float = 2,
         fixed_std: Optional[torch.Tensor] = None,
-        init_final: Optional[float] = None,
         use_tanh_squash: bool = False,
         encoder_is_shared: bool = False,
     ):
+
+        self.actor = Policy(
+            encoder=self.encoder_actor,
+            input_dim=self.encoder_actor.output_shape[-1],
+            action_dim=continuous_action_dim,
+            network_config=self.config.actor_network_config,
+            **asdict(self.config.policy_kwargs)
+        )
+
         super().__init__()
         self.encoder: IQLObservationEncoder = encoder
-        self.network = network
+        self.net, out_features = network
         self.action_dim = action_dim
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
@@ -1016,7 +1005,7 @@ class Policy(nn.Module):
             std = torch.exp(log_std)  # Match JAX "exp"
             std = torch.clamp(std, self.log_std_min, self.log_std_max)  # Match JAX default clip
         else:
-            log_std = self.fixed_std.expand_as(means)
+            std = self.fixed_std.expand_as(means)
 
         # Build transformed distribution
         dist = TanhMultivariateNormalDiag(loc=means, scale_diag=std)
@@ -1118,8 +1107,8 @@ class PretrainedImageEncoder(nn.Module):
             # CNN branch – try to infer output channel dimension
             if hasattr(backbone_cfg, "hidden_sizes"):
                 self.image_enc_out_shape = backbone_cfg.hidden_sizes[-1]  # Last channel dimension
-            elif hasattr(self.image_enc_layers, "fc"):
-                self.image_enc_out_shape = self.image_enc_layers.fc.in_features
+            elif hasattr(self.backbone, "fc"):
+                self.image_enc_out_shape = self.backbone.fc.in_features
             else:
                 raise ValueError("Unsupported vision encoder architecture, make sure you are using a CNN")
 
@@ -1128,9 +1117,9 @@ class PretrainedImageEncoder(nn.Module):
             n_q = getattr(config, "vit_n_queries", 1)
             heads = getattr(config, "vit_attn_heads", 8)
             # (n_q, hidden_dim)
-            self.query_tokens = nn.Parameter(torch.randn(n_q, self.hidden_dim))
+            self.query_tokens = nn.Parameter(torch.randn(n_q, self.image_enc_out_shape))
             self.cross_attn = nn.MultiheadAttention(
-                embed_dim=self.hidden_dim,
+                embed_dim=self.image_enc_out_shape,
                 num_heads=heads,
                 batch_first=True,
             )
@@ -1312,10 +1301,13 @@ def _convert_normalization_params_to_tensor(normalization_params: dict) -> dict:
 def _convert_config(config: TransformerConfig) -> ACTConfig:
     return ACTConfig(
         n_heads=config.n_heads,
-        n_layers=config.n_layers,
+        n_encoder_layers=config.n_layers,
+        n_decoder_layers=config.n_layers,
         dim_model=config.dim_model,
         dim_feedforward=config.dim_feedforward,
-        feedforward_activation=config.feedforward_activation
+        feedforward_activation=config.feedforward_activation,
+        dropout=config.dropout,
+        pre_norm=config.pre_norm
     )
 
 
@@ -1330,7 +1322,34 @@ def _remove_layernorm(decoder: ACTDecoder) -> None:
             layer.norm2 = nn.Identity()
             layer.norm3 = nn.Identity()
 
-def _expectile(self, x: torch.Tensor, expectile: float) -> torch.Tensor:
+
+def _expectile(x: torch.Tensor, expectile: float) -> torch.Tensor:
     """Scalar expectile regression loss used by IQL."""
     weights = torch.where(x < 0, expectile, 1 - expectile)
     return (weights * (x ** 2)).mean()
+
+
+def _build_critic_net(input_dim: int, action_dim: int, network_config: NetworkConfig):
+    if isinstance(network_config, MLPConfig):
+        net = MLP(input_dim + action_dim, network_config)
+        out_dim = network_config.hidden_dims[-1]
+    elif isinstance(network_config, TransformerConfig):
+        net = TransformerEncoder(input_dim, network_config)
+        out_dim = network_config.dim_model
+    else:
+        raise ValueError(f"Unknown 'network_config' {network_config}")
+
+    return net, out_dim
+
+
+def _build_actor_net(input_dim: int, action_dim: int, network_config: NetworkConfig):
+    if isinstance(network_config, MLPConfig):
+        net = MLP(input_dim, network_config)
+        out_dim = network_config.hidden_dims[-1]
+    elif isinstance(network_config, TransformerConfig):
+        net = TransformerDecoder(input_dim, network_config)
+        out_dim = network_config.dim_model
+    else:
+        raise ValueError(f"Unknown 'network_config' {network_config}")
+
+    return net, out_dim

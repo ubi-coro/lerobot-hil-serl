@@ -39,15 +39,16 @@ class ActorLearnerConfig:
 
 @dataclass
 class NetworkConfig(draccus.ChoiceRegistry):
-    pass
+    init_final: Optional[float] = None
 
 
 @NetworkConfig.register_subclass("mlp")
 class MLPConfig:
     hidden_dims: list[int] = field(default_factory=lambda: [256, 256])
+    activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.SiLU(),
+    dropout_rate: Optional[float] = None
     activate_final: bool = True
-    final_activation: str | None = None
-
+    final_activation: Callable[[torch.Tensor], torch.Tensor] | str | None = None
 
 @NetworkConfig.register_subclass("transformer")
 class TransformerConfig:
@@ -56,6 +57,8 @@ class TransformerConfig:
     dim_model: int = 512
     dim_feedforward: int = 3200
     feedforward_activation: str = "relu"
+    dropout: float = 0.1,
+    pre_norm: bool = False
 
 
 @dataclass
@@ -198,10 +201,10 @@ class IQLConfig(PreTrainedConfig):
     grad_clip_norm: float = 40.0
 
     # Network configuration
-    critic_network_kwargs: NetworkConfig = field(default_factory=MLPConfig)
-    actor_network_kwargs: NetworkConfig = field(default_factory=MLPConfig)
+    critic_network_config: NetworkConfig = field(default_factory=MLPConfig)
+    actor_network_config: NetworkConfig = field(default_factory=MLPConfig)
     policy_kwargs: PolicyConfig = field(default_factory=PolicyConfig)
-    discrete_critic_network_kwargs: NetworkConfig = field(default_factory=MLPConfig)
+    discrete_critic_network_config: NetworkConfig = field(default_factory=MLPConfig)
     actor_learner_config: ActorLearnerConfig = field(default_factory=ActorLearnerConfig)
     concurrency: ConcurrencyConfig = field(default_factory=ConcurrencyConfig)
 
