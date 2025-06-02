@@ -27,6 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor
 from torch.distributions import MultivariateNormal, TanhTransform, Transform, TransformedDistribution
+from transformers import AutoModel, AutoImageProcessor
 
 from lerobot.common.policies.act.modeling_act import (
     ACTConfig,
@@ -93,7 +94,7 @@ class IQLPolicy(PreTrainedPolicy):
             # Cache and normalize image features
             observation_features = self.actor.encoder.get_cached_image_features(batch, normalize=True)
 
-        actions, _, _ = self.actor.select_action(batch, observation_features)
+        actions = self.actor.select_action(batch, observation_features)
         actions = self.unnormalize_outputs({"action": actions})["action"]
         q_pred = self.critic_forward(batch, actions, use_target=False, observation_features=observation_features)
 
@@ -432,9 +433,9 @@ class IQLPolicy(PreTrainedPolicy):
 
     def _init_encoders(self):
         """Initialize shared or separate encoders for actor and critic."""
-        policy_needs_tokens = isinstance(self.config.policy_kwargs, TransformerConfig)
-        critic_needs_tokens = isinstance(self.config.critic_network_kwargs, TransformerConfig)
-        discrete_critic_needs_tokens = isinstance(self.config.discrete_critic_network_kwargs, TransformerConfig)
+        policy_needs_tokens = isinstance(self.config.actor_network_config, TransformerConfig)
+        critic_needs_tokens = isinstance(self.config.critic_network_config, TransformerConfig)
+        discrete_critic_needs_tokens = isinstance(self.config.discrete_critic_network_config, TransformerConfig)
 
         if self.config.num_discrete_actions is not None and critic_needs_tokens != discrete_critic_needs_tokens:
             raise ValueError("If the continuous critic is a transformer, so must be the discrete critic, and vice-versa.")
@@ -453,9 +454,9 @@ class IQLPolicy(PreTrainedPolicy):
         """Build critic ensemble, targets, and optional discrete critic."""
         heads = [
             CriticHead(
-                input_dim=self.encoder_critic.output_shape[-1],
+                input_dim=self.encoder_critic.output_dim,
                 action_dim=continuous_action_dim,
-                network_config=self.config.critic_network_kwargs,
+                network_config=self.config.critic_network_config,
             )
             for _ in range(self.config.num_critics)
         ]
@@ -464,9 +465,9 @@ class IQLPolicy(PreTrainedPolicy):
         )
         target_heads = [
             CriticHead(
-                input_dim=self.encoder_critic.output_shape[-1],
+                input_dim=self.encoder_critic.output_dim,
                 action_dim=continuous_action_dim,
-                network_config=self.config.critic_network_kwargs,
+                network_config=self.config.critic_network_config,
             )
             for _ in range(self.config.num_critics)
         ]
@@ -485,14 +486,14 @@ class IQLPolicy(PreTrainedPolicy):
         """Build discrete discrete critic ensemble and target networks."""
         self.discrete_critic = DiscreteCritic(
             encoder=self.encoder_critic,
-            input_dim=self.encoder_critic.output_shape[-1],
-            output_dim=self.config.num_discrete_actions,
+            input_dim=self.encoder_critic.output_dim,
+            action_dim=self.config.num_discrete_actions,
             network_config=self.config.discrete_critic_network_config
         )
         self.discrete_critic_target = DiscreteCritic(
             encoder=self.encoder_critic,
-            input_dim=self.encoder_critic.output_shape[-1],
-            output_dim=self.config.num_discrete_actions,
+            input_dim=self.encoder_critic.output_dim,
+            action_dim=self.config.num_discrete_actions,
             network_config=self.config.discrete_critic_network_config
         )
 
@@ -503,10 +504,10 @@ class IQLPolicy(PreTrainedPolicy):
         """Initialize policy actor network and default target entropy."""
         self.actor = Policy(
             encoder=self.encoder_actor,
-            input_dim=self.encoder_actor.output_shape[-1],
+            input_dim=self.encoder_actor.output_dim,
             action_dim=continuous_action_dim,
             network_config=self.config.actor_network_config,
-            **asdict(self.config.policy_kwargs)
+            **asdict(self.config.policy_config)
         )
         if self.config.target_entropy is None:
             dim = continuous_action_dim + (1 if self.config.num_discrete_actions is not None else 0)
@@ -546,7 +547,7 @@ class IQLObservationEncoder(nn.Module):
         with torch.no_grad():
             if self.image_encoder.is_vit:
                 _, n_tokens, _ = self.image_encoder(dummy).shape
-            else:
+            elif self.tokenize:
                 _, channels, height, width = self.image_encoder(dummy).shape
                 n_tokens = height * width
 
@@ -554,6 +555,8 @@ class IQLObservationEncoder(nn.Module):
                 # we add sinusoidal position embedding
                 if self.tokenize:
                     self.image_encoder_pos_embed = SinusoidalPositionEmbedding2d(channels // 2)
+            else:
+                n_tokens = 1
 
         self.n_image_tokens = n_tokens
         self.spatial_embeddings = nn.ModuleDict()
@@ -602,18 +605,7 @@ class IQLObservationEncoder(nn.Module):
             )
 
     def _compute_output_shape(self) -> None:
-
         if self.tokenize:
-            out = 0
-            if self.has_images:
-                out += len(self.image_keys) * self.config.latent_dim
-            if self.has_env:
-                out += self.config.latent_dim
-            if self.has_state:
-                out += self.config.latent_dim
-            self._out_shape = [out, ]
-
-        else:
             n_tokens = 0
             if self.has_images:
                 n_tokens += len(self.image_keys) * self.n_image_tokens
@@ -622,6 +614,17 @@ class IQLObservationEncoder(nn.Module):
             if self.has_state:
                 n_tokens += 1
             self._out_shape = [n_tokens, self.config.latent_dim]
+
+        else:
+            out = 0
+            if self.has_images:
+                out += len(self.image_keys) * self.config.latent_dim * self.n_image_tokens
+            if self.has_env:
+                out += self.config.latent_dim
+            if self.has_state:
+                out += self.config.latent_dim
+            self._out_shape = [out, ]
+
 
     def forward(
         self, obs: dict[str, Tensor], cache: Optional[dict[str, Tensor]] = None, detach: bool = False
@@ -705,23 +708,33 @@ class IQLObservationEncoder(nn.Module):
             safe_key = k.replace(".", "_")
 
             if not self.image_encoder.is_vit:
+
+                # encoder returns a feature map, but downstream expects token sequence
                 if self.tokenize:
                     pos_embed = self.image_encoder_pos_embed(feat).to(dtype=feat.device)
-                    feat = torch.einsum('b c h w -> b (h w) c', feat)
-                    pos_embed = torch.einsum('b c h w -> b (h w) c', pos_embed)
+                    feat = einops.rearrange(feat, 'b c h w -> b (h w) c')
+                    pos_embed = einops.rearrange(pos_embed, 'b c h w -> b (h w) c')
                     feat = feat + pos_embed
+
+                # encoder returns a feature map, but downstream expects vector
                 else:
                     feat = self.spatial_embeddings[safe_key](feat)
 
             x = self.post_encoders[safe_key](feat)
+
             if detach:
                 x = x.detach()
+
+            # encoder returns a token sequence, but downstream expects vector
+            if self.image_encoder.is_vit and not self.tokenize:
+                x = einops.rearrange(x, 'b s d -> b (s d)')
+
             feats.append(x)
 
         if self.tokenize:
-            return torch.stack(feats, dim=1)
+            return torch.cat(feats, dim=1).transpose(0, 1)
         else:
-            return torch.cat(feats, dim=-1)
+            return torch.cat(feats, dim=-1).unsqueeze(0)
 
     @property
     def output_dim(self) -> int:
@@ -740,7 +753,7 @@ class TransformerEncoder(nn.Module):
             config = TransformerConfig()
         self.config = config
 
-        self.model = ACTEncoder(ACTConfig(**asdict(config)))
+        self.model = ACTEncoder(_convert_config(config))
         self.cls_token = nn.Parameter(torch.randn(1, 1, self.config.dim_model))
         if config.dim_model != input_dim:
             self.input_proj = nn.Linear(input_dim, config.dim_model)
@@ -755,7 +768,7 @@ class TransformerEncoder(nn.Module):
         x = self.input_proj(x)
         B = x.size(0)
         cls = self.cls_token.expand(B, -1, -1)  # (B, 1, D)
-        tokens = torch.cat([x, cls], dim=1)  # (B, L+1, D)
+        tokens = torch.cat([cls, x], dim=1)  # (B, L+1, D)
         tokens = tokens.transpose(0, 1)  # (B, L+1, D) → (L+1, B, D)
         out = self.model(tokens)  # (L+1, B, D)
         cls_out = out[0]  # (B, D)
@@ -867,7 +880,7 @@ class CriticEnsemble(nn.Module):
         self.critics = nn.ModuleList(ensemble)
         self.stack_action = isinstance(ensemble[0].net, TransformerEncoder)
         if self.stack_action:
-            self.action_proj = nn.Linear(ensemble[0].action_dim, encoder.output_shape[-1])
+            self.action_proj = nn.Linear(ensemble[0].action_dim, encoder.output_dim)
 
     def forward(
         self,
@@ -887,8 +900,8 @@ class CriticEnsemble(nn.Module):
         obs_enc = self.encoder(observations, cache=observation_features)
 
         if self.stack_action:
-            actions = self.action_proj(actions)
-            inputs = torch.stack([obs_enc, actions], dim=1)
+            actions = self.action_proj(actions).unsqueeze(1)
+            inputs = torch.cat([obs_enc, actions], dim=1)
         else:
             inputs = torch.cat([obs_enc, actions], dim=-1)
 
@@ -944,7 +957,7 @@ class TransformerDecoder(nn.Module):
             config = TransformerConfig()
         self.config = config
 
-        self.model = ACTDecoder(ACTConfig(**asdict(config)))
+        self.model = ACTDecoder(_convert_config(config))
 
         if config.temporal_ensemble_coeff is not None:
             self.temporal_ensembler = TemporalEnsembler(config.temporal_ensemble_coeff, config.chunk_size)
@@ -967,20 +980,43 @@ class TransformerDecoder(nn.Module):
         else:
             self.action_queue = deque([], maxlen=self.config.n_action_steps)
 
-    def forward(self, encoder_out):
-        B = encoder_out.shape[1]
+    def forward(self, encoder_out, return_chunk: bool = False):
+        B = encoder_out.shape[0]
+        encoder_embed = self.input_proj(encoder_out)
 
         decoder_in = torch.zeros(
             (self.config.chunk_size, B, self.config.dim_model),
             dtype=encoder_out.dtype,
             device=encoder_out.device,
         )
-        decoder_out = self.decoder(
+        decoder_out = self.model(
             decoder_in,
-            encoder_out,
+            encoder_embed.transpose(0, 1),
             decoder_pos_embed=self.decoder_pos_embed.weight.unsqueeze(1),
         )
-        return decoder_out
+
+        if return_chunk:
+            return decoder_out.transpose(0, 1)
+        else:
+            return decoder_out[0, :, :]
+
+    def select_action(self, batch: dict[str, Tensor]) -> Tensor:
+        # If we are doing temporal ensembling, do online updates where we keep track of the number of actions
+        # we are ensembling over.
+        if self.config.temporal_ensemble_coeff is not None:
+            actions = self.forward(batch, return_chunk=True)  # (batch_size, chunk_size, action_dim)
+            action = self.temporal_ensembler.update(actions)
+            return action
+
+        # Action queue logic for n_action_steps > 1. When the action_queue is depleted, populate it by
+        # querying the policy.
+        if len(self.action_queue) == 0:
+            actions = self.forward(batch, return_chunk=True)[:, :self.config.n_action_steps]
+
+            # `self.forward` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
+            # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
+            self.action_queue.extend(actions.transpose(0, 1))
+        return self.action_queue.popleft()
 
 
 class Policy(nn.Module):
@@ -999,7 +1035,7 @@ class Policy(nn.Module):
     ):
         super().__init__()
         self.encoder: IQLObservationEncoder = encoder
-        self.net, out_features = _build_actor_net(action_dim, input_dim, network_config)
+        self.net, out_features = _build_actor_net(input_dim, network_config)
         self.action_dim = action_dim
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
@@ -1026,7 +1062,7 @@ class Policy(nn.Module):
 
     def forward(
         self,
-        observations: torch.Tensor,
+        observations: dict[str, torch.Tensor],
         observation_features: torch.Tensor | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # We detach the encoder if it is shared to avoid backprop through it
@@ -1034,7 +1070,7 @@ class Policy(nn.Module):
         obs_enc = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
 
         # Get network outputs
-        outputs = self.network(obs_enc)
+        outputs = self.net(obs_enc)
         means = self.mean_layer(outputs)
 
         # Compute standard deviations
@@ -1055,6 +1091,18 @@ class Policy(nn.Module):
         log_probs = dist.log_prob(actions)
 
         return actions, log_probs, means
+
+    def select_action(self,
+        observations: dict[str, torch.Tensor],
+        observation_features: torch.Tensor | None = None,
+    ):
+        if isinstance(self.net, TransformerDecoder):
+            obs_enc = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
+            out_features = self.net.select_action(obs_enc)
+            actions = self.mean_layer(out_features)
+        else:
+            actions, _, _ = self.forward(observations, observation_features)
+        return actions
 
     def get_features(self, observations: torch.Tensor) -> torch.Tensor:
         """Get encoded features from observations"""
@@ -1134,7 +1182,7 @@ class PretrainedImageEncoder(nn.Module):
         self.backbone: AutoModel = AutoModel.from_pretrained(
             config.vision_encoder_name, trust_remote_code=True
         )
-        backbone_cfg = self.image_enc_layers.config
+        backbone_cfg = self.backbone.config
         self.is_vit = hasattr(backbone_cfg, "patch_size") or backbone_cfg.model_type.lower() in {"vit", "dinov2"}
 
         if self.is_vit:
@@ -1151,7 +1199,7 @@ class PretrainedImageEncoder(nn.Module):
                 raise ValueError("Unsupported vision encoder architecture, make sure you are using a CNN")
 
         # Setup learnable queries for cross-att
-        if self.is_vit and not self.config.use_cls_token:
+        if self.is_vit and not self.config.vit_use_cls_token:
             n_q = getattr(config, "vit_n_queries", 1)
             heads = getattr(config, "vit_attn_heads", 8)
             # (n_q, hidden_dim)
@@ -1181,19 +1229,20 @@ class PretrainedImageEncoder(nn.Module):
                 * "cross_att" → (B, C, 1, 1)
                 * "grid"      → (B, C, H', W')  (H'⋅W' = #patches)
         """
-        if not self.is_transformer:
-            # ------------------- CNN branch -------------------
+        # ------------------- CNN branch -------------------
+        if not self.is_vit:
             return self.image_enc_layers(x).last_hidden_state
 
         # ------------------- ViT / DINOv2 branch -------------------
         B = x.size(0)
         device = x.device
-        inputs = self.processor(images=x, return_tensors="pt").to(device)
+        #inputs = self.processor(images=x, return_tensors="pt").to(device)
+        inputs = {"pixel_values": x}
         seq = self.backbone(**inputs).last_hidden_state  # (B, 1+N, D)
 
         # CLS token
-        if self.config.use_cls_token:
-            pooled = seq[:, 0, :].unsqeeze(1)
+        if self.config.vit_use_cls_token:
+            pooled = seq[:, 0, :].unsqueeze(1)
         else:
             # Cross-att with learnable queries
             assert self.query_tokens is not None and self.cross_attn is not None
@@ -1367,7 +1416,7 @@ def _build_critic_net(input_dim: int, action_dim: int, network_config: NetworkCo
     return net, out_dim
 
 
-def _build_actor_net(input_dim: int, action_dim: int, network_config: NetworkConfig):
+def _build_actor_net(input_dim: int, network_config: NetworkConfig):
     if isinstance(network_config, MLPConfig):
         net = MLP(input_dim, network_config)
         out_dim = network_config.hidden_dims[-1]
@@ -1378,3 +1427,10 @@ def _build_actor_net(input_dim: int, action_dim: int, network_config: NetworkCon
         raise ValueError(f"Unknown 'network_config' {network_config}")
 
     return net, out_dim
+
+def _convert_config(config: TransformerConfig) -> ACTConfig:
+    config = asdict(config)
+    config["n_encoder_layers"] = config["n_layers"]
+    config["n_decoder_layers"] = config["n_layers"]
+    del config["n_layers"]
+    return ACTConfig(**config)

@@ -503,11 +503,7 @@ class PushCubeRobotEnvConfig(HILSerlRobotEnvConfig):
 
     def __post_init__(self):
         if self.mode == "record":
-            #self.wrapper.ee_action_space_params = None
             self.wrapper.crop_params_dict = None
-
-        #for cam in self.robot.cameras:
-        #    self.robot.cameras[cam].fps = self.fps
 
 
 @EnvConfig.register_subclass("maniskill_push")
@@ -611,3 +607,8 @@ class ManiskillEnvConfig(EnvConfig):
         env = SmoothActionWrapper(env, device=self.device)
         env = maniskill_wrapper.KeyboardControlWrapper(env, ax=[0, 1])
         return env
+
+
+@EnvConfig.register_subclass("mimicgen_coffee")
+class MimicGenEnvConfig:
+    pass

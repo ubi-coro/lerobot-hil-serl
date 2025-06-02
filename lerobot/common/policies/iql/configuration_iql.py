@@ -46,23 +46,26 @@ class NetworkConfig(draccus.ChoiceRegistry):
 
 
 @NetworkConfig.register_subclass("mlp")
+@dataclass
 class MLPConfig:
     hidden_dims: list[int] = field(default_factory=lambda: [256, 256])
-    activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.SiLU(),
+    activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.SiLU()
     dropout_rate: Optional[float] = None
     activate_final: bool = True
     final_activation: Callable[[torch.Tensor], torch.Tensor] | str | None = None
 
 @NetworkConfig.register_subclass("transformer")
+@dataclass
 class TransformerConfig:
     n_heads: int = 8
     n_layers: int = 1
     dim_model: int = 512
     dim_feedforward: int = 3200
     feedforward_activation: str = "relu"
-    dropout: float = 0.1,
+    dropout: float = 0.1
     pre_norm: bool = False
     chunk_size: int = 50
+    n_action_steps: int = 50
     temporal_ensemble_coeff: float | None = None
 
 
@@ -168,7 +171,7 @@ class IQLConfig(PreTrainedConfig):
     device: str = "cuda"
     storage_device: str = "cpu"
     # Set to "helper2424/resnet10" for hil serl
-    vision_encoder_name: str | None = "helper2424/resnet10"
+    vision_encoder_name: str | None = "facebook/dinov2-base"
     freeze_vision_encoder: bool = True
 
     vit_use_cls_token: bool = True
@@ -206,10 +209,10 @@ class IQLConfig(PreTrainedConfig):
     grad_clip_norm: float = 40.0
 
     # Network configuration
-    critic_network_config: NetworkConfig = field(default_factory=MLPConfig)
-    actor_network_config: NetworkConfig = field(default_factory=MLPConfig)
-    policy_kwargs: PolicyConfig = field(default_factory=PolicyConfig)
-    discrete_critic_network_config: NetworkConfig = field(default_factory=MLPConfig)
+    critic_network_config: NetworkConfig = field(default_factory=TransformerConfig)
+    actor_network_config: NetworkConfig = field(default_factory=TransformerConfig)
+    policy_config: PolicyConfig = field(default_factory=PolicyConfig)
+    discrete_critic_network_config: NetworkConfig = field(default_factory=TransformerConfig)
     actor_learner_config: ActorLearnerConfig = field(default_factory=ActorLearnerConfig)
     concurrency: ConcurrencyConfig = field(default_factory=ConcurrencyConfig)
 
