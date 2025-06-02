@@ -16,6 +16,7 @@
 # limitations under the License.
 
 import math
+from collections import deque
 from dataclasses import asdict
 from typing import Callable, List, Literal, Optional, Tuple
 
@@ -41,6 +42,8 @@ from lerobot.common.policies.iql.configuration_iql import IQLConfig, MLPConfig, 
 from lerobot.common.policies.utils import get_device_from_parameters
 
 DISCRETE_DIMENSION_INDEX = -1  # Gripper is always the last dimension
+
+# todo: temporal ensembler in top-lvl policy
 
 
 class IQLPolicy(PreTrainedPolicy):
@@ -90,8 +93,7 @@ class IQLPolicy(PreTrainedPolicy):
             # Cache and normalize image features
             observation_features = self.actor.encoder.get_cached_image_features(batch, normalize=True)
 
-
-        actions, _, _ = self.actor(batch, observation_features)
+        actions, _, _ = self.actor.select_action(batch, observation_features)
         actions = self.unnormalize_outputs({"action": actions})["action"]
         q_pred = self.critic_forward(batch, actions, use_target=False, observation_features=observation_features)
 
@@ -726,7 +728,6 @@ class IQLObservationEncoder(nn.Module):
         return self._out_shape[-1]
 
 
-
 class TransformerEncoder(nn.Module):
     def __init__(
         self,
@@ -739,26 +740,26 @@ class TransformerEncoder(nn.Module):
             config = TransformerConfig()
         self.config = config
 
-        self.model = ACTEncoder(_convert_config(self.config))
-        self.input_proj = nn.Linear(input_dim, config.dim_model)
+        self.model = ACTEncoder(ACTConfig(**asdict(config)))
         self.cls_token = nn.Parameter(torch.randn(1, 1, self.config.dim_model))
+        if config.dim_model != input_dim:
+            self.input_proj = nn.Linear(input_dim, config.dim_model)
+        else:
+            self.input_proj = nn.Identity()
+
+        for p in self.model.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
 
     def forward(self, x: Tensor):
         x = self.input_proj(x)
-        B = encoder_out.size(0)
+        B = x.size(0)
         cls = self.cls_token.expand(B, -1, -1)  # (B, 1, D)
         tokens = torch.cat([x, cls], dim=1)  # (B, L+1, D)
         tokens = tokens.transpose(0, 1)  # (B, L+1, D) → (L+1, B, D)
         out = self.model(tokens)  # (L+1, B, D)
         cls_out = out[0]  # (B, D)
         return cls_out
-
-
-
-
-class TransformerDecoder(nn.Module):
-    pass
-
 
 
 class MLP(nn.Module):
@@ -824,16 +825,17 @@ class CriticHead(nn.Module):
         self,
         input_dim: int,
         action_dim: int,
+        init_final: Optional[float] = None,
         network_config: NetworkConfig = MLPConfig
     ):
         super().__init__()
         self.action_dim = action_dim
         self.net, self.out_dim = _build_critic_net(input_dim, action_dim, network_config)
 
-        self.output_layer = nn.Linear(in_features=out_dim, out_features=1)
-        if network_config.init_final is not None:
-            nn.init.uniform_(self.output_layer.weight, -network_config.init_final, network_config.init_final)
-            nn.init.uniform_(self.output_layer.bias, -network_config.init_final, network_config.init_final)
+        self.output_layer = nn.Linear(in_features=self.out_dim, out_features=1)
+        if init_final is not None:
+            nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
+            nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
         else:
             orthogonal_init()(self.output_layer.weight)
 
@@ -849,7 +851,6 @@ class CriticEnsemble(nn.Module):
         encoder (SACObservationEncoder): encoder for observations.
         ensemble (List[CriticHead]): list of critic heads.
         output_normalization (nn.Module): normalization layer for actions.
-        init_final (Optional[float]): optional initializer scale for final layers.
 
     Forward returns a tensor of shape (num_critics, batch_size) containing Q-values.
     """
@@ -858,12 +859,10 @@ class CriticEnsemble(nn.Module):
         self,
         encoder: IQLObservationEncoder,
         ensemble: List[CriticHead],
-        output_normalization: nn.Module,
-        init_final: Optional[float] = None,
+        output_normalization: nn.Module
     ):
         super().__init__()
         self.encoder = encoder
-        self.init_final = init_final
         self.output_normalization = output_normalization
         self.critics = nn.ModuleList(ensemble)
         self.stack_action = isinstance(ensemble[0].net, TransformerEncoder)
@@ -909,6 +908,7 @@ class DiscreteCritic(nn.Module):
         encoder: nn.Module,
         input_dim: int,
         action_dim: int = 3,
+        init_final: Optional[float] = None,
         network_config: NetworkConfig = MLPConfig
     ):
         super().__init__()
@@ -916,8 +916,8 @@ class DiscreteCritic(nn.Module):
         self.action_dim = action_dim
         self.net, self.out_dim = _build_critic_net(input_dim, 0, network_config)
 
-        self.output_layer = nn.Linear(in_features=out_dim, out_features=self.action_dim)
-        if network_config.init_final is not None:
+        self.output_layer = nn.Linear(in_features=self.out_dim, out_features=self.action_dim)
+        if init_final is not None:
             nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
             nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
         else:
@@ -932,31 +932,74 @@ class DiscreteCritic(nn.Module):
         return self.output_layer(self.net(obs_enc))
 
 
+class TransformerDecoder(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        config: Optional[TransformerConfig] = None
+    ):
+        super().__init__()
+
+        if config is None:
+            config = TransformerConfig()
+        self.config = config
+
+        self.model = ACTDecoder(ACTConfig(**asdict(config)))
+
+        if config.temporal_ensemble_coeff is not None:
+            self.temporal_ensembler = TemporalEnsembler(config.temporal_ensemble_coeff, config.chunk_size)
+        else:
+            self.action_queue = deque([], maxlen=config.n_action_steps)
+
+        self.decoder_pos_embed = nn.Embedding(config.chunk_size, config.dim_model)
+        if config.dim_model != input_dim:
+            self.input_proj = nn.Linear(input_dim, config.dim_model)
+        else:
+            self.input_proj = nn.Identity()
+
+        for p in self.model.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def reset(self):
+        if self.config.temporal_ensemble_coeff is not None:
+            self.temporal_ensembler.reset()
+        else:
+            self.action_queue = deque([], maxlen=self.config.n_action_steps)
+
+    def forward(self, encoder_out):
+        B = encoder_out.shape[1]
+
+        decoder_in = torch.zeros(
+            (self.config.chunk_size, B, self.config.dim_model),
+            dtype=encoder_out.dtype,
+            device=encoder_out.device,
+        )
+        decoder_out = self.decoder(
+            decoder_in,
+            encoder_out,
+            decoder_pos_embed=self.decoder_pos_embed.weight.unsqueeze(1),
+        )
+        return decoder_out
+
+
 class Policy(nn.Module):
     def __init__(
         self,
         encoder: IQLObservationEncoder,
         input_dim: int,
         action_dim: int,
-        network_config: NetworkConfig = MLPConfig,
         log_std_min: float = -5,
         log_std_max: float = 2,
         fixed_std: Optional[torch.Tensor] = None,
         use_tanh_squash: bool = False,
         encoder_is_shared: bool = False,
+        init_final: Optional[float] = None,
+        network_config: NetworkConfig = MLPConfig
     ):
-
-        self.actor = Policy(
-            encoder=self.encoder_actor,
-            input_dim=self.encoder_actor.output_shape[-1],
-            action_dim=continuous_action_dim,
-            network_config=self.config.actor_network_config,
-            **asdict(self.config.policy_kwargs)
-        )
-
         super().__init__()
         self.encoder: IQLObservationEncoder = encoder
-        self.net, out_features = network
+        self.net, out_features = _build_actor_net(action_dim, input_dim, network_config)
         self.action_dim = action_dim
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
@@ -964,11 +1007,6 @@ class Policy(nn.Module):
         self.use_tanh_squash = use_tanh_squash
         self.encoder_is_shared = encoder_is_shared
 
-        # Find the last Linear layer's output dimension
-        for layer in reversed(network.net):
-            if isinstance(layer, nn.Linear):
-                out_features = layer.out_features
-                break
         # Mean layer
         self.mean_layer = nn.Linear(out_features, action_dim)
         if init_final is not None:
@@ -1296,19 +1334,6 @@ def _convert_normalization_params_to_tensor(normalization_params: dict) -> dict:
                 converted_params[outer_key][key] = converted_params[outer_key][key].view(3, 1, 1)
 
     return converted_params
-
-
-def _convert_config(config: TransformerConfig) -> ACTConfig:
-    return ACTConfig(
-        n_heads=config.n_heads,
-        n_encoder_layers=config.n_layers,
-        n_decoder_layers=config.n_layers,
-        dim_model=config.dim_model,
-        dim_feedforward=config.dim_feedforward,
-        feedforward_activation=config.feedforward_activation,
-        dropout=config.dropout,
-        pre_norm=config.pre_norm
-    )
 
 
 def _remove_layernorm(decoder: ACTDecoder) -> None:

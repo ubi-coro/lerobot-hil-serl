@@ -16,8 +16,11 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
+from typing import Optional, Callable
 
 import draccus
+import torch
+from torch import nn
 
 from lerobot.common.optim.optimizers import MultiAdamConfig
 from lerobot.configs.policies import PreTrainedConfig
@@ -59,6 +62,8 @@ class TransformerConfig:
     feedforward_activation: str = "relu"
     dropout: float = 0.1,
     pre_norm: bool = False
+    chunk_size: int = 50
+    temporal_ensemble_coeff: float | None = None
 
 
 @dataclass
