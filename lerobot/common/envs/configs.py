@@ -22,7 +22,7 @@ import gymnasium as gym
 import numpy as np
 
 from lerobot.common.constants import ACTION, OBS_ENV, OBS_IMAGE, OBS_IMAGES, OBS_ROBOT
-from lerobot.common.envs.robot_env import RobotEnv
+from lerobot.common.envs.manipulator_env import RobotEnv
 from lerobot.common.envs.wrapper.ee import EEObservationWrapper, EEActionWrapper
 from lerobot.common.envs.wrapper.gripper import GripperPenaltyWrapper, GripperActionWrapper
 from lerobot.common.envs.wrapper.hilserl import (
@@ -611,3 +611,9 @@ class ManiskillEnvConfig(EnvConfig):
         env = SmoothActionWrapper(env, device=self.device)
         env = maniskill_wrapper.KeyboardControlWrapper(env, ax=[0, 1])
         return env
+
+
+@EnvConfig.register_subclass("ur")
+@dataclass
+class UREnvConfig(EnvConfig):
+    pass

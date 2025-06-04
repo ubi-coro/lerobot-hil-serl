@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import abc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from multiprocessing.managers import SharedMemoryManager
+from typing import Optional
 
 import draccus
 
@@ -39,3 +41,59 @@ class FeetechMotorsBusConfig(MotorsBusConfig):
     port: str
     motors: dict[str, tuple[int, str]]
     mock: bool = False
+
+
+@MotorsBusConfig.register_subclass("ur")
+@dataclass
+class URArmConfig:
+    """
+    frequency: CB2=125, UR3e=500
+    lookahead_time: [0.03, 0.2]s smoothens the trajectory with this lookahead time
+    gain: [100, 2000] proportional gain for following target position
+    max_pos_speed: m/s
+    max_rot_speed: rad/s
+    tcp_offset_pose: 6d pose
+    payload_mass: float
+    payload_cog: 3d position, center of gravity
+    soft_real_time: enables round-robin scheduling and real-time priority
+        requires running scripts/rtprio_setup.sh before hand.
+
+    """
+    robot_ip: str
+    shm_manager: Optional[SharedMemoryManager] = None
+    gripper_ip: Optional[str] = None
+    gripper_port: int = 1000
+    frequency: float = 500.0
+    soft_real_time: bool = False
+    launch_timeout: float = 3.0
+    verbose: bool = False
+    receive_keys: Optional[list[str]] = None
+    tcp_offset_pose: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.12, 0.0, 0.0, 0.0])
+
+    # controller parameters
+    lookahead: float = 0.1
+    gain: int = 300
+    get_max_k: int = 128
+    payload_mass: Optional[float] = None
+    payload_cog: Optional[float] = None
+
+    # safety
+    max_pos_speed = 0.25
+    max_rot_speed = 0.6
+    joints_init: Optional[float] = None
+    joints_init_speed: Optional[float] = 1.05
+    
+    # latency
+    obs_latency: float = 0.0001
+    action_latency: float = 0.1
+    gripper_latency: float = 0.1
+
+
+
+
+
+
+
+
+
+

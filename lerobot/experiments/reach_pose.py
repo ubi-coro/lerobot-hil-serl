@@ -81,7 +81,7 @@ class RealReachPoseEnvConfig(HILSerlRobotEnvConfig):
 
     def make(self):
         import lerobot.common.envs.wrapper.hilserl as wrapper
-        from lerobot.common.envs.robot_env import RobotEnv
+        from lerobot.common.envs.manipulator_env import RobotEnv
         from lerobot.common.envs.wrapper.smoothing import SmoothActionWrapper
         from lerobot.common.robot_devices.robots.utils import make_robot_from_config
 

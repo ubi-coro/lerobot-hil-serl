@@ -14,7 +14,7 @@
 
 import abc
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Sequence, Optional
 
 import draccus
 
@@ -26,7 +26,7 @@ from lerobot.common.robot_devices.cameras.configs import (
 from lerobot.common.robot_devices.motors.configs import (
     DynamixelMotorsBusConfig,
     FeetechMotorsBusConfig,
-    MotorsBusConfig,
+    MotorsBusConfig, URArmConfig,
 )
 from lerobot.common.robot_devices.sensors.config import BotaConfig
 
@@ -585,3 +585,14 @@ class LeKiwiRobotConfig(RobotConfig):
     )
 
     mock: bool = False
+
+
+@RobotConfig.register_subclass("ur")
+@dataclass
+class URConfig(RobotConfig):
+    follower_arms: dict[str, URArmConfig]
+    leader_arms: dict[str, DynamixelMotorsBusConfig]
+
+    control_mode: int
+    control_frequency: float = 20.0
+    cameras: dict[str, CameraConfig] = field(default_factory=dict)

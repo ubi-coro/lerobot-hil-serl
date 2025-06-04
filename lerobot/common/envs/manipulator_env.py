@@ -74,7 +74,7 @@ class RobotEnv(gym.Env):
             low=0,
             high=10,
             shape=example_obs["observation.state"].shape,
-            dtype=np.float32,
+            dtype=np.float32
         )
 
         self.observation_space = gym.spaces.Dict(observation_spaces)

@@ -560,3 +560,6 @@ class GamepadControlWrapper(gym.Wrapper):
         # Call the parent close method
         return self.env.close()
 
+
+class SpacemouseControlWrapper(gym.Wrapper):
+    pass
