@@ -61,25 +61,30 @@ class URArmConfig:
     """
     robot_ip: str
     shm_manager: Optional[SharedMemoryManager] = None
-    gripper_ip: Optional[str] = None
-    gripper_port: int = 1000
     frequency: float = 500.0
     soft_real_time: bool = False
+    rt_core: int = 3
     launch_timeout: float = 3.0
     verbose: bool = False
     receive_keys: Optional[list[str]] = None
-    tcp_offset_pose: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.12, 0.0, 0.0, 0.0])
+    mock: bool = False
+
+    # gripper
+    gripper_ip: Optional[str] = None
+    gripper_port: int = 1000
+    gripper_frequency: float = 60.0
 
     # controller parameters
-    lookahead: float = 0.1
+    lookahead_time: float = 0.1
     gain: int = 300
     get_max_k: int = 128
     payload_mass: Optional[float] = None
     payload_cog: Optional[float] = None
+    tcp_offset_pose: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.12, 0.0, 0.0, 0.0])
 
     # safety
-    max_pos_speed = 0.25
-    max_rot_speed = 0.6
+    max_pos_speed: float = 0.25
+    max_rot_speed: float = 0.6
     joints_init: Optional[float] = None
     joints_init_speed: Optional[float] = 1.05
     

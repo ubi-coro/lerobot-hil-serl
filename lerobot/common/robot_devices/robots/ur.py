@@ -30,6 +30,7 @@ import torch
 
 from lerobot.common.robot_devices.cameras.utils import make_cameras_from_configs
 from lerobot.common.robot_devices.motors.dynamixel import TorqueMode
+from lerobot.common.robot_devices.motors.robotiq2f_controller import Robotiq2FController
 from lerobot.common.robot_devices.motors.rtde_interpolation_controller import RTDEInterpolationController
 from lerobot.common.robot_devices.motors.utils import MotorsBus, make_motors_buses_from_configs
 from lerobot.common.robot_devices.robots.configs import URConfig
@@ -51,11 +52,21 @@ class UR:
         self.shm.start()
 
         # -------------------------- URs ------------------------- #
-        self.follower_arms = []
-        for leader_config in self.config.follower_arms:
+        self.robots = {}
+        self.grippers = {}
+        for name, leader_config in self.config.follower_arms.items():
             leader_config.shm_manager = self.shm
             robot = RTDEInterpolationController(leader_config)
-            self.follower_arms.append(robot)
+            self.robots[name] = robot
+
+            if leader_config.gripper_ip is not None:
+                gripper = Robotiq2FController(
+                    shm_manager=leader_config.shm_manager,
+                    ip=leader_config.gripper_ip,
+                    port=leader_config.gripper_port,
+                    frequency=leader_config.gripper_frequency
+                )
+                self.grippers[name] = gripper
 
         # -------------------------- dynamixel & cameras ------------------------- #
         self.leader_arms = make_motors_buses_from_configs(self.config.leader_arms)
@@ -111,7 +122,7 @@ class UR:
     @property
     def available_arms(self):
         available_arms = []
-        for name in self.follower_arms:
+        for name in self.robots:
             arm_id = get_arm_id(name, "follower")
             available_arms.append(arm_id)
         for name in self.leader_arms:
@@ -125,28 +136,29 @@ class UR:
                 "ManipulatorRobot is already connected. Do not run `robot.connect()` twice."
             )
 
-        if not self.leader_arms and not self.follower_arms and not self.cameras:
+        if not self.leader_arms and not self.robots and not self.cameras:
             raise ValueError(
                 "ManipulatorRobot doesn't have any device to connect. See example of usage in docstring of the class."
             )
 
         # Connect the arms
-        for name in self.follower_arms:
+        for name in self.robots:
             print(f"Connecting {name} follower arm.")
-            self.follower_arms[name].start()
+            self.robots[name].start()
+        for name in self.grippers:
+            print(f"Connecting {name} follower gripper.")
+            self.grippers[name].start()
         for name in self.leader_arms:
             print(f"Connecting {name} leader arm.")
             self.leader_arms[name].connect()
 
         self.activate_calibration()
 
-        for name in self.follower_arms:
-            print(f"Activating torque on {name} follower arm.")
-            self.follower_arms[name].write("Torque_Enable", 1)
-
-        # Check both arms can be read
-        for name in self.follower_arms:
-            self.follower_arms[name].get_state()
+        # Check if all components can be read
+        for name in self.robots:
+            self.robots[name].get_state()
+        for name in self.grippers:
+            self.grippers[name].get_state()
         for name in self.leader_arms:
             self.leader_arms[name].read("Present_Position")
 
@@ -202,55 +214,7 @@ class UR:
     def teleop_step(
         self, record_data=False
     ) -> None | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-        if not self.is_connected:
-            raise RobotDeviceNotConnectedError(
-                "ManipulatorRobot is not connected. You need to run `robot.connect()`."
-            )
-
-        # Prepare to assign the position of the leader to the follower
-        leader_pos = {}
-        for name in self.leader_arms:
-            before_lread_t = time.perf_counter()
-            leader_pos[name] = self.leader_arms[name].read("Present_Position")
-            leader_pos[name] = torch.from_numpy(leader_pos[name])
-            self.logs[f"read_leader_{name}_pos_dt_s"] = time.perf_counter() - before_lread_t
-
-        # Send goal position to the follower
-        follower_goal_pos = {}
-        for name in self.follower_arms:
-            before_fwrite_t = time.perf_counter()
-            goal_pos = leader_pos[name]
-
-            # Cap goal position when too far away from present position.
-            # Slower fps expected due to reading from the follower.
-            if self.config.max_relative_target is not None:
-                present_pos = self.follower_arms[name].read("Present_Position")
-                present_pos = torch.from_numpy(present_pos)
-                goal_pos = ensure_safe_goal_position(goal_pos, present_pos, self.config.max_relative_target)
-
-            # Used when record_data=True
-            follower_goal_pos[name] = goal_pos
-
-            goal_pos = goal_pos.numpy().astype(np.float32)
-            self.follower_arms[name].write("Goal_Position", goal_pos)
-            self.logs[f"write_follower_{name}_goal_pos_dt_s"] = time.perf_counter() - before_fwrite_t
-
-        # Early exit when recording data is not requested
-        if not record_data:
-            return
-
-        # Create action by concatenating follower goal position
-        action = []
-        for name in self.follower_arms:
-            if name in follower_goal_pos:
-                action.append(follower_goal_pos[name])
-        action = torch.cat(action)
-
-        # Populate output dictionnaries
-        action_dict = {}
-        action_dict["action"] = action
-        obs_dict = self.capture_observation()
-        return obs_dict, action_dict
+        pass
 
     def capture_observation(self):
         """
@@ -265,61 +229,26 @@ class UR:
                 "ManipulatorRobot is not connected. You need to run `robot.connect()`."
             )
 
-        # Read follower position
-        follower_pos = {}
-        #follower_vel = {}
-        for name in self.follower_arms:
-            before_fread_t = time.perf_counter()
-            follower_pos[name] = self.follower_arms[name].read("Present_Position")
-            follower_pos[name] = torch.from_numpy(follower_pos[name])
-            self.logs[f"read_follower_{name}_pos_dt_s"] = (
-                time.perf_counter() - before_fread_t
-            )
-            #follower_vel[name] = self.follower_arms[name].read("Present_Velocity")
-            #follower_vel[name] = torch.from_numpy(follower_vel[name])
-            #self.logs[f"read_follower_{name}_vel_dt_s"] = (
-            #    time.perf_counter() - before_fread_t
-            #)
+        obs = dict()
 
-        # Create state by concatenating follower current position
-        state = []
-        #vel = []
-        for name in self.follower_arms:
-            if name in follower_pos:
-                state.append(follower_pos[name])
-                #vel.append(follower_vel[name])
-        state = torch.cat(state)
-        #vel = torch.cat(vel)
+        # both have more than n_obs_steps data
+        for name, robot in self.robots.items():
+            robot_data = robot.get_state()
 
-        # Capture images from cameras
-        images = {}
-        for name in self.cameras:
-            before_camread_t = time.perf_counter()
-            images[name] = self.cameras[name].async_read()
-            images[name] = torch.from_numpy(images[name])
-            self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs["delta_timestamp_s"]
-            self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
+            obs[f'observation.{name}_eef_pos'] = robot_data['ActualTCPPose']
+            obs[f'observation.{name}_eef_speed'] = robot_data['ActualTCPSpeed']
+            obs[f'observation.{name}_eef_force'] = robot_data['ActualTCPForce']
+            obs[f'observation.{name}_q_pos'] = robot_data['ActualQ']
+            obs[f'observation.{name}_q_speed'] = robot_data['ActualQd']
 
-        # Populate output dictionaries and format to pytorch
-        obs_dict = {}
-        obs_dict["observation.state"] = state
-        #obs_dict["observation.joint_vel"] = vel
-        for name in self.cameras:
-            obs_dict[f"observation.images.{name}"] = images[name]
+        for name, gripper in self.grippers.items():
+            gripper_data = gripper.get_state()
 
-        # Read forces and torques
-        if self.has_bota:
-            force = []
-            torque = []
-            for name in self.botas:
-                data = self.botas[name].read()
-                force.append(torch.from_numpy(data["force"]))
-                torque.append(torch.from_numpy(data["torque"]))
+            obs[f'observation.{name}_eef_pos'] = gripper_data['ActualTCPPose']
 
-            obs_dict["observation.tcp_force"] = torch.cat(force)
-            obs_dict["observation.tcp_torque"] = torch.cat(torque)
+        # todo
 
-        return obs_dict
+        return obs
 
     def send_action(self, action: torch.Tensor) -> torch.Tensor:
         """Command the follower arms to move to a target joint configuration.
@@ -336,34 +265,7 @@ class UR:
                 "ManipulatorRobot is not connected. You need to run `robot.connect()`."
             )
 
-        from_idx = 0
-        to_idx = 0
-        action_sent = []
-        for name in self.follower_arms:
-            # Get goal position of each follower arm by splitting the action vector
-            to_idx += len(self.follower_arms[name].motor_names)
-            goal_pos = action[from_idx:to_idx]
-            from_idx = to_idx
-
-            # Cap goal position when too far away from present position.
-            # Slower fps expected due to reading from the follower.
-            if self.config.max_relative_target is not None:
-                present_pos = self.follower_arms[name].read("Present_Position")
-                present_pos = torch.from_numpy(present_pos)
-                goal_pos = ensure_safe_goal_position(goal_pos, present_pos, self.config.max_relative_target)
-
-            # Save tensor to concat and return
-            action_sent.append(goal_pos)
-
-            # Send goal position to each follower
-            goal_pos = goal_pos.numpy().astype(np.float32)
-            self.follower_arms[name].write("Goal_Position", goal_pos)
-
-        return torch.cat(action_sent)
-
-    def print_logs(self):
-        pass
-        # TODO(aliberts): move robot-specific logs logic here
+        # todo
 
     def disconnect(self):
         if not self.is_connected:
@@ -371,14 +273,7 @@ class UR:
                 "ManipulatorRobot is not connected. You need to run `robot.connect()` before disconnecting."
             )
 
-        for name in self.follower_arms:
-            self.follower_arms[name].disconnect()
-
-        for name in self.leader_arms:
-            self.leader_arms[name].disconnect()
-
-        for name in self.cameras:
-            self.cameras[name].disconnect()
+        # todo
 
         self.is_connected = False
 

@@ -6,6 +6,7 @@ import multiprocessing as mp
 from multiprocessing.managers import SharedMemoryManager
 from typing import Union
 
+import psutil
 import scipy.interpolate as si
 import scipy.spatial.transform as st
 import numpy as np
@@ -69,6 +70,7 @@ class RTDEInterpolationController(mp.Process):
         self.joints_init = config.joints_init
         self.joints_init_speed = config.joints_init_speed
         self.soft_real_time = config.soft_real_time
+        self.rt_core = config.rt_core
         self.verbose = config.verbose
 
         # build input queue
@@ -89,6 +91,7 @@ class RTDEInterpolationController(mp.Process):
             config.receive_keys = [
                 'ActualTCPPose',
                 'ActualTCPSpeed',
+                'ActualTCPForce',
                 'ActualQ',
                 'ActualQd',
 
@@ -193,8 +196,9 @@ class RTDEInterpolationController(mp.Process):
     def run(self):
         # enable soft real-time
         if self.soft_real_time:
-            os.sched_setscheduler(
-                0, os.SCHED_RR, os.sched_param(20))
+            os.sched_setaffinity(0, {self.rt_core})
+            os.sched_setscheduler(0, os.SCHED_RR, os.sched_param(20))
+            psutil.Process().nice(-20)  # lock memory, avoid swap
 
         # start rtde
         robot_ip = self.robot_ip

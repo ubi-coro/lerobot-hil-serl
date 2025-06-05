@@ -76,14 +76,14 @@ class Robotiq2FController(mp.Process):
         # inbound width command (metres) – buffer 64 commands
         self._in_q = SharedMemoryQueue.create_from_examples(
             shm_manager,
-            examples={"width_m": np.zeros(1, dtype=np.float32)},
+            examples={"width_mm": np.zeros(1, dtype=np.float32)},
             buffer_size=64,
         )
         # outbound state (width_m, current, status) every poll cycle
         self._out_rb = SharedMemoryRingBuffer.create_from_examples(
             shm_manager,
             examples={
-                "width_m": np.zeros(1, dtype=np.float32),
+                "width_mm": np.zeros(1, dtype=np.float32),
                 "current": np.zeros(1, dtype=np.float32),
                 "status": np.zeros(1, dtype=np.float32),
                 "timestamp": np.zeros(1, dtype=np.float64),
@@ -128,17 +128,20 @@ class Robotiq2FController(mp.Process):
         self.stop()
 
     # ========= command methods ============
-
-    def schedule_width(self, width_m: float):
+    def schedule_waypoint(self, width_m: float):
         self._in_q.put({"width_m": np.array([width_m], dtype=np.float32)})
 
-    def get_state(self, k: int | None = None):
+    # ========= receive APIs =============
+    def get_state(self, k=None, out=None):
         if k is None:
-            return self._out_rb.get()
-        return self._out_rb.get_last_k(k)
+            return self._out_rb.get(out=out)
+        else:
+            return self._out_rb.get_last_k(k=k, out=out)
+
+    def get_all_state(self):
+        return self._out_rb.get_all()
 
     # --------------- process main loop ------------------------------
-
     def run(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -155,8 +158,8 @@ class Robotiq2FController(mp.Process):
             # 1) check for new target widths --------------------------------
             try:
                 cmds = self._in_q.get_all()
-                if len(cmds["width_m"]):
-                    width_m = float(cmds["width_m"][-1][0])
+                if len(cmds["width_mm"]):
+                    width_m = float(cmds["width_mm"][-1][0])
                     width_m = np.clip(width_m, 0.0, 0.085)
                     target_pos_steps = int((0.085 - width_m) / 0.085 * 255)
                     payload = _reg_write_payload(target_pos_steps)
@@ -174,10 +177,10 @@ class Robotiq2FController(mp.Process):
                 bytecnt = raw[8]
                 data = raw[9 : 9 + bytecnt]
                 gOBJ, gSTA, gPOS, gCUR, gFLT = data[1], data[0], data[3], data[4], data[5]
-                width_m = 0.085 * (255 - gPOS) / 255.0
+                width_mm = 85.0 * (255 - gPOS) / 255.0
                 self._out_rb.put(
                     {
-                        "width_m": [width_m],
+                        "width_mm": [width_mm],
                         "current": [gCUR],
                         "status": [gSTA << 8 | gFLT],
                         "timestamp": [time.time()],
