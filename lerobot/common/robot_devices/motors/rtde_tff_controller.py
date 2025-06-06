@@ -226,7 +226,7 @@ class RTDETFFController(mp.Process):
         if self.config.soft_real_time:
             os.sched_setaffinity(0, {self.config.rt_core})
             os.sched_setscheduler(0, os.SCHED_RR, os.sched_param(20))
-            # no need for psutil().nice(-20) if not root
+            # no need for psutil().nice(-priority) if not root
 
         # 2) Start RTDEControl & RTDEReceive
         if self.config.mock:
@@ -236,24 +236,10 @@ class RTDETFFController(mp.Process):
             from rtde_receive import RTDEReceiveInterface
 
         robot_ip = self.config.robot_ip
-        rtde_c = RTDEControlInterface(robot_ip, self.config.frequency)
+        frequency = self.config.frequency
+        dt = 1.0 / frequency
+        rtde_c = RTDEControlInterface(robot_ip, frequency)
         rtde_r = RTDEReceiveInterface(robot_ip)
-
-        # R_WF: world ← task rotation (3×3)
-        R_WF = lambda: R.from_matrix(self.T_WF[:3, :3])
-        # Task‐frame → world wrench/velocity
-        #   If v_task = [v_x, v_y, v_z, ωx, ωy, ωz] in task frame, then
-        #     v_world_trans = R_WF.apply(v_task_trans)
-        #     v_world_rot   = R_WF.apply(v_task_rot)
-        #to_world = lambda v6: np.hstack((
-        #    R_WF().apply(v6[:3]),
-        #    R_WF().apply(v6[3:])
-        #))
-        # World → task:  invert the rotation
-        #to_task = lambda v6: np.hstack((
-        #    R_WF().inv().apply(v6[:3]),
-        #    R_WF().inv().apply(v6[3:])
-        #))
 
         try:
             if self.config.verbose:
@@ -273,19 +259,14 @@ class RTDETFFController(mp.Process):
                 assert rtde_c.moveJ(self.config.joints_init, self.config.joints_init_speed, 1.4)
 
             # 5) Enter impedance loop via forceMode
-            frequency = self.config.frequency
-            dt = 1.0 / frequency
 
-            # (a) Read the robot’s current pose & twist in world, and convert into task frame:
+            # 5.1) Initialize target pose = current task pose (so we start from zero error)
             pose_W = np.array(rtde_r.getActualTCPPose())  # [x, y, z, Rx, Ry, Rz] in world
-            vel_W = np.array(rtde_r.getActualTCPSpeed())  # [vx, vy, vz, ωx, ωy, ωz] in world
-
-            # (b) Initialize TARGET‐POSE = current task pose (so we start from zero error)
             x_cmd = pose_W.copy()
             self.mode = np.array([AxisMode.POS] * 6, dtype=np.int8)
             self.target = x_cmd.copy()  # in task frame
 
-            # (c) Put the robot into 6D forceMode (zero‐wrench to begin)
+            # 5.2) Put the robot into 6D forceMode (zero‐wrench to begin)
             rtde_c.forceMode(
                 to_sixvec(self.T_WF),
                 [1, 1, 1, 0, 0, 0],
@@ -295,26 +276,27 @@ class RTDETFFController(mp.Process):
             )
             self.force_on = True
 
-            # (d) Mark the loop as “ready” from the first successful iteration
+            # 5.3) Mark the loop as “ready” from the first successful iteration
             iter_idx = 0
             keep_running = True
 
-            # Prepare for jitter logging
+            # 5.4) Prepare for jitter logging
             hist = collections.deque(maxlen=1000)
             t_prev = time.monotonic()
             log_interval = 1.0
             next_log_time = t_prev + log_interval
 
+            # 6) Start main control loop
             while keep_running:
                 t_loop_start = rtde_c.initPeriod()
 
-                # Jitter measurement
+                # 6.1) Jitter measurement
                 t_now = time.monotonic()
                 dt_loop = t_now - t_prev
                 hist.append(dt_loop)
                 t_prev = t_now
 
-                # 6.1) READ ANY PENDING TF_SET / STOP COMMANDS
+                # 6.2) read any pending commands
                 try:
                     msgs = self.cmd_queue.get_all()
                     n_cmd = len(msgs['cmd'])
@@ -369,70 +351,95 @@ class RTDETFFController(mp.Process):
                 if not keep_running:
                     break
 
-                # 6.2) READ CURRENT ROBOT STATE (WORLD → TASK)
+                # 6.3) read current state (world)
                 pose_W = np.array(rtde_r.getActualTCPPose())  # [x, y, z, Rx, Ry, Rz]
                 vel_W = np.array(rtde_r.getActualTCPSpeed())  # [vx, vy, vz, ωx, ωy, ωz]
 
-                # 6.3) UPDATE “virtual desired pose” x_cmd based on mode & target
-                for i in range(6):
+                # 6.4) update virtual position
+
+                # --- translation ---
+                for i in range(3):
                     mode_i = AxisMode(self.mode[i])
                     if mode_i == AxisMode.POS:
                         x_cmd[i] = self.target[i]
                     elif mode_i == AxisMode.IMPEDANCE_VEL:
                         x_cmd[i] += float(self.target[i]) * dt
-                    elif mode_i == AxisMode.FORCE or mode_i == AxisMode.PURE_VEL:
-                        # we do NOT move the virtual target: we only use target[i] as a desired wrench
-                        pass
+                    elif mode_i == AxisMode.PURE_VEL or mode_i == AxisMode.FORCE:
+                        pass  # we do not track a virtual position in these modes
 
-                # 6.4) COMPUTE THE 6×1 IMPEDANCE WRENCH IN TASK FRAME
-                F_task = np.zeros(6, dtype=np.float64)
-                errors = np.zeros(6, dtype=np.float64)
-                for i in range(6):
+                # --- rotation (SO(3) integration) ---
+                for i in range(3, 6):
                     mode_i = AxisMode(self.mode[i])
                     if mode_i == AxisMode.POS:
-                        pos_err = x_cmd[i] - pose_W[i]
-                        errors[i] = pos_err
-                        F_task[i] = self.kp[i] * pos_err + self.kd[i] * -vel_W[i]
+                        x_cmd[i] = self.target[i]
                     elif mode_i == AxisMode.IMPEDANCE_VEL:
-                        pos_err = x_cmd[i] - pose_W[i]
-                        vel_err = float(self.target[i]) - vel_W[i]
+                        pass  # we integrate omega afterwards
+                    elif mode_i == AxisMode.PURE_VEL or mode_i == AxisMode.FORCE:
+                        pass  # we do not track a virtual position in these modes
 
-                        # We use kd[i] as a “velocity‐gain” here
-                        F_task[i] = self.kp[i] * pos_err + self.kd[i] * vel_err
+                mask_vel = np.array([1 if AxisMode(self.mode[i]) == AxisMode.IMPEDANCE_VEL else 0 for i in range(3, 6)])
+                if np.any(mask_vel):
+                    R_cmd = R.from_rotvec(x_cmd[3:6])
+                    dR = R.from_rotvec(self.target[3:6] * mask_vel * dt)
+                    R_cmd = dR * R_cmd
+                    x_cmd[3:6] = R_cmd.as_rotvec()
+
+                # 6.5) compute wrench based on mode and target
+                wrench_W = np.zeros(6, dtype=np.float64)
+
+                # --- translation ---
+                mask_virtual = np.array([1 if AxisMode(self.mode[i]) in (AxisMode.IMPEDANCE_VEL, AxisMode.POS) else 0 for i in range(3, 6)])
+                if np.any(mask_virtual):
+                    pos_err_vec = x_cmd[:3] - np.array(pose_W[:3])
+                    print(pos_err_vec)
+
+                for i in range(3):
+                    mode_i = AxisMode(self.mode[i])
+                    if mode_i == AxisMode.POS:
+                        wrench_W[i] = self.kp[i] * pos_err_vec[i] + self.kd[i] * -vel_W[i]
+                    elif mode_i == AxisMode.IMPEDANCE_VEL:
+                        vel_err = self.target[i] - vel_W[i]
+                        wrench_W[i] = self.kp[i] * pos_err_vec[i] + self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
                     elif mode_i == AxisMode.PURE_VEL:
-                        vel_err = float(self.target[i]) - vel_W[i]
-                        # We use kd[i] as a “velocity‐gain” here
-                        F_task[i] = self.kd[i] * vel_err
+                        vel_err = self.target[i] - vel_W[i]
+                        wrench_W[i] = self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
                     elif mode_i == AxisMode.FORCE:
-                        # directly obey the commanded wrench in task frame
-                        F_task[i] = float(self.target[i])
+                        wrench_W[i] = float(self.target[i])  # directly obey commanded force
                     else:
-                        # safety fallback
-                        F_task[i] = 0.0
+                        wrench_W[i] = 0.0  # safety fallback
 
-                # 6.5) TRANSLATE F_task (in TASK) → F_world → F_tool
-                #   (a) TASK→WORLD: rotate each 3-vector by R_WF
-                #   (b) WORLD→TOOL: rotate by R_base→tool (extract from pose_W[3:])
-                #F_world = to_world(F_task)
+                # --- rotation ---
 
-                # Build world→tool rotation:
-                #R_world2tool = R.from_rotvec(pose_W[3:]).inv()
-                #F_tool_trans = R_world2tool.apply(F_world[:3])
-                #F_tool_rot = R_world2tool.apply(F_world[3:])
-                #wrench_tool = np.hstack((F_tool_trans, F_tool_rot))
+                if np.any(mask_virtual):
+                    R_cmd = R.from_rotvec(x_cmd[3:6])
+                    R_act = R.from_rotvec(pose_W[3:6])
+                    R_err = R_cmd * R_act.inv()
+                    rot_err_vec = R_err.as_rotvec()
 
-                wrench_tool = F_task
-                #print("Error", errors[:3], "\nForce_W", F_task[:3], "\nForce_T", wrench_tool[:3], "\n", "=" * 10)
+                for i in range(3, 6):
+                    mode_i = AxisMode(self.mode[i])
+                    if mode_i == AxisMode.POS:
+                        wrench_W[i] = self.kp[i] * rot_err_vec[i - 3] + self.kd[i] * -vel_W[i]
+                    elif mode_i == AxisMode.IMPEDANCE_VEL:
+                        vel_err = self.target[i] - vel_W[i]
+                        wrench_W[i] = self.kp[i] * rot_err_vec[i - 3] + self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
+                    elif mode_i == AxisMode.PURE_VEL:
+                        vel_err = self.target[i] - vel_W[i]
+                        wrench_W[i] = self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
+                    elif mode_i == AxisMode.FORCE:
+                        wrench_W[i] = float(self.target[i])  # directly obey commanded wrench
+                    else:
+                        wrench_W[i] = 0.0  # safety fallback
 
-                # 6.6) SEND THE WRENCH TO UR VIA forceMode(...)
+                # 6.6) send the wrench to the UR via forceMode(...)
                 if not self.force_on:
                     # If for some reason we dropped out of forceMode, re‐enter it
                     rtde_c.forceMode(
                         to_sixvec(self.T_WF),
                         [1, 1, 1, 0, 0, 0],
-                        wrench_tool.tolist(),
+                        wrench_W.tolist(),
                         2,
-                        [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]  # change these force/torque limits as needed
+                        [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
                     )
                     self.force_on = True
                 else:
@@ -440,12 +447,12 @@ class RTDETFFController(mp.Process):
                     rtde_c.forceMode(
                         to_sixvec(self.T_WF),
                         [1, 1, 1, 0, 0, 0],
-                        wrench_tool.tolist(),
+                        wrench_W.tolist(),
                         2,
-                        [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]  # change these force/torque limits as needed
+                        [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
                     )
 
-                # 6.7) PUT CURRENT STATE INTO THE RING BUFFER FOR EXTERNAL READERS
+                # 6.7) put current state in the ring buffer
                 state = {}
                 for key in self.config.receive_keys:
                     state[key] = np.array(getattr(rtde_r, 'get' + key)())
@@ -459,23 +466,17 @@ class RTDETFFController(mp.Process):
                           f"min={arr.min() * 1000:.2f} ms  max={arr.max() * 1000:.2f} ms")
                     next_log_time = t_now + log_interval
 
-                # 6.9) REGULATE LOOP FREQUENCY
-                rtde_c.waitPeriod(t_loop_start)
-
-                # 6.10) AFTER FIRST ITERATION, SIGNAL “READY”
+                # 6.9) After first iteration signal ready
                 if iter_idx == 0:
                     self.ready_event.set()
                 iter_idx += 1
 
-                if self.config.verbose:
-                    # measure actual frequency
-                    freq_actual = 1.0 / (time.perf_counter() - t_loop_start + 1e-9)
-                    print(f"[RTDETFFController] Loop {iter_idx}, freq = {freq_actual:.1f} Hz")
+                # 6.10) regulate loop frequency
+                rtde_c.waitPeriod(t_loop_start)
 
             # end of while keep_running
-
         finally:
-            # 7) CLEANUP: exit force‐mode, disconnect RTDE
+            # 7) cleanup: exit force‐mode, disconnect RTDE
             if self.force_on:
                 rtde_c.forceModeStop()
             rtde_c.disconnect()
