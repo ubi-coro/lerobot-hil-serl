@@ -80,7 +80,7 @@ class URArmConfig:
     get_max_k: int = 128
     payload_mass: Optional[float] = None
     payload_cog: Optional[float] = None
-    tcp_offset_pose: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.12, 0.0, 0.0, 0.0])
+    tcp_offset_pose: Optional[list[float]] = None
 
     # safety
     max_pos_speed: float = 0.25

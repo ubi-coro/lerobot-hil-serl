@@ -13,7 +13,7 @@ from lerobot.common.robot_devices.motors.rtde_tff_controller import RTDETFFContr
 # 1. Configure and start the controller
 # ----------------------------------------
 config = URArmConfig(
-    robot_ip="mock_hostname",
+    robot_ip="172.22.22.2",
     frequency=125,
     gain=300,
     max_pos_speed=0.5,
@@ -25,19 +25,23 @@ config = URArmConfig(
     shm_manager=None,
     receive_keys=None,
     get_max_k=10,
-    soft_real_time=False,
+    soft_real_time=True,
     rt_core=3,
     verbose=False,
     launch_timeout=5.0,
-    mock=True
+    mock=False
 )
 
 # Instantiate and start the controller (in its own process)
 controller = RTDETFFController(config)
 controller.start()  # non-blocking
+#controller.run()
 
 # Wait until the controller signals ready
 while not controller.is_ready:
+    time.sleep(0.01)
+
+while controller.is_alive():
     time.sleep(0.01)
 
 # ----------------------------------------
@@ -77,44 +81,18 @@ scatter = ax_3d.scatter([], [], [], c='k', s=5)
 ax_3d.set_xlim(-1, 1)
 ax_3d.set_ylim(-1, 1)
 ax_3d.set_zlim(-1, 1)
-ax_3d.set_xlabel('X')
-ax_3d.set_ylabel('Y')
-ax_3d.set_zlabel('Z')
-
-# ----------------------------------------
-# 4. Function to send random velocity commands
-# ----------------------------------------
-def send_random_vel_command():
-    # Random velocities in [-0.2, 0.2] m/s for x, y, z
-    vx, vy, vz = np.random.uniform(-0.2, 0.2, size=3)
-    # Build TaskFrameCommand: velocity in x,y,z, FIXED rotation
-    mode = [AxisMode.IMPEDANCE_VEL]*3 + [AxisMode.POS]*3
-    target = np.array([vx, vy, vz, 0.0, 0.0, 0.0])
-    kp = np.array([100.0, 100.0, 100.0, 300.0, 300.0, 300.0])
-    kd = np.array([20.0, 20.0, 20.0, 20.0, 20.0, 20.0])
-    T_WF = np.eye(4)
-    cmd = TaskFrameCommand(
-        cmd=Command.TF_SET,
-        T_WF=T_WF,
-        mode=mode,
-        target=target,
-        kp=kp,
-        kd=kd
-    )
-    controller.send_cmd(cmd)
 
 # ----------------------------------------
 # 5. Animation update function
 # ----------------------------------------
 def update(frame):
     # Send a new random velocity command every 10 frames (≈1 second at 100 ms interval)
-    if frame % 10 == 0:
-        send_random_vel_command()
 
     # Read the latest TCP pose from the controller
     state = controller.get_state(k=1)
     pose = state['ActualTCPPose'][0]  # [x, y, z, Rx, Ry, Rz]
     x, y, z = pose[:3]
+    print(x, y, z)
 
     # Timestamp
     t = time.time() - start_time
@@ -133,6 +111,15 @@ def update(frame):
     # Extend x‐axis if needed
     if t > ax_ts.get_xlim()[1]:
         ax_ts.set_xlim(0, t + 1)
+
+    #ax_ts.set_ylim(
+    #    min([min(x), min(y), min(z)]),
+    #    max([max(x), max(y), max(z)])
+    #)
+
+    ax_3d.set_xlim(min(xs), max(xs))
+    ax_3d.set_ylim(min(ys), max(ys))
+    ax_3d.set_zlim(min(zs), max(zs))
 
     # Update 3D scatter
     scatter._offsets3d = (traj_x, traj_y, traj_z)
