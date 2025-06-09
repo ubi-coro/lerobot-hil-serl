@@ -590,9 +590,13 @@ class LeKiwiRobotConfig(RobotConfig):
 @RobotConfig.register_subclass("ur")
 @dataclass
 class URConfig(RobotConfig):
-    follower_arms: dict[str, URArmConfig]
-    leader_arms: dict[str, DynamixelMotorsBusConfig]
+    follower_arms: dict[str, URArmConfig] = field(default=lambda: {
+        "main": URArmConfig(
+            robot_ip="172.22.22.2",
+            soft_real_time=True,
+            use_gripper=False,
+        )
+    })
 
-    control_mode: int
-    control_frequency: float = 20.0
+    leader_arms: dict[str, DynamixelMotorsBusConfig] = field(default_factory=dict)
     cameras: dict[str, CameraConfig] = field(default_factory=dict)

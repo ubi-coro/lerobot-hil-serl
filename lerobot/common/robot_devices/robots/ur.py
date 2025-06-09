@@ -19,27 +19,21 @@ and send orders to its motors.
 # calibration procedure, to make it easy for people to add their own robot.
 
 import json
-import logging
-import time
-import warnings
 from multiprocessing.managers import SharedMemoryManager
-from pathlib import Path
 
 import numpy as np
 import torch
 
 from lerobot.common.robot_devices.cameras.utils import make_cameras_from_configs
 from lerobot.common.robot_devices.motors.dynamixel import TorqueMode
-from lerobot.common.robot_devices.motors.robotiq2f_controller import Robotiq2FController
-from lerobot.common.robot_devices.motors.rtde_interpolation_controller import RTDEInterpolationController
-from lerobot.common.robot_devices.motors.utils import MotorsBus, make_motors_buses_from_configs
+from lerobot.common.robot_devices.motors.rtde_tff_controller import RTDETFFController, TaskFrameCommand
+from lerobot.common.robot_devices.motors.utils import make_motors_buses_from_configs
 from lerobot.common.robot_devices.robots.configs import URConfig
 from lerobot.common.robot_devices.robots.utils import get_arm_id
 from lerobot.common.robot_devices.utils import RobotDeviceAlreadyConnectedError, RobotDeviceNotConnectedError
 
 
 class UR:
-    # TODO(rcadene): Implement force feedback
     def __init__(
         self,
         config: URConfig,
@@ -52,21 +46,11 @@ class UR:
         self.shm.start()
 
         # -------------------------- URs ------------------------- #
-        self.robots = {}
-        self.grippers = {}
-        for name, leader_config in self.config.follower_arms.items():
-            leader_config.shm_manager = self.shm
-            robot = RTDEInterpolationController(leader_config)
-            self.robots[name] = robot
-
-            if leader_config.gripper_ip is not None:
-                gripper = Robotiq2FController(
-                    shm_manager=leader_config.shm_manager,
-                    ip=leader_config.gripper_ip,
-                    port=leader_config.gripper_port,
-                    frequency=leader_config.gripper_frequency
-                )
-                self.grippers[name] = gripper
+        self.controllers = {}
+        for name, follower_config in self.config.follower_arms.items():
+            follower_config.shm_manager = self.shm
+            controller = RTDETFFController(follower_config)
+            self.controllers[name] = controller
 
         # -------------------------- dynamixel & cameras ------------------------- #
         self.leader_arms = make_motors_buses_from_configs(self.config.leader_arms)
@@ -92,24 +76,51 @@ class UR:
 
     @property
     def motor_features(self) -> dict:
-        action_names = self.get_motor_names(self.leader_arms)
-        state_names = self.get_motor_names(self.leader_arms)
-        return {
-            "action": {
-                "dtype": "float32",
-                "shape": (len(action_names),),
-                "names": action_names,
-            },
-            "observation.state": {
+        features = dict()
+
+        # state observations
+        example_obs = self.capture_observation()
+        for key, value in example_obs.items():
+            if key.endswith("q_pos"):
+                state_names = [
+                    "shoulder_pan_joint",
+                    "shoulder_lift_joint",
+                    "elbow_joint",
+                    "wrist_1_joint",
+                    "wrist_2_joint",
+                    "wrist_3_joint",
+                ]
+            elif key.endswith("eef_pos") and len(value) == 7:
+                    state_names = ["x", "y", "z", "a", "b", "c", "gripper"]
+            else:
+                state_names = ["x", "y", "z", "a", "b", "c"]
+
+            assert len(state_names) == len(value)
+            features[key] = {
                 "dtype": "float32",
                 "shape": (len(state_names),),
-                "names": state_names,
-            },
+                "names": state_names
+            }
+
+        # action
+        action_names = []
+        for name, controller in self.controllers.items():
+            if getattr(controller.config, 'use_gripper', False):
+                action_names.extend([f"{name}_{ax}" for ax in ["x", "y", "z", "a", "b", "c", "gripper"]])
+            else:
+                action_names.extend([f"{name}_{ax}" for ax in ["x", "y", "z", "a", "b", "c"]])
+
+        features["action"] = {
+            "dtype": "float32",
+            "shape": (len(action_names),),
+            "names": action_names,
         }
+
+        return features
 
     @property
     def features(self):
-        return {**self.motor_features, **self.camera_features, **self.bota_features}
+        return {**self.motor_features, **self.camera_features}
 
     @property
     def has_camera(self):
@@ -119,35 +130,21 @@ class UR:
     def num_cameras(self):
         return len(self.cameras)
 
-    @property
-    def available_arms(self):
-        available_arms = []
-        for name in self.robots:
-            arm_id = get_arm_id(name, "follower")
-            available_arms.append(arm_id)
-        for name in self.leader_arms:
-            arm_id = get_arm_id(name, "leader")
-            available_arms.append(arm_id)
-        return available_arms
-
     def connect(self):
         if self.is_connected:
             raise RobotDeviceAlreadyConnectedError(
                 "ManipulatorRobot is already connected. Do not run `robot.connect()` twice."
             )
 
-        if not self.leader_arms and not self.robots and not self.cameras:
+        if not self.leader_arms and not self.controllers and not self.cameras:
             raise ValueError(
                 "ManipulatorRobot doesn't have any device to connect. See example of usage in docstring of the class."
             )
 
         # Connect the arms
-        for name in self.robots:
+        for name in self.controllers:
             print(f"Connecting {name} follower arm.")
-            self.robots[name].start()
-        for name in self.grippers:
-            print(f"Connecting {name} follower gripper.")
-            self.grippers[name].start()
+            self.controllers[name].start()
         for name in self.leader_arms:
             print(f"Connecting {name} leader arm.")
             self.leader_arms[name].connect()
@@ -155,10 +152,8 @@ class UR:
         self.activate_calibration()
 
         # Check if all components can be read
-        for name in self.robots:
-            self.robots[name].get_state()
-        for name in self.grippers:
-            self.grippers[name].get_state()
+        for name in self.controllers:
+            self.controllers[name].get_state()
         for name in self.leader_arms:
             self.leader_arms[name].read("Present_Position")
 
@@ -232,40 +227,58 @@ class UR:
         obs = dict()
 
         # both have more than n_obs_steps data
-        for name, robot in self.robots.items():
-            robot_data = robot.get_state()
+        for name, controller in self.controllers.items():
+            controller_data = controller.get_state()
 
-            obs[f'observation.{name}_eef_pos'] = robot_data['ActualTCPPose']
-            obs[f'observation.{name}_eef_speed'] = robot_data['ActualTCPSpeed']
-            obs[f'observation.{name}_eef_force'] = robot_data['ActualTCPForce']
-            obs[f'observation.{name}_q_pos'] = robot_data['ActualQ']
-            obs[f'observation.{name}_q_speed'] = robot_data['ActualQd']
+            if getattr(controller.config, 'use_gripper', False):
+                gripper_pos = controller.gripper.get_pos()
+                obs[f'observation.{name}_eef_pos'] = np.concatenate([controller_data['ActualTCPPose'], [gripper_pos]])
+            else:
+                obs[f'observation.{name}_eef_pos'] = controller_data['ActualTCPPose']
 
-        for name, gripper in self.grippers.items():
-            gripper_data = gripper.get_state()
-
-            obs[f'observation.{name}_eef_pos'] = gripper_data['ActualTCPPose']
-
-        # todo
+            obs[f'observation.{name}_eef_speed'] = controller_data['ActualTCPSpeed']
+            obs[f'observation.{name}_eef_force'] = controller_data['ActualTCPForce']
+            obs[f'observation.{name}_q_pos'] = controller_data['ActualQ']
 
         return obs
 
     def send_action(self, action: torch.Tensor) -> torch.Tensor:
-        """Command the follower arms to move to a target joint configuration.
+        """Command follower arms (and gripper if used) to targets.
 
-        The relative action magnitude may be clipped depending on the configuration parameter
-        `max_relative_target`. In this case, the action sent differs from original action.
-        Thus, this function always returns the action actually sent.
-
-        Args:
-            action: tensor containing the concatenated goal positions for the follower arms.
+        For each controller, if `controller.config.use_gripper` is True, expects 7 values: 6-joint targets + 1 gripper width (m).
+        Otherwise expects 6 values: joint targets only.
+        Returns the action actually sent.
         """
         if not self.is_connected:
             raise RobotDeviceNotConnectedError(
                 "ManipulatorRobot is not connected. You need to run `robot.connect()`."
             )
 
-        # todo
+        arr = action.detach().cpu().numpy().ravel()
+        idx = 0
+        total_len = arr.size
+        # Compute expected length
+        expected = sum((7 if r.config.use_gripper else 6) for r in self.controllers.values())
+        if total_len != expected:
+            raise ValueError(f"Action length ({total_len}) does not match expected ({expected}) for current controllers.")
+
+        for name, controller in self.controllers.items():
+            length = 7 if getattr(controller.config, 'use_gripper', False) else 6
+            seg = arr[idx: idx + length]
+            idx += length
+
+            # first 6 values are joint targets
+            joint_targets = seg[:6]
+            cmd = TaskFrameCommand(target=joint_targets)
+            controller.send_cmd(cmd)
+
+            # if gripper flag, last element is width in metres
+            if length == 7:
+                width_m = float(seg[6])
+                # assumes controller.gripper exists
+                controller.gripper.move(width_m, wait=False)
+        return action
+
 
     def disconnect(self):
         if not self.is_connected:
@@ -273,8 +286,10 @@ class UR:
                 "ManipulatorRobot is not connected. You need to run `robot.connect()` before disconnecting."
             )
 
-        # todo
+        for name in self.controllers:
+            self.controllers[name].stop()
 
+        self.shm.shutdown()
         self.is_connected = False
 
     def __del__(self):

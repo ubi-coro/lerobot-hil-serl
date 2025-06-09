@@ -4,14 +4,14 @@ Only the worker file changed – the public UR class will get a helper next.
 Key additions
 -------------
 * Mode enum  (POS, VEL, FORCE, FIXED)
-* TFCommand  (TF_SET)
+* TFCommand  (SET)
 * new queue schema (servo + task‑frame)
 * internal task‑frame state & mixer inside the 1 kHz loop
 * automatic force_mode / endForceMode depending on mode_mask
 
 Assumptions
 -----------
-* Task frame is static after first TF_SET (no tracking‑mode yet)
+* Task frame is static after first SET (no tracking‑mode yet)
 * At most one translational force axis – UR limit is 3, easy to relax
 * kp / kd are diagonal
 * Units:  metres, rad, N, N·m
@@ -29,6 +29,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from lerobot.common.robot_devices.motors.configs import URArmConfig
+from lerobot.common.robot_devices.motors.rtde_robotiq_controller import RobotiqGripper
 from lerobot.common.utils.shared_memory import SharedMemoryRingBuffer, SharedMemoryQueue, Empty
 
 
@@ -44,19 +45,21 @@ class AxisMode(enum.IntEnum):
 
 
 class Command(enum.IntEnum):
-    TF_SET = 0
-    STOP   = 1
+    SET = 0
+    STOP = 1
+    OPEN = 2
+    CLOSE = 3
 
 
 @dataclass
 class TaskFrameCommand:
     """One message = full spec for all 6 DoF"""
-    cmd: Command = Command.TF_SET
-    T_WF: np.ndarray | None     = None  # 4×4 homogeneous transform (world→task)
-    mode: list[AxisMode] | None = None  # len==6
-    target: np.ndarray | None   = None  # 6 pos [m/rad], vel [m/s], or force [N]
-    kp: np.ndarray | None       = None  # 6 proportional gains (position‐error → force)
-    kd: np.ndarray | None       = None  # 6 derivative gains (velocity‐error → force)
+    cmd: Command = Command.SET
+    T_WF: Optional[np.ndarray]     = None  # 4×4 homogeneous transform (world→task)
+    mode: Optional[list[AxisMode]] = None  # len==6
+    target: Optional[np.ndarray]   = None  # 6 pos [m/rad], vel [m/s], or force [N]
+    kp: Optional[np.ndarray]       = None  # 6 proportional gains (position‐error → force)
+    kd: Optional[np.ndarray]       = None  # 6 derivative gains (velocity‐error → force)
 
     def to_queue_dict(self):
         d = asdict(self)
@@ -84,10 +87,20 @@ class TaskFrameCommand:
             self.kp = cmd.kp
         if cmd.kd is not None:
             self.kd = cmd.kd
+   
+@dataclass
+class GripperCommand:
+    cmd: Command = Command.OPEN
+    value: float = 0.0
+    
+    def to_queue_dict(self):
+        d = asdict(self)
+        d["cmd"] = self.cmd.value
+        return d
 
 
 _EXAMPLE_TF_MSG = TaskFrameCommand(
-    cmd=Command.TF_SET,
+    cmd=Command.SET,
     T_WF=np.eye(4),
     mode=[AxisMode.POS]*6,
     target=np.zeros(6),
@@ -106,11 +119,18 @@ class RTDETFFController(mp.Process):
         config = _validate_config(config)
         super().__init__(name="RTDEPositionalController")
         self.config = config
+        self.ready_event = mp.Event()  # “ready” event to signal when the loop has started successfully
+        self.force_on = False  # are we currently in forceMode?
 
         # 1) Build the command queue (TaskFrameCommand messages)
-        self.cmd_queue = SharedMemoryQueue.create_from_examples(
+        self.robot_cmd_queue = SharedMemoryQueue.create_from_examples(
             shm_manager=config.shm_manager,
             examples=_EXAMPLE_TF_MSG,
+            buffer_size=256
+        )
+        self.gripper_cmd_queue = SharedMemoryQueue.create_from_examples(
+            shm_manager=config.shm_manager,
+            examples=GripperCommand().to_queue_dict(),
             buffer_size=256
         )
 
@@ -119,9 +139,7 @@ class RTDETFFController(mp.Process):
             from tests.motors.mock_ur_rtde import RTDEReceiveInterface
         else:
             from rtde_receive import RTDEReceiveInterface
-        print("Trying receive")
         rtde_r = RTDEReceiveInterface(hostname=config.robot_ip)
-        print("finished receive")
 
         if config.receive_keys is None:
             config.receive_keys = [
@@ -135,27 +153,39 @@ class RTDETFFController(mp.Process):
         for key in config.receive_keys:
             example[key] = np.array(getattr(rtde_r, 'get' + key)())
         example['timestamp'] = time.time()
-        self.out_rb = SharedMemoryRingBuffer.create_from_examples(
+        self.robot_out_rb = SharedMemoryRingBuffer.create_from_examples(
             shm_manager=config.shm_manager,
             examples=example,
             get_max_k=config.get_max_k,
             get_time_budget=0.2,
             put_desired_frequency=config.frequency
         )
+        self.gripper_out_rb = SharedMemoryRingBuffer.create_from_examples(
+            shm_manager=config.shm_manager,
+            examples={"width_mm": 0.0, "timestamp": time.time()},
+            get_max_k=config.get_max_k,
+            get_time_budget=0.2,
+            put_desired_frequency=config.gripper_frequency
+        )
 
         # 3) Controller state: last TaskFrameCommand, task‐frame state, gains, etc.
-        self.last_cmd: Optional[TaskFrameCommand] = None
         self.T_WF = np.eye(4)  # world←task
         self.mode = np.array([AxisMode.POS] * 6, dtype=np.int8)
         self.target = np.zeros(6)  # in task frame
-        self.kp = np.full(6, 100.0)  # stiffness for POS/FIXED
-        self.kd = np.full(6, 0.5)  # damping or vel‐gain
-        self.force_on = False  # are we currently in forceMode?
-
-        # “ready” event to signal when the loop has started successfully
-        self.ready_event = mp.Event()
+        self.kp = np.array([2500, 2500, 2500, 100, 100, 100])  # stiffness for POS/FIXED
+        self.kd = np.full(6, 0.2)  # damping or vel‐gain
+        self.last_robot_cmd = TaskFrameCommand(
+            target=np.zeros((6,)),
+            mode=[AxisMode.IMPEDANCE_VEL] * 6,
+            kp=self.kp,
+            kd=self.kd,
+            T_WF=np.eye(4)
+        )
 
     # =========== launch & shutdown =============
+    def connect(self):
+        self.start()
+
     def start(self, wait=True):
         super().start()
         if wait:
@@ -164,7 +194,7 @@ class RTDETFFController(mp.Process):
     def stop(self, wait=True):
         # Send a STOP command
         msg = {'cmd': Command.STOP.value}
-        self.cmd_queue.put(msg)
+        self.robot_cmd_queue.put(msg)
         if wait:
             self.stop_wait()
 
@@ -188,37 +218,51 @@ class RTDETFFController(mp.Process):
         self.stop()
 
     # =========== sending a new TaskFrameCommand ============
-    def send_cmd(self, cmd: TaskFrameCommand):
+    def send_cmd(self, cmd: TaskFrameCommand | GripperCommand):
         """
-        Merges the incoming cmd fields into the last_cmd,
-        then pushes the updated last_cmd into the shared queue.
+        Merges the incoming cmd fields into the last_robot_cmd,
+        then pushes the updated last_robot_cmd into the shared queue.
         """
-        if self.last_cmd is None:
-            # First time ever: store a full copy
-            self.last_cmd = TaskFrameCommand(
-                cmd=cmd.cmd,
-                T_WF=cmd.T_WF.copy(),
-                mode=cmd.mode.copy(),
-                target=cmd.target.copy(),
-                kp=cmd.kp.copy(),
-                kd=cmd.kd.copy()
-            )
-        else:
-            # Only update the fields that are not None
-            self.last_cmd.update(cmd)
 
-        # Push the entire updated struct into the queue
-        self.cmd_queue.put(self.last_cmd.to_queue_dict())
+        if isinstance(cmd, TaskFrameCommand):
+            if self.last_robot_cmd is None:
+                # First time ever: store a full copy
+                self.last_robot_cmd = TaskFrameCommand(
+                    cmd=cmd.cmd,
+                    T_WF=cmd.T_WF.copy(),
+                    mode=cmd.mode.copy(),
+                    target=cmd.target.copy(),
+                    kp=cmd.kp.copy(),
+                    kd=cmd.kd.copy()
+                )
+            else:
+                # Only update the fields that are not None
+                self.last_robot_cmd.update(cmd)
+
+            # Push the entire updated struct into the queue
+            self.robot_cmd_queue.put(self.last_robot_cmd.to_queue_dict())
+
+        elif isinstance(cmd, GripperCommand):
+            self.gripper_cmd_queue.put(cmd.to_queue_dict())
 
     # =========== get robot state from ring buffer ============
-    def get_state(self, k=None, out=None):
+    def get_robot_state(self, k=None, out=None):
         if k is None:
-            return self.out_rb.get(out=out)
+            return self.robot_out_rb.get(out=out)
         else:
-            return self.out_rb.get_last_k(k=k, out=out)
+            return self.robot_out_rb.get_last_k(k=k, out=out)
 
-    def get_all_state(self):
-        return self.out_rb.get_all()
+    def get_all_robot_states(self):
+        return self.robot_out_rb.get_all()
+
+    def get_gripper_state(self, k=None, out=None):
+        if k is None:
+            return self.gripper_out_rb.get(out=out)
+        else:
+            return self.gripper_out_rb.get_last_k(k=k, out=out)
+
+    def get_all_gripper_states(self):
+        return self.gripper_out_rb.get_all()
 
     # ========= main loop in process ============
     def run(self):
@@ -240,6 +284,10 @@ class RTDETFFController(mp.Process):
         dt = 1.0 / frequency
         rtde_c = RTDEControlInterface(robot_ip, frequency)
         rtde_r = RTDEReceiveInterface(robot_ip)
+
+        if self.config.use_gripper:
+            self.gripper = RobotiqGripper(rtde_c)
+            self.gripper.activate()
 
         try:
             if self.config.verbose:
@@ -269,7 +317,7 @@ class RTDETFFController(mp.Process):
             # 5.2) Put the robot into 6D forceMode (zero‐wrench to begin)
             rtde_c.forceMode(
                 to_sixvec(self.T_WF),
-                [1, 1, 1, 0, 0, 0],
+                [1, 1, 1, 1, 1, 1],
                 [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 2,
                 [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]  # change these force/torque limits as needed
@@ -279,6 +327,7 @@ class RTDETFFController(mp.Process):
             # 5.3) Mark the loop as “ready” from the first successful iteration
             iter_idx = 0
             keep_running = True
+            last_gripper_time = time.monotonic()
 
             # 5.4) Prepare for jitter logging
             hist = collections.deque(maxlen=1000)
@@ -298,7 +347,7 @@ class RTDETFFController(mp.Process):
 
                 # 6.2) read any pending commands
                 try:
-                    msgs = self.cmd_queue.get_all()
+                    msgs = self.robot_cmd_queue.get_all()
                     n_cmd = len(msgs['cmd'])
                 except Empty:
                     n_cmd = 0
@@ -310,8 +359,8 @@ class RTDETFFController(mp.Process):
                         keep_running = False
                         break
 
-                    # Only TF_SET is supported besides STOP
-                    elif cmd_id == Command.TF_SET.value:
+                    # Only SET is supported besides STOP
+                    elif cmd_id == Command.SET.value:
                         # Update any fields that arrived in the queue
                         # (T_WF, mode, target, kp, kd)
                         new_T = single.get('T_WF', None)
@@ -323,7 +372,7 @@ class RTDETFFController(mp.Process):
                         if new_mode is not None:
                             # reset virtual position when switching to force-based velocity control
                             for i in range(6):
-                                if new_mode[i] == AxisMode.IMPEDANCE_VEL:
+                                if new_mode[i] != self.mode[i] and new_mode[i] == AxisMode.IMPEDANCE_VEL:
                                     x_cmd[i] = pose_W[i]
                             self.mode = new_mode.copy()
 
@@ -341,7 +390,7 @@ class RTDETFFController(mp.Process):
                             self.kd = new_kd.copy()
 
                         if self.config.verbose:
-                            print("[RTDETFFController] Received TF_SET, updated task‐frame state.")
+                            print("[RTDETFFController] Received SET, updated task‐frame state.")
 
                     else:
                         # Unknown command → treat as STOP
@@ -391,7 +440,6 @@ class RTDETFFController(mp.Process):
                 mask_virtual = np.array([1 if AxisMode(self.mode[i]) in (AxisMode.IMPEDANCE_VEL, AxisMode.POS) else 0 for i in range(3, 6)])
                 if np.any(mask_virtual):
                     pos_err_vec = x_cmd[:3] - np.array(pose_W[:3])
-                    print(pos_err_vec)
 
                 for i in range(3):
                     mode_i = AxisMode(self.mode[i])
@@ -436,7 +484,7 @@ class RTDETFFController(mp.Process):
                     # If for some reason we dropped out of forceMode, re‐enter it
                     rtde_c.forceMode(
                         to_sixvec(self.T_WF),
-                        [1, 1, 1, 0, 0, 0],
+                        [1, 1, 1, 1, 1, 1],
                         wrench_W.tolist(),
                         2,
                         [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
@@ -446,7 +494,7 @@ class RTDETFFController(mp.Process):
                     # Simply update the wrench each cycle
                     rtde_c.forceMode(
                         to_sixvec(self.T_WF),
-                        [1, 1, 1, 0, 0, 0],
+                        [1, 1, 1, 1, 1, 1],
                         wrench_W.tolist(),
                         2,
                         [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
@@ -457,7 +505,7 @@ class RTDETFFController(mp.Process):
                 for key in self.config.receive_keys:
                     state[key] = np.array(getattr(rtde_r, 'get' + key)())
                 state['timestamp'] = time.time()
-                self.out_rb.put(state)
+                self.robot_out_rb.put(state)
 
                 # 6.8) Jitter print every log_interval
                 if t_now >= next_log_time and len(hist) >= 10:
@@ -465,13 +513,46 @@ class RTDETFFController(mp.Process):
                     print(f"[Loop Jitter] μ={arr.mean() * 1000:.2f} ms  σ={arr.std() * 1000:.2f} ms  "
                           f"min={arr.min() * 1000:.2f} ms  max={arr.max() * 1000:.2f} ms")
                     next_log_time = t_now + log_interval
+                    
+                # 6.9) Handle robotiq gripper
 
-                # 6.9) After first iteration signal ready
+                # only poll every 1 / gripper_frequency seconds
+                gripper_dt = 1.0 / self.config.gripper_frequency
+                if (t_now - last_gripper_time) >= gripper_dt:
+                    last_gripper_time = t_now
+
+                    # 6.9.1) Read all pending gripper commands
+                    try:
+                        gr_msgs = self.gripper_cmd_queue.get_all()
+                        n_gr = len(gr_msgs['cmd'])
+                    except Empty:
+                        n_gr = 0
+
+                    for j in range(n_gr):
+                        single = {k: gr_msgs[k][j] for k in gr_msgs}
+                        cmd_id = int(single['cmd'])
+                        print(single)
+                        if cmd_id == Command.OPEN.value:
+                            self.gripper.open()
+                        elif cmd_id == Command.CLOSE.value:
+                            self.gripper.close()
+                        elif cmd_id == Command.SET.value:
+                            self.gripper.move(single["value"])
+                        print("Done")
+
+                    # 6.9.2) Push back the current gripper state
+                    #gr_state = {
+                    #    'width_mm': float(self.gripper.get_pos()),
+                    #    'timestamp': t_now
+                    #}
+                    #self.gripper_out_rb.put(gr_state)
+
+                # 6.10) After first iteration signal ready
                 if iter_idx == 0:
                     self.ready_event.set()
                 iter_idx += 1
 
-                # 6.10) regulate loop frequency
+                # 6.11) regulate loop frequency
                 rtde_c.waitPeriod(t_loop_start)
 
             # end of while keep_running

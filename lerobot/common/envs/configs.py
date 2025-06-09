@@ -14,8 +14,8 @@
 
 import abc
 import importlib
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from dataclasses import dataclass, field, fields
+from typing import Any, Dict, Optional, Tuple, Sequence
 
 import draccus
 import gymnasium as gym
@@ -23,6 +23,7 @@ import numpy as np
 
 from lerobot.common.constants import ACTION, OBS_ENV, OBS_IMAGE, OBS_IMAGES, OBS_ROBOT
 from lerobot.common.envs.manipulator_env import RobotEnv
+from lerobot.common.envs.ur_env import UREnv
 from lerobot.common.envs.wrapper.ee import EEObservationWrapper, EEActionWrapper
 from lerobot.common.envs.wrapper.gripper import GripperPenaltyWrapper, GripperActionWrapper
 from lerobot.common.envs.wrapper.hilserl import (
@@ -42,7 +43,10 @@ from lerobot.common.envs.wrapper.leader import (
 )
 from lerobot.common.envs.wrapper.reward import SuccessRepeatWrapper, RewardClassifierWrapper
 from lerobot.common.envs.wrapper.smoothing import SmoothActionWrapper
-from lerobot.common.robot_devices.robots.configs import RobotConfig, AlohaRobotConfig
+from lerobot.common.envs.wrapper.spacemouse import SpaceMouseInterventionWrapper
+from lerobot.common.envs.wrapper.tff import StaticTaskFrameWrapper
+from lerobot.common.robot_devices.motors.rtde_tff_controller import TaskFrameCommand, AxisMode
+from lerobot.common.robot_devices.robots.configs import RobotConfig, AlohaRobotConfig, URConfig
 from lerobot.common.robot_devices.robots.utils import make_robot_from_config
 from lerobot.configs.types import FeatureType, PolicyFeature
 
@@ -613,7 +617,87 @@ class ManiskillEnvConfig(EnvConfig):
         return env
 
 
+@dataclass
+class TaskFrameWrapperConfig:
+    static_tff: Optional[TaskFrameCommand]          = None
+    action_indices: Optional[Sequence[int]]         = None
+
+    enable_spacemouse: bool = False
+    spacemouse_device: Optional[str] = None
+    action_scale: Optional[Sequence[float] | float] = None
+
+
+
 @EnvConfig.register_subclass("ur")
 @dataclass
-class UREnvConfig(EnvConfig):
-    pass
+class UREnvConfig(HILSerlRobotEnvConfig):
+
+    robot: URConfig = URConfig()
+    display_cameras: bool = False
+    fps: int = 10
+
+    wrapper: dict[str, TaskFrameWrapperConfig] = field(default_factory=lambda: {
+            "main": TaskFrameWrapperConfig(
+                static_tff = TaskFrameCommand(
+                    T_WF=np.eye(4),
+                    target=np.array([0.0, 0.0, -2.0, 0.0, 0.0, 0.0]),
+                    mode=2 * [AxisMode.IMPEDANCE_VEL] + [AxisMode.FORCE] + 3 * [AxisMode.POS],
+                    kp=np.array([2500, 2500, 2500, 100, 100, 100]),
+                    kd=np.full(6, 0.2)
+                ),
+                action_indices=[1, 1, 0, 0, 0, 0],
+                action_scale=1 / 10.
+            )
+        }
+    )
+    features: dict[str, PolicyFeature] = field(
+        default_factory=lambda: {
+            "action": PolicyFeature(type=FeatureType.ACTION, shape=(3,)),
+            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(15,)),
+        }
+    )
+    features_map: dict[str, str] = field(
+        default_factory=lambda: {
+            "action": ACTION,
+            "observation.state": OBS_ROBOT,
+        }
+    )
+
+    def make(self):
+        env = UREnv(
+            robot=make_robot_from_config(self.robot),
+            display_cameras=self.display_cameras
+        )
+
+        wrapper_config = self._invert_wrapper()
+
+        if any([tff is not None for tff in wrapper_config["static_tff"].values()]):
+            env = StaticTaskFrameWrapper(
+                env,
+                static_tffs=wrapper_config["static_tff"],
+                action_indices=wrapper_config["action_indices"]
+            )
+
+        if any([enable_spacemouse for enable_spacemouse in wrapper_config["enable_spacemouse"].values()]):
+            env = SpaceMouseInterventionWrapper(
+                env,
+                devices=wrapper_config["spacemouse_device"],
+                action_indices=wrapper_config["action_indices"],
+                action_scale=wrapper_config["action_scale"]
+            )
+
+        return env
+
+
+    def _invert_wrapper(self):
+        field_names = [f.name for f in fields(TaskFrameWrapperConfig)]
+        out = {f: {} for f in field_names}
+        for i, name, wrapper in enumerate(self.wrapper.items()):
+            for f in field_names:
+                out[f][name] = getattr(wrapper, f)
+        return out
+
+
+
+
+

@@ -23,7 +23,7 @@ from lerobot.common.robot_devices.robots.configs import (
     MossRobotConfig,
     RobotConfig,
     So100RobotConfig,
-    StretchRobotConfig,
+    StretchRobotConfig, URConfig,
 )
 
 
@@ -62,6 +62,8 @@ def make_robot_config(robot_type: str, **kwargs) -> RobotConfig:
         return StretchRobotConfig(**kwargs)
     elif robot_type == "lekiwi":
         return LeKiwiRobotConfig(**kwargs)
+    elif robot_type == "ur":
+        return URConfig(**kwargs)
     else:
         raise ValueError(f"Robot type '{robot_type}' is not available.")
 
@@ -75,6 +77,10 @@ def make_robot_from_config(config: RobotConfig):
         from lerobot.common.robot_devices.robots.mobile_manipulator import MobileManipulator
 
         return MobileManipulator(config)
+    elif isinstance(config, URConfig):
+        from lerobot.common.robot_devices.robots.ur import UR
+
+        return UR(config)
     else:
         from lerobot.common.robot_devices.robots.stretch import StretchRobot
 

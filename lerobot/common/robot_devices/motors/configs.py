@@ -68,11 +68,8 @@ class URArmConfig:
     verbose: bool = False
     receive_keys: Optional[list[str]] = None
     mock: bool = False
-
-    # gripper
-    gripper_ip: Optional[str] = None
-    gripper_port: int = 1000
-    gripper_frequency: float = 60.0
+    use_gripper: bool = False  # attempts to initialize gripper from RTDEControlInterface
+    gripper_frequency: float = 30.0
 
     # controller parameters
     lookahead_time: float = 0.1

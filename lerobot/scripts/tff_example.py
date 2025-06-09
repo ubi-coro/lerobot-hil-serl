@@ -1,20 +1,20 @@
-import threading
 import time
-import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
 from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (needed for 3D projection)
 
 from lerobot.common.robot_devices.motors.configs import URArmConfig
-from lerobot.common.robot_devices.motors.rtde_tff_controller import RTDETFFController, AxisMode, TaskFrameCommand, Command
+from lerobot.common.robot_devices.motors.rtde_tff_controller import RTDETFFController, TaskFrameCommand, \
+    Command, GripperCommand
+from lerobot.common.robot_devices.spacemouse.spacemouse_expert import SpaceMouseExpert
 
 # ----------------------------------------
 # 1. Configure and start the controller
 # ----------------------------------------
 config = URArmConfig(
     robot_ip="172.22.22.2",
-    frequency=125,
+    frequency=500,
     gain=300,
     max_pos_speed=0.5,
     max_rot_speed=1.0,
@@ -29,19 +29,38 @@ config = URArmConfig(
     rt_core=3,
     verbose=False,
     launch_timeout=5.0,
-    mock=False
+    mock=False,
+    use_gripper=True,
 )
 
 # Instantiate and start the controller (in its own process)
 controller = RTDETFFController(config)
 controller.start()  # non-blocking
-#controller.run()
+
+spacemouse_expert = SpaceMouseExpert()
 
 # Wait until the controller signals ready
 while not controller.is_ready:
     time.sleep(0.01)
 
+frequency = 10  # Hz
 while controller.is_alive():
+    t_start = time.perf_counter()
+
+    action, buttons = spacemouse_expert.get_action()
+
+    controller.send_cmd(TaskFrameCommand(target=action / 10.0))
+
+    if buttons[0]:
+        controller.send_cmd(GripperCommand(cmd=Command.OPEN))
+    if buttons[1]:
+        controller.send_cmd(GripperCommand(cmd=Command.CLOSE))
+
+    t_loop = time.perf_counter() - t_start
+    time.sleep(1 / frequency - t_loop)
+
+
+
     time.sleep(0.01)
 
 # ----------------------------------------
