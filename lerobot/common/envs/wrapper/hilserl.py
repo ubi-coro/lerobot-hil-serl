@@ -315,7 +315,7 @@ class TorchActionWrapper(gym.Wrapper):
     to torch tensors.
     """
 
-    def __init__(self, env: gym.Env, device: str):
+    def __init__(self, env: gym.Env):
         super().__init__(env)
         self.action_space = TorchBox(
             low=env.action_space.low,
@@ -328,7 +328,7 @@ class TorchActionWrapper(gym.Wrapper):
     def step(self, action: torch.Tensor):
         if action.dim() == 2:
             action = action.squeeze(0)
-        action = action.detach().cpu().numpy()
+        #action = action.detach().cpu().numpy()
         return self.env.step(action)
 
 

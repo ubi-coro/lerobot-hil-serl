@@ -15,7 +15,7 @@
 import abc
 from dataclasses import dataclass, field
 from multiprocessing.managers import SharedMemoryManager
-from typing import Optional
+from typing import Optional, List
 
 import draccus
 
@@ -68,6 +68,8 @@ class URArmConfig:
     verbose: bool = False
     receive_keys: Optional[list[str]] = None
     mock: bool = False
+
+    # gripper
     use_gripper: bool = False  # attempts to initialize gripper from RTDEControlInterface
     gripper_frequency: float = 30.0
 
@@ -80,10 +82,9 @@ class URArmConfig:
     tcp_offset_pose: Optional[list[float]] = None
 
     # safety
-    max_pos_speed: float = 0.25
-    max_rot_speed: float = 0.6
-    joints_init: Optional[float] = None
-    joints_init_speed: Optional[float] = 1.05
+    max_pose: List[float] = field(default_factory = lambda: [float("inf")] * 6)
+    min_pose: List[float] = field(default_factory = lambda: [-float("inf")] * 6)
+    wrench_limits: List[float] = field(default_factory = lambda: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])
     
     # latency
     obs_latency: float = 0.0001

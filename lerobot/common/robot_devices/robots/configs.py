@@ -590,7 +590,7 @@ class LeKiwiRobotConfig(RobotConfig):
 @RobotConfig.register_subclass("ur")
 @dataclass
 class URConfig(RobotConfig):
-    follower_arms: dict[str, URArmConfig] = field(default=lambda: {
+    follower_arms: dict[str, URArmConfig] = field(default_factory=lambda: {
         "main": URArmConfig(
             robot_ip="172.22.22.2",
             soft_real_time=True,

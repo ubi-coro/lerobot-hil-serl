@@ -55,21 +55,21 @@ class Command(enum.IntEnum):
 class TaskFrameCommand:
     """One message = full spec for all 6 DoF"""
     cmd: Command = Command.SET
-    T_WF: Optional[np.ndarray]     = None  # 4×4 homogeneous transform (world→task)
-    mode: Optional[list[AxisMode]] = None  # len==6
-    target: Optional[np.ndarray]   = None  # 6 pos [m/rad], vel [m/s], or force [N]
-    kp: Optional[np.ndarray]       = None  # 6 proportional gains (position‐error → force)
-    kd: Optional[np.ndarray]       = None  # 6 derivative gains (velocity‐error → force)
+    T_WF: Optional[list | np.ndarray]     = None  # 4×4 homogeneous transform (world→task)
+    mode: Optional[list[AxisMode]]        = None  # len==6
+    target: Optional[list | np.ndarray]   = None  # 6 pos [m/rad], vel [m/s], or force [N]
+    kp: Optional[list | np.ndarray]       = None  # 6 proportional gains (position‐error → force)
+    kd: Optional[list | np.ndarray]       = None  # 6 derivative gains (velocity‐error → force)
 
     def to_queue_dict(self):
         d = asdict(self)
         try:
-            d["cmd"] = self.cmd.value
-            d["T_WF"]   = self.T_WF.astype(np.float64)
-            d["mode"]  = np.array([int(m) for m in self.mode], dtype=np.int8)
-            d["target"] = self.target.astype(np.float64)
-            d["kp"]     = self.kp.astype(np.float64)
-            d["kd"]     = self.kd.astype(np.float64)
+            d["cmd"]    = self.cmd.value
+            d["T_WF"]   = np.asarray(self.T_WF).astype(np.float64)
+            d["mode"]   = np.array([int(m) for m in self.mode], dtype=np.int8)
+            d["target"] = np.asarray(self.target).astype(np.float64)
+            d["kp"]     = np.asarray(self.kp).astype(np.float64)
+            d["kd"]     = np.asarray(self.kd).astype(np.float64)
         except Exception as e:
             print(f"TaskFrameCommand seems to be missing fields: {e}")
         return d
@@ -157,23 +157,23 @@ class RTDETFFController(mp.Process):
             shm_manager=config.shm_manager,
             examples=example,
             get_max_k=config.get_max_k,
-            get_time_budget=0.2,
+            get_time_budget=0.4,
             put_desired_frequency=config.frequency
         )
         self.gripper_out_rb = SharedMemoryRingBuffer.create_from_examples(
             shm_manager=config.shm_manager,
             examples={"width_mm": 0.0, "timestamp": time.time()},
             get_max_k=config.get_max_k,
-            get_time_budget=0.2,
+            get_time_budget=0.4,
             put_desired_frequency=config.gripper_frequency
         )
 
         # 3) Controller state: last TaskFrameCommand, task‐frame state, gains, etc.
         self.T_WF = np.eye(4)  # world←task
-        self.mode = np.array([AxisMode.POS] * 6, dtype=np.int8)
+        self.mode = np.array([AxisMode.IMPEDANCE_VEL] * 6, dtype=np.int8)
         self.target = np.zeros(6)  # in task frame
-        self.kp = np.array([2500, 2500, 2500, 100, 100, 100])  # stiffness for POS/FIXED
-        self.kd = np.full(6, 0.2)  # damping or vel‐gain
+        self.kp = np.array([2500, 2500, 2500, 100, 100, 100])
+        self.kd = np.array([80, 80, 80, 8, 8, 8])
         self.last_robot_cmd = TaskFrameCommand(
             target=np.zeros((6,)),
             mode=[AxisMode.IMPEDANCE_VEL] * 6,
@@ -181,6 +181,10 @@ class RTDETFFController(mp.Process):
             kd=self.kd,
             T_WF=np.eye(4)
         )
+
+        # 4) transform bounds
+        self._min_pose_rpy = R.from_rotvec(np.array(self.config.min_pose[3:6])).as_euler('xyz')
+        self._max_pose_rpy = R.from_rotvec(np.array(self.config.max_pose[3:6])).as_euler('xyz')
 
     # =========== launch & shutdown =============
     def connect(self):
@@ -285,15 +289,15 @@ class RTDETFFController(mp.Process):
         rtde_c = RTDEControlInterface(robot_ip, frequency)
         rtde_r = RTDEReceiveInterface(robot_ip)
 
+        # 3) Connect to gripper
         if self.config.use_gripper:
             self.gripper = RobotiqGripper(rtde_c)
-            self.gripper.activate()
 
         try:
             if self.config.verbose:
                 print(f"[RTDETFFController] Connecting to {robot_ip}…")
 
-            # 3) Set TCP offset & payload (if provided)
+            # 4) Set TCP offset & payload (if provided)
             if self.config.tcp_offset_pose is not None:
                 rtde_c.setTcp(self.config.tcp_offset_pose)
             if self.config.payload_mass is not None:
@@ -301,10 +305,6 @@ class RTDETFFController(mp.Process):
                     assert rtde_c.setPayload(self.config.payload_mass, self.config.payload_cog)
                 else:
                     assert rtde_c.setPayload(self.config.payload_mass)
-
-            # 4) Optionally move to an initial joint pose
-            if self.config.joints_init is not None:
-                assert rtde_c.moveJ(self.config.joints_init, self.config.joints_init_speed, 1.4)
 
             # 5) Enter impedance loop via forceMode
 
@@ -320,7 +320,7 @@ class RTDETFFController(mp.Process):
                 [1, 1, 1, 1, 1, 1],
                 [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 2,
-                [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]  # change these force/torque limits as needed
+                self.config.wrench_limits
             )
             self.force_on = True
 
@@ -433,6 +433,9 @@ class RTDETFFController(mp.Process):
                     R_cmd = dR * R_cmd
                     x_cmd[3:6] = R_cmd.as_rotvec()
 
+                # --- clamp virtual target pos ---
+                x_cmd = self._clip_pose_rpy(x_cmd)
+
                 # 6.5) compute wrench based on mode and target
                 wrench_W = np.zeros(6, dtype=np.float64)
 
@@ -457,7 +460,6 @@ class RTDETFFController(mp.Process):
                         wrench_W[i] = 0.0  # safety fallback
 
                 # --- rotation ---
-
                 if np.any(mask_virtual):
                     R_cmd = R.from_rotvec(x_cmd[3:6])
                     R_act = R.from_rotvec(pose_W[3:6])
@@ -479,6 +481,9 @@ class RTDETFFController(mp.Process):
                     else:
                         wrench_W[i] = 0.0  # safety fallback
 
+                # --- zero wrench if current pose exceeds bounds
+                self._apply_wrench_bounds_rpy(pose_W, wrench_W)
+
                 # 6.6) send the wrench to the UR via forceMode(...)
                 if not self.force_on:
                     # If for some reason we dropped out of forceMode, re‐enter it
@@ -487,7 +492,7 @@ class RTDETFFController(mp.Process):
                         [1, 1, 1, 1, 1, 1],
                         wrench_W.tolist(),
                         2,
-                        [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+                        self.config.wrench_limits
                     )
                     self.force_on = True
                 else:
@@ -497,7 +502,7 @@ class RTDETFFController(mp.Process):
                         [1, 1, 1, 1, 1, 1],
                         wrench_W.tolist(),
                         2,
-                        [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+                        self.config.wrench_limits
                     )
 
                 # 6.7) put current state in the ring buffer
@@ -531,14 +536,12 @@ class RTDETFFController(mp.Process):
                     for j in range(n_gr):
                         single = {k: gr_msgs[k][j] for k in gr_msgs}
                         cmd_id = int(single['cmd'])
-                        print(single)
                         if cmd_id == Command.OPEN.value:
                             self.gripper.open()
                         elif cmd_id == Command.CLOSE.value:
                             self.gripper.close()
                         elif cmd_id == Command.SET.value:
                             self.gripper.move(single["value"])
-                        print("Done")
 
                     # 6.9.2) Push back the current gripper state
                     #gr_state = {
@@ -565,6 +568,48 @@ class RTDETFFController(mp.Process):
             self.ready_event.set()
             if self.config.verbose:
                 print(f"[RTDETFFController] Disconnected from robot {robot_ip}")
+
+    @staticmethod
+    def _rotvec_to_rpy(rv: np.ndarray) -> np.ndarray:
+        """rotation-vector → roll-pitch-yaw (xyz, radians)."""
+        return R.from_rotvec(rv).as_euler('xyz', degrees=False)
+
+    @staticmethod
+    def _rpy_to_rotvec(rpy: np.ndarray) -> np.ndarray:
+        """roll-pitch-yaw → rotation-vector (axis-angle)."""
+        return R.from_euler('xyz', rpy, degrees=False).as_rotvec()
+
+    def _clip_pose_rpy(self, pose: np.ndarray) -> np.ndarray:
+        """Clamp translation per-axis; clamp rotation in RPY space, return rot-vec form."""
+        out = pose.copy()
+
+        # --- translation ---
+        out[:3] = np.clip(
+            out[:3],
+            np.array(self.config.min_pose[:3]),
+            np.array(self.config.max_pose[:3])
+        )
+
+        # --- rotation (do clamp in Euler) ---
+        rpy = self._rotvec_to_rpy(out[3:6])
+        rpy = np.clip(rpy, self._min_pose_rpy, self._max_pose_rpy)
+        out[3:6] = self._rpy_to_rotvec(rpy)
+        return out
+
+    def _apply_wrench_bounds_rpy(self, pose: np.ndarray, wrench: np.ndarray):
+        """
+        Zero individual wrench components that would push the TCP farther
+        outside its per-axis (xyz + RPY) bounds.
+        """
+        # ----- translation axes -----
+        for i in range(3):
+            if pose[i] > self.config.max_pose[i] and wrench[i] > 0:
+                wrench[i] = 0.0
+            elif pose[i] < self.config.min_pose[i] and wrench[i] < 0:
+                wrench[i] = 0.0
+
+        # ----- rotation axes (convert to Euler first) -----
+        # we ignore rotation axes for that, bc I do not care. Why would you force control rotation anyway?
 
 
 def to_sixvec(T):
@@ -603,8 +648,6 @@ def to_sixvec(T):
 def _validate_config(config: URArmConfig) -> URArmConfig:
     assert 0 < config.frequency <= 500
     assert 0.03 <= config.lookahead_time <= 0.2
-    assert 0 < config.max_pos_speed
-    assert 0 < config.max_rot_speed
     if config.tcp_offset_pose is not None:
         config.tcp_offset_pose = np.array(config.tcp_offset_pose)
         assert config.tcp_offset_pose.shape == (6,)
@@ -614,9 +657,6 @@ def _validate_config(config: URArmConfig) -> URArmConfig:
         config.payload_cog = np.array(config.payload_cog)
         assert config.payload_cog.shape == (3,)
         assert config.payload_mass is not None
-    if config.joints_init is not None:
-        config.joints_init = np.array(config.joints_init)
-        assert config.joints_init.shape == (6,)
     if config.shm_manager is None:
         config.shm_manager = SharedMemoryManager()
         config.shm_manager.start()

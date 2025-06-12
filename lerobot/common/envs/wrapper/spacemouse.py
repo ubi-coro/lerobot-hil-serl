@@ -1,33 +1,69 @@
+import multiprocessing
 from typing import Dict, Sequence, Union, Tuple, Optional
 
 import gymnasium as gym
 import numpy as np
+import torch
 
 from lerobot.common.robot_devices.motors import pyspacemouse
 
 
 class SpaceMouseExpert:
     """
-    Reads from a single SpaceMouse HID device.
-
-    Args:
-      device: string name of one supported device (from pyspacemouse.supported_devices)
+    This class provides an interface to the SpaceMouse.
+    It continuously reads the SpaceMouse state and provides
+    a "get_action" method to get the latest action and button state.
     """
+
     def __init__(self, device: Optional[str] = None):
         pyspacemouse.open(device=device)
 
+        # Manager to handle shared state between processes
+        self.manager = multiprocessing.Manager()
+        self.latest_data = self.manager.dict()
+        self.latest_data["action"] = [0.0] * 6  # Using lists for compatibility
+        self.latest_data["buttons"] = [0, 0, 0, 0]
+
+        # Start a process to continuously read the SpaceMouse state
+        self.process = multiprocessing.Process(target=self._read_spacemouse)
+        self.process.daemon = True
+        self.process.start()
+
+    def _read_spacemouse(self):
+        while True:
+            state = pyspacemouse.read_all()
+            action = [0.0] * 6
+            buttons = [0, 0, 0, 0]
+
+            if len(state) == 2:
+                action = [
+                    -state[0].y, state[0].x, state[0].z,
+                    -state[0].roll, -state[0].pitch, -state[0].yaw,
+                    -state[1].y, state[1].x, state[1].z,
+                    -state[1].roll, -state[1].pitch, -state[1].yaw
+                ]
+                buttons = state[0].buttons + state[1].buttons
+            elif len(state) == 1:
+                action = [
+                    -state[0].y, state[0].x, state[0].z,
+                    -state[0].roll, -state[0].pitch, -state[0].yaw
+                ]
+                buttons = state[0].buttons
+
+            # Update the shared state
+            self.latest_data["action"] = action
+            self.latest_data["buttons"] = buttons
+
     def get_action(self) -> Tuple[np.ndarray, list]:
-        """Returns a 6-vector of axes and a list of button states"""
-        state = pyspacemouse.read_all()[0]
-        axes = np.array([
-            state.x, state.y, state.z,
-            state.roll, state.pitch, state.yaw
-        ], dtype=np.float32)
-        buttons = list(state.buttons)
-        return axes, buttons
+        """Returns the latest action and button state of the SpaceMouse."""
+        action = self.latest_data["action"]
+        buttons = self.latest_data["buttons"]
+        return np.array(action), buttons
 
     def close(self):
-        pyspacemouse.close()
+        # pyspacemouse.close()
+        self.process.terminate()
+
 
 class SpaceMouseInterventionWrapper(gym.ActionWrapper):
     """
@@ -55,10 +91,7 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
         self.experts = {}
         self.action_indices = {}
         self.scales = {}
-
-        # gripper flags
-        self.gripper_enabled = {n: env.unwrapped.controllers[n].config.use_gripper for n in self.robot_names}
-        self.action_space = env.action_space
+        self.gripper_enabled = {}
 
         # build spacemouse experts, indices and scales
         if devices is None:
@@ -69,9 +102,12 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
             action_scale = {}
 
         for name in self.robot_names:
-            num_actions = 7 if self.gripper_enabled[name] else 6
             self.experts[name] = SpaceMouseExpert(device=devices.get(name, None))
-            self.action_indices = action_indices.get(name, [1] * num_actions)
+            self.gripper_enabled[name] = env.unwrapped.robot.controllers[name].config.use_gripper
+
+            num_actions = 7 if self.gripper_enabled[name] else 6
+            self.action_indices[name] = np.array(action_indices.get(name, [1] * num_actions), dtype=bool)
+            assert len(self.action_indices[name]) == num_actions
 
             scale = np.array(action_scale.get(name, 1.0), dtype=float)
             if scale.size == 1:
@@ -79,34 +115,49 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
             assert scale.size == 6
             self.scales[name] = scale
 
-    def action(self, policy_action: np.ndarray) -> Tuple:
+    def action(self, policy_action: torch.Tensor) -> Tuple:
 
         is_intervention = False
-        intervention_action = policy_action.copy()
+        intervention_action = policy_action.clone()
         idx_start = 0
         for name in self.robot_names:
-            spacemouse_action, buttons = self.experts[name].get_action()
-            moved = np.linalg.norm(spacemouse_action) < 1e-3
-            spacemouse_action = spacemouse_action * self.scales[name]
+            expert = self.experts[name]
+            idc = self.action_indices[name]
+            scale = self.scales[name]
+            gripper_enabled = self.gripper_enabled[name]
+            offset = sum(idc)
+
+            # handle spacemouse
+            spacemouse_action, buttons = expert.get_action()
+            moved = np.linalg.norm(spacemouse_action) > 1e-3
+            spacemouse_action = scale * spacemouse_action
 
             # handle gripper
-            close_gripper, open_gripper = bool(buttons[0]), bool(buttons[1])
-            gripper_value = None
-            if self.gripper_enabled[name]:
+            if gripper_enabled:
+                # if we do not mask the gripper action out later, its current value
+                # is the last entry in the policy action
+                offset += 1
+                gripper_value = policy_action[idx_start + offset] if idc[-1] else 0.0 # avoid out of bounds error
+
+                close_gripper, open_gripper = bool(buttons[0]), bool(buttons[1])
                 if close_gripper and not open_gripper:
                     gripper_value = 0.0
                     moved = True
                 elif open_gripper and not close_gripper:
                     gripper_value = 1.0
                     moved = True
-            if self.gripper_enabled[name]:
+
+                # append gripper action
                 spacemouse_action = np.concatenate([spacemouse_action, np.array([gripper_value])])
 
+            if not moved:
+                idx_start += offset
+                continue
+
             # add filtered action to intervention action
-            is_intervention = moved
-            idc = self.action_indices[name]
-            offset = len(idc)
-            intervention_action[idx_start: idx_start + offset] = spacemouse_action[idc]
+            is_intervention = True
+            intervention_action[idx_start: idx_start + offset] = torch.Tensor(spacemouse_action[idc])
+            idx_start += offset
 
         return policy_action, is_intervention, intervention_action
 
@@ -118,17 +169,19 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
         else:
             new_action = policy_action
 
-        obs, reward, done, info = self.env.step(new_action)
+        obs, reward, terminated, truncated, info = self.env.step(new_action)
 
         info = info or {}
         info['is_intervention'] = is_intervention
         if is_intervention:
             info["action_intervention"] = intervention_action
 
-        return obs, reward, done, info
+        return obs, reward, terminated, truncated, info
 
     def reset(self, **kwargs):
-        return self.env.reset(**kwargs)
+        obs, info = self.env.reset(**kwargs)
+        info['is_intervention'] = False
+        return obs, info
 
     def close(self):
         super().close()

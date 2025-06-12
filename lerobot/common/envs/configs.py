@@ -15,7 +15,7 @@
 import abc
 import importlib
 from dataclasses import dataclass, field, fields
-from typing import Any, Dict, Optional, Tuple, Sequence
+from typing import Any, Dict, Optional, Tuple, Sequence, Literal
 
 import draccus
 import gymnasium as gym
@@ -41,10 +41,10 @@ from lerobot.common.envs.wrapper.leader import (
     GearedLeaderControlWrapper,
     GamepadControlWrapper
 )
-from lerobot.common.envs.wrapper.reward import SuccessRepeatWrapper, RewardClassifierWrapper
+from lerobot.common.envs.wrapper.reward import SuccessRepeatWrapper, RewardClassifierWrapper, AxisDistanceRewardWrapper
 from lerobot.common.envs.wrapper.smoothing import SmoothActionWrapper
 from lerobot.common.envs.wrapper.spacemouse import SpaceMouseInterventionWrapper
-from lerobot.common.envs.wrapper.tff import StaticTaskFrameWrapper
+from lerobot.common.envs.wrapper.tff import StaticTaskFrameActionWrapper, StaticTaskFrameResetWrapper
 from lerobot.common.robot_devices.motors.rtde_tff_controller import TaskFrameCommand, AxisMode
 from lerobot.common.robot_devices.robots.configs import RobotConfig, AlohaRobotConfig, URConfig
 from lerobot.common.robot_devices.robots.utils import make_robot_from_config
@@ -619,12 +619,33 @@ class ManiskillEnvConfig(EnvConfig):
 
 @dataclass
 class TaskFrameWrapperConfig:
-    static_tff: Optional[TaskFrameCommand]          = None
-    action_indices: Optional[Sequence[int]]         = None
+    # Time-limit
+    control_time_s: float = 10.0
 
-    enable_spacemouse: bool = False
-    spacemouse_device: Optional[str] = None
-    action_scale: Optional[Sequence[float] | float] = None
+    # Common static-task-frame settings (for both action & reset)
+    static_tffs: Optional[Dict[str, TaskFrameCommand]] = None
+    action_indices: Optional[Dict[str, Sequence[int]]] = None
+
+    # Reset wrapper settings
+    reset_pos: Optional[Dict[str, Sequence[float]]] = None
+    reset_kp: Optional[Dict[str, Sequence[float]]] = None
+    reset_kd: Optional[Dict[str, Sequence[float]]] = None
+    noise_std: Optional[Dict[str, Sequence[float]]] = None
+    noise_dist: Literal['normal', 'uniform'] = 'uniform'
+    safe_reset: bool = True
+    threshold: float = 0.005
+    timeout: float = 5.0
+
+    # SpaceMouse wrapper settings
+    spacemouse_devices: Optional[Dict[str, Any]] = None
+    spacemouse_action_scale: Optional[Dict[str, Sequence[float]]] = None
+
+    # Axis-distance reward wrapper settings
+    reward_axis_targets: Optional[Dict[str, float]] = None
+    reward_axis: int = 2
+    reward_scale: float = 1.0
+    reward_clip: Optional[tuple[float, float]] = None
+    reward_terminate_on_success: bool = True
 
 
 
@@ -635,24 +656,11 @@ class UREnvConfig(HILSerlRobotEnvConfig):
     robot: URConfig = URConfig()
     display_cameras: bool = False
     fps: int = 10
+    wrapper: TaskFrameWrapperConfig = TaskFrameWrapperConfig()
 
-    wrapper: dict[str, TaskFrameWrapperConfig] = field(default_factory=lambda: {
-            "main": TaskFrameWrapperConfig(
-                static_tff = TaskFrameCommand(
-                    T_WF=np.eye(4),
-                    target=np.array([0.0, 0.0, -2.0, 0.0, 0.0, 0.0]),
-                    mode=2 * [AxisMode.IMPEDANCE_VEL] + [AxisMode.FORCE] + 3 * [AxisMode.POS],
-                    kp=np.array([2500, 2500, 2500, 100, 100, 100]),
-                    kd=np.full(6, 0.2)
-                ),
-                action_indices=[1, 1, 0, 0, 0, 0],
-                action_scale=1 / 10.
-            )
-        }
-    )
     features: dict[str, PolicyFeature] = field(
         default_factory=lambda: {
-            "action": PolicyFeature(type=FeatureType.ACTION, shape=(3,)),
+            "action": PolicyFeature(type=FeatureType.ACTION, shape=(6,)),
             "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(15,)),
         }
     )
@@ -663,40 +671,68 @@ class UREnvConfig(HILSerlRobotEnvConfig):
         }
     )
 
+    def gym_kwargs(self) -> dict:
+        return {}
+
     def make(self):
         env = UREnv(
             robot=make_robot_from_config(self.robot),
             display_cameras=self.display_cameras
         )
 
-        wrapper_config = self._invert_wrapper()
+        env = TimeLimitWrapper(env, fps=self.fps, control_time_s=self.wrapper.control_time_s)
 
-        if any([tff is not None for tff in wrapper_config["static_tff"].values()]):
-            env = StaticTaskFrameWrapper(
+        # Static Action
+        if self.wrapper.static_tffs and self.wrapper.action_indices:
+            env = StaticTaskFrameActionWrapper(
                 env,
-                static_tffs=wrapper_config["static_tff"],
-                action_indices=wrapper_config["action_indices"]
+                static_tffs=self.wrapper.static_tffs,
+                action_indices=self.wrapper.action_indices
             )
 
-        if any([enable_spacemouse for enable_spacemouse in wrapper_config["enable_spacemouse"].values()]):
+        # Static Reset
+        if self.wrapper.reset_pos:
+            env = StaticTaskFrameResetWrapper(
+                env,
+                static_tffs=self.wrapper.static_tffs or {},
+                reset_pos=self.wrapper.reset_pos,
+                reset_kp=self.wrapper.reset_kp,
+                reset_kd=self.wrapper.reset_kd,
+                noise_std=self.wrapper.noise_std,
+                noise_dist=self.wrapper.noise_dist,
+                safe_reset=self.wrapper.safe_reset,
+                threshold=self.wrapper.threshold,
+                timeout=self.wrapper.timeout
+            )
+
+        # SpaceMouse Intervention
+        if (
+            self.wrapper.spacemouse_devices and
+            self.wrapper.action_indices and
+            self.wrapper.spacemouse_action_scale
+        ):
             env = SpaceMouseInterventionWrapper(
                 env,
-                devices=wrapper_config["spacemouse_device"],
-                action_indices=wrapper_config["action_indices"],
-                action_scale=wrapper_config["action_scale"]
+                devices=self.wrapper.spacemouse_devices,
+                action_indices=self.wrapper.action_indices,
+                action_scale=self.wrapper.spacemouse_action_scale
             )
 
+        # Axis-distance Reward
+        if self.wrapper.reward_axis_targets:
+            env = AxisDistanceRewardWrapper(
+                env,
+                targets=self.wrapper.reward_axis_targets,
+                axis=self.wrapper.reward_axis,
+                scale=self.wrapper.reward_scale,
+                clip=self.wrapper.reward_clip,
+                terminate_on_success=self.wrapper.reward_terminate_on_success
+            )
+
+        env = ConvertToLeRobotObservation(env)
+        env = TorchActionWrapper(env)
+
         return env
-
-
-    def _invert_wrapper(self):
-        field_names = [f.name for f in fields(TaskFrameWrapperConfig)]
-        out = {f: {} for f in field_names}
-        for i, name, wrapper in enumerate(self.wrapper.items()):
-            for f in field_names:
-                out[f][name] = getattr(wrapper, f)
-        return out
-
 
 
 

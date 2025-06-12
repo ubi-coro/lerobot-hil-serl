@@ -153,7 +153,7 @@ class UR:
 
         # Check if all components can be read
         for name in self.controllers:
-            self.controllers[name].get_state()
+            self.controllers[name].get_robot_state()
         for name in self.leader_arms:
             self.leader_arms[name].read("Present_Position")
 
@@ -228,17 +228,18 @@ class UR:
 
         # both have more than n_obs_steps data
         for name, controller in self.controllers.items():
-            controller_data = controller.get_state()
+            controller_data = controller.get_robot_state()
 
             if getattr(controller.config, 'use_gripper', False):
-                gripper_pos = controller.gripper.get_pos()
+                gripper_pos = controller.get_robot_state()["width_mm"]
                 obs[f'observation.{name}_eef_pos'] = np.concatenate([controller_data['ActualTCPPose'], [gripper_pos]])
             else:
                 obs[f'observation.{name}_eef_pos'] = controller_data['ActualTCPPose']
 
-            obs[f'observation.{name}_eef_speed'] = controller_data['ActualTCPSpeed']
-            obs[f'observation.{name}_eef_force'] = controller_data['ActualTCPForce']
-            obs[f'observation.{name}_q_pos'] = controller_data['ActualQ']
+            obs[f'observation.{name}_eef_pos'] = torch.from_numpy(obs[f'observation.{name}_eef_pos'])
+            obs[f'observation.{name}_eef_speed'] = torch.from_numpy(controller_data['ActualTCPSpeed'])
+            obs[f'observation.{name}_eef_wrench'] = torch.from_numpy(controller_data['ActualTCPForce'])
+            obs[f'observation.{name}_q_pos'] = torch.from_numpy(controller_data['ActualQ'])
 
         return obs
 
@@ -267,16 +268,15 @@ class UR:
             seg = arr[idx: idx + length]
             idx += length
 
-            # first 6 values are joint targets
-            joint_targets = seg[:6]
-            cmd = TaskFrameCommand(target=joint_targets)
+            # first 6 values are robot targets
+            cmd = TaskFrameCommand(target=seg[:6])
             controller.send_cmd(cmd)
 
             # if gripper flag, last element is width in metres
             if length == 7:
-                width_m = float(seg[6])
+                width_mm = float(seg[6])
                 # assumes controller.gripper exists
-                controller.gripper.move(width_m, wait=False)
+                controller.gripper.move(width_mm, wait=False)
         return action
 
 

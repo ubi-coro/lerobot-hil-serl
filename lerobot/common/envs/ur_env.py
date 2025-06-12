@@ -1,9 +1,11 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
 import torch
 from gymnasium import spaces
+
+from lerobot.common.robot_devices.robots.ur import UR
 
 
 class UREnv(gym.Env):
@@ -20,7 +22,7 @@ class UREnv(gym.Env):
 
     def __init__(
         self,
-        robot,
+        robot: UR,
         display_cameras: bool = False
     ):
         super().__init__()
@@ -39,11 +41,11 @@ class UREnv(gym.Env):
         obs_spaces: Dict[str, spaces.Space] = {}
 
         # Compute state dimension
-        offset = 0
+        state_dim = 0
         for k in self.state_keys:
-            offset += int(np.prod(feats[k]["shape"]))
-        state_dim = offset
-        obs_spaces["state"] = spaces.Box(
+            state_dim += int(np.prod(feats[k]["shape"]))
+        state_dim = state_dim
+        obs_spaces["observation.state"] = spaces.Box(
             low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32
         )
         
@@ -66,11 +68,11 @@ class UREnv(gym.Env):
 
         self._last_obs: Optional[Dict[str, np.ndarray]] = None
 
-    def reset(self) -> Dict[str, np.ndarray]:
+    def reset(self, **kwargs) -> Tuple[Dict[str, np.ndarray], Dict]:
         obs = self._obs()
         self.current_step = 0
         self._last_obs = obs
-        return obs
+        return obs, {}
 
     def step(self, action: Any):
         if isinstance(action, np.ndarray):
@@ -86,21 +88,13 @@ class UREnv(gym.Env):
         self.current_step += 1
         self._last_obs = obs
         
-        return obs, 0.0, False, {}
+        return obs, 0.0, False, False, {}
 
-    def _obs(self) -> Dict[str, np.ndarray]:
+    def _obs(self) -> Dict[str, torch.Tensor]:
         raw = self.robot.capture_observation()
-        
-        obs = {key: raw[key] for key in self.image_keys}
-        
-        # build state vector
-        parts = []
-        for k in self.state_keys:
-            arr = np.asarray(raw[k], dtype=np.float32).ravel()
-            parts.append(arr)
-        obs["state"] = np.concatenate(parts, axis=0)
-
-        return obs
+        #obs = {k: raw[k] for k in self.image_keys}
+        raw["observation.state"] = torch.cat([raw[k] for k in self.state_keys])
+        return raw
 
     def render(self, mode="human"):
         import cv2

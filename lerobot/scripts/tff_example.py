@@ -1,13 +1,17 @@
 import time
 import matplotlib.pyplot as plt
 from collections import deque
+
+import numpy as np
 from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (needed for 3D projection)
 
 from lerobot.common.robot_devices.motors.configs import URArmConfig
 from lerobot.common.robot_devices.motors.rtde_tff_controller import RTDETFFController, TaskFrameCommand, \
-    Command, GripperCommand
-from lerobot.common.robot_devices.spacemouse.spacemouse_expert import SpaceMouseExpert
+    Command, GripperCommand, AxisMode
+from lerobot.common.envs.wrapper.spacemouse import SpaceMouseExpert
+
+USE_ROT = False
 
 # ----------------------------------------
 # 1. Configure and start the controller
@@ -16,12 +20,8 @@ config = URArmConfig(
     robot_ip="172.22.22.2",
     frequency=500,
     gain=300,
-    max_pos_speed=0.5,
-    max_rot_speed=1.0,
     payload_mass=None,
     payload_cog=None,
-    joints_init=None,
-    joints_init_speed=1.0,
     shm_manager=None,
     receive_keys=None,
     get_max_k=10,
@@ -38,6 +38,25 @@ controller = RTDETFFController(config)
 controller.start()  # non-blocking
 
 spacemouse_expert = SpaceMouseExpert()
+action_scale = np.array([1 / 10] * 3 + [1 / 3] * 3)
+
+# setup tff command
+if USE_ROT:
+    cmd = TaskFrameCommand(
+        T_WF=np.eye(4),
+        target=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        mode=6 * [AxisMode.IMPEDANCE_VEL],
+        kp=np.array([2500, 2500, 2500, 100, 100, 100]),
+        kd=np.array([160, 160, 320, 16, 16, 16])
+    )
+else:
+    cmd = TaskFrameCommand(
+        T_WF=np.eye(4),
+        target=np.array([0.0, 0.0, 0.0, 2.221, -2.221, 0.0]),
+        mode=3 * [AxisMode.IMPEDANCE_VEL] + 3 * [AxisMode.POS],
+        kp=np.array([2500, 2500, 2500, 100, 100, 100]),
+        kd=np.array([160, 160, 320, 16, 16, 16])
+    )
 
 # Wait until the controller signals ready
 while not controller.is_ready:
@@ -49,19 +68,26 @@ while controller.is_alive():
 
     action, buttons = spacemouse_expert.get_action()
 
-    controller.send_cmd(TaskFrameCommand(target=action / 10.0))
+    action = action_scale * action
+
+    if USE_ROT:
+        cmd.target = action
+    else:
+        cmd.target[0] = action[0]
+        cmd.target[1] = action[1]
+        cmd.target[2] = action[2]
+
+    controller.send_cmd(cmd)
 
     if buttons[0]:
         controller.send_cmd(GripperCommand(cmd=Command.OPEN))
     if buttons[1]:
         controller.send_cmd(GripperCommand(cmd=Command.CLOSE))
 
+    print("EE Pose:", controller.get_robot_state()["ActualTCPPose"])
+
     t_loop = time.perf_counter() - t_start
     time.sleep(1 / frequency - t_loop)
-
-
-
-    time.sleep(0.01)
 
 # ----------------------------------------
 # 2. Prepare data structures for logging

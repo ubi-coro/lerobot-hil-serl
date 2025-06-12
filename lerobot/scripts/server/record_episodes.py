@@ -85,7 +85,6 @@ def record_dataset(env, policy, cfg):
     # Record episodes
     while dataset.num_episodes < cfg.num_episodes:
         obs, _ = env.reset()
-        busy_wait(0.1)
 
         start_episode_t = time.perf_counter()
         log_say(f"Recording episode {dataset.num_episodes}", play_sounds=True)
@@ -100,8 +99,8 @@ def record_dataset(env, policy, cfg):
             else:
                 action = env.action_space.sample() * 0.0
 
-                if hasattr(cfg, "wrapper") and cfg.wrapper.use_gripper:
-                    action[-1] = 1.0  # neutral gripper action
+                #if hasattr(cfg, "wrapper") and cfg.wrapper.use_gripper:
+                #    action[-1] = 1.0  # neutral gripper action
 
             # Step environment
             obs, reward, terminated, truncated, info = env.step(action)
