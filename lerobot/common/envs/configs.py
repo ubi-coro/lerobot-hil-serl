@@ -624,6 +624,7 @@ class TaskFrameWrapperConfig:
 
     # Common static-task-frame settings (for both action & reset)
     static_tffs: Optional[Dict[str, TaskFrameCommand]] = None
+    action_bounds: Dict[str, Dict[Literal["min", "max"], Sequence[float]]] = None
     action_indices: Optional[Dict[str, Sequence[int]]] = None
 
     # Reset wrapper settings
@@ -639,6 +640,7 @@ class TaskFrameWrapperConfig:
     # SpaceMouse wrapper settings
     spacemouse_devices: Optional[Dict[str, Any]] = None
     spacemouse_action_scale: Optional[Dict[str, Sequence[float]]] = None
+    spacemouse_intercept_with_button: bool = False
 
     # Axis-distance reward wrapper settings
     reward_axis_targets: Optional[Dict[str, float]] = None
@@ -680,14 +682,14 @@ class UREnvConfig(HILSerlRobotEnvConfig):
             display_cameras=self.display_cameras
         )
 
-        env = TimeLimitWrapper(env, fps=self.fps, control_time_s=self.wrapper.control_time_s)
-
         # Static Action
         if self.wrapper.static_tffs and self.wrapper.action_indices:
             env = StaticTaskFrameActionWrapper(
                 env,
                 static_tffs=self.wrapper.static_tffs,
-                action_indices=self.wrapper.action_indices
+                action_bounds=self.wrapper.action_bounds,
+                action_indices=self.wrapper.action_indices,
+                device=self.device
             )
 
         # Static Reset
@@ -705,6 +707,8 @@ class UREnvConfig(HILSerlRobotEnvConfig):
                 timeout=self.wrapper.timeout
             )
 
+        env = TimeLimitWrapper(env, fps=self.fps, control_time_s=self.wrapper.control_time_s)
+
         # SpaceMouse Intervention
         if (
             self.wrapper.spacemouse_devices and
@@ -715,7 +719,9 @@ class UREnvConfig(HILSerlRobotEnvConfig):
                 env,
                 devices=self.wrapper.spacemouse_devices,
                 action_indices=self.wrapper.action_indices,
-                action_scale=self.wrapper.spacemouse_action_scale
+                action_scale=self.wrapper.spacemouse_action_scale,
+                intercept_with_button=self.wrapper.spacemouse_intercept_with_button,
+                device=self.device
             )
 
         # Axis-distance Reward
@@ -729,8 +735,8 @@ class UREnvConfig(HILSerlRobotEnvConfig):
                 terminate_on_success=self.wrapper.reward_terminate_on_success
             )
 
-        env = ConvertToLeRobotObservation(env)
-        env = TorchActionWrapper(env)
+        env = ConvertToLeRobotObservation(env, device=self.device)
+        env = TorchActionWrapper(env, device=self.device)
 
         return env
 

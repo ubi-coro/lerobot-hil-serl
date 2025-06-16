@@ -22,6 +22,7 @@ from statistics import mean, quantiles
 
 import grpc
 import torch
+from pynput import keyboard
 from torch import nn
 from torch.multiprocessing import Event, Queue
 
@@ -197,6 +198,32 @@ def act_with_policy(
 
     logging.info("make_env online")
 
+    # Setup eval mode
+    eval_mode = False  # toggles when you press 'e'
+    def _on_press(key):
+        nonlocal eval_mode
+        try:
+            # only set True once, when 'e' is first pressed
+            if key.char == 'e' and not eval_mode:
+                eval_mode = True
+                logging.info("[WRAPPER] eval_mode activated")
+        except Exception as e:
+            print(e)
+
+    def _on_release(key):
+        nonlocal eval_mode
+        try:
+            # only set False once, when 'e' is released
+            if key.char == 'e' and eval_mode:
+                eval_mode = False
+                logging.info("[WRAPPER] eval_mode deactivated")
+        except AttributeError:
+            pass
+
+    _listener = keyboard.Listener(on_press=_on_press, on_release=_on_release)
+    _listener.daemon = True
+    _listener.start()
+
     online_env = cfg.env.make()
 
     set_seed(cfg.seed)
@@ -219,10 +246,10 @@ def act_with_policy(
 
     obs, info = online_env.reset()
 
-    # NOTE: For the moment we will solely handle the case of a single environment
     sum_reward_episode = 0
     list_transition_to_send_to_learner = []
     list_policy_time = []
+    episode_eval = False  # true if this episode ever went into eval mode
     episode_intervention = False
     # Add counters for intervention rate calculation
     episode_intervention_steps = 0
@@ -256,6 +283,12 @@ def act_with_policy(
         # Increment total steps counter for intervention rate
         episode_total_steps += 1
 
+        # Override termination if in eval mode
+        if eval_mode:
+            episode_eval = True
+            done = False
+            truncated = False
+
         # NOTE: We override the action if the intervention is True, because the action applied is the intervention action
         if "is_intervention" in info and info["is_intervention"]:
             # NOTE: The action space for demonstration before hand is with the full action space
@@ -283,39 +316,45 @@ def act_with_policy(
         if done or truncated:
             logging.info(f"[ACTOR] Global step {interaction_step}: Episode reward: {sum_reward_episode}")
 
-            update_policy_parameters(policy=policy.actor, parameters_queue=parameters_queue, device=device)
-
-            if len(list_transition_to_send_to_learner) > 0:
-                push_transitions_to_transport_queue(
-                    transitions=list_transition_to_send_to_learner,
-                    transitions_queue=transitions_queue,
-                )
+            # Skip sending data for evaluation episodes
+            if episode_eval:
                 list_transition_to_send_to_learner = []
+            else:
+                update_policy_parameters(policy=policy.actor, parameters_queue=parameters_queue, device=device)
 
-            stats = get_frequency_stats(list_policy_time)
-            list_policy_time.clear()
+                if len(list_transition_to_send_to_learner) > 0:
+                    push_transitions_to_transport_queue(
+                        transitions=list_transition_to_send_to_learner,
+                        transitions_queue=transitions_queue,
+                    )
+                    list_transition_to_send_to_learner = []
 
-            # Calculate intervention rate
-            intervention_rate = 0.0
-            if episode_total_steps > 0:
-                intervention_rate = episode_intervention_steps / episode_total_steps
+                stats = get_frequency_stats(list_policy_time)
+                list_policy_time.clear()
 
-            # Send episodic reward to the learner
-            interactions_queue.put(
-                python_object_to_bytes(
-                    {
-                        "Episodic reward": sum_reward_episode,
-                        "Interaction step": interaction_step,
-                        "Episode intervention": int(episode_intervention),
-                        "Intervention rate": intervention_rate,
-                        **stats,
-                    }
+                # Calculate intervention rate
+                intervention_rate = 0.0
+                if episode_total_steps > 0:
+                    intervention_rate = episode_intervention_steps / episode_total_steps
+
+                # Send episodic reward to the learner
+                interactions_queue.put(
+                    python_object_to_bytes(
+                        {
+                            "Episodic reward": sum_reward_episode,
+                            "Interaction step": interaction_step,
+                            "Episode intervention": int(episode_intervention),
+                            "Intervention rate": intervention_rate,
+                            **stats,
+                        }
+                    )
                 )
-            )
 
             # Reset intervention counters
             sum_reward_episode = 0.0
             episode_intervention = False
+            eval_mode = False
+            episode_eval = False
             episode_intervention_steps = 0
             episode_total_steps = 0
             obs, info = online_env.reset()
@@ -323,6 +362,8 @@ def act_with_policy(
         if cfg.env.fps is not None:
             dt_time = time.perf_counter() - start_time
             busy_wait(1 / cfg.env.fps - dt_time)
+
+    _listener.stop()
 
 
 #################################################
