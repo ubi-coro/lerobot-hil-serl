@@ -794,7 +794,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # Convert torch to numpy if needed
         for name in frame:
             if isinstance(frame[name], torch.Tensor):
-                frame[name] = frame[name].numpy()
+                frame[name] = frame[name].detach().cpu().numpy()
 
         validate_frame(frame, self.features)
 

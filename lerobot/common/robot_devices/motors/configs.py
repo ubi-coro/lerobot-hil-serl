@@ -15,7 +15,7 @@
 import abc
 from dataclasses import dataclass, field
 from multiprocessing.managers import SharedMemoryManager
-from typing import Optional, List
+from typing import Optional, List, Sequence
 
 import draccus
 
@@ -78,7 +78,7 @@ class URArmConfig:
     gain: int = 300
     get_max_k: int = 128
     payload_mass: Optional[float] = None
-    payload_cog: Optional[float] = None
+    payload_cog: Optional[Sequence[float]] = None
     tcp_offset_pose: Optional[list[float]] = None
 
     # safety

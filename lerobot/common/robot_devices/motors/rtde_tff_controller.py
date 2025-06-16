@@ -17,6 +17,7 @@ Assumptions
 * Units:  metres, rad, N, N·m
 """
 import collections
+import logging
 import os
 import time
 import enum
@@ -49,6 +50,7 @@ class Command(enum.IntEnum):
     STOP = 1
     OPEN = 2
     CLOSE = 3
+    ZERO_FT = 4
 
 
 @dataclass
@@ -172,7 +174,7 @@ class RTDETFFController(mp.Process):
         self.T_WF = np.eye(4)  # world←task
         self.mode = np.array([AxisMode.IMPEDANCE_VEL] * 6, dtype=np.int8)
         self.target = np.zeros(6)  # in task frame
-        self.kp = np.array([2500, 2500, 2500, 100, 100, 100])
+        self.kp = np.array([2500, 2500, 2500, 150, 150, 150])
         self.kd = np.array([80, 80, 80, 8, 8, 8])
         self.last_robot_cmd = TaskFrameCommand(
             target=np.zeros((6,)),
@@ -183,8 +185,16 @@ class RTDETFFController(mp.Process):
         )
 
         # 4) transform bounds
-        self._min_pose_rpy = R.from_rotvec(np.array(self.config.min_pose[3:6])).as_euler('xyz')
-        self._max_pose_rpy = R.from_rotvec(np.array(self.config.max_pose[3:6])).as_euler('xyz')
+        rot_min = np.array(self.config.min_pose[3:6], dtype=float)
+        rot_max = np.array(self.config.max_pose[3:6], dtype=float)
+
+        # disable RPY bounds if ANY rotation-vector bound is infinite or NaN
+        if np.isfinite(rot_min).all() and np.isfinite(rot_max).all():
+            self._use_rpy_bounds = True
+            self._min_pose_rpy = R.from_rotvec(rot_min).as_euler('xyz', degrees=False)
+            self._max_pose_rpy = R.from_rotvec(rot_max).as_euler('xyz', degrees=False)
+        else:
+            self._use_rpy_bounds = False
 
     # =========== launch & shutdown =============
     def connect(self):
@@ -248,6 +258,12 @@ class RTDETFFController(mp.Process):
 
         elif isinstance(cmd, GripperCommand):
             self.gripper_cmd_queue.put(cmd.to_queue_dict())
+
+    def zero_ft(self):
+        """Tell the controller thread to re‐zero the force‐torque sensor."""
+        # We only need the cmd field for ZERO_FT, everything else can be None
+        zero_cmd = TaskFrameCommand(cmd=Command.ZERO_FT)
+        self.send_cmd(zero_cmd)
 
     # =========== get robot state from ring buffer ============
     def get_robot_state(self, k=None, out=None):
@@ -316,7 +332,7 @@ class RTDETFFController(mp.Process):
 
             # 5.2) Put the robot into 6D forceMode (zero‐wrench to begin)
             rtde_c.forceMode(
-                to_sixvec(self.T_WF),
+                self.to_sixvec(self.T_WF),
                 [1, 1, 1, 1, 1, 1],
                 [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 2,
@@ -332,7 +348,7 @@ class RTDETFFController(mp.Process):
             # 5.4) Prepare for jitter logging
             hist = collections.deque(maxlen=1000)
             t_prev = time.monotonic()
-            log_interval = 1.0
+            log_interval = 5.0
             next_log_time = t_prev + log_interval
 
             # 6) Start main control loop
@@ -358,6 +374,10 @@ class RTDETFFController(mp.Process):
                     if cmd_id == Command.STOP.value:
                         keep_running = False
                         break
+
+                    elif cmd_id == Command.ZERO_FT.value:
+                        rtde_c.zeroFtSensor()
+                        continue
 
                     # Only SET is supported besides STOP
                     elif cmd_id == Command.SET.value:
@@ -390,7 +410,7 @@ class RTDETFFController(mp.Process):
                             self.kd = new_kd.copy()
 
                         if self.config.verbose:
-                            print("[RTDETFFController] Received SET, updated task‐frame state.")
+                            logging.debug("[RTDETFFController] Received SET, updated task‐frame state.")
 
                     else:
                         # Unknown command → treat as STOP
@@ -434,7 +454,7 @@ class RTDETFFController(mp.Process):
                     x_cmd[3:6] = R_cmd.as_rotvec()
 
                 # --- clamp virtual target pos ---
-                x_cmd = self._clip_pose_rpy(x_cmd)
+                x_cmd = self.clip_pose(x_cmd)
 
                 # 6.5) compute wrench based on mode and target
                 wrench_W = np.zeros(6, dtype=np.float64)
@@ -482,13 +502,13 @@ class RTDETFFController(mp.Process):
                         wrench_W[i] = 0.0  # safety fallback
 
                 # --- zero wrench if current pose exceeds bounds
-                self._apply_wrench_bounds_rpy(pose_W, wrench_W)
+                self.apply_wrench_bounds(pose_W, wrench_W)
 
                 # 6.6) send the wrench to the UR via forceMode(...)
                 if not self.force_on:
                     # If for some reason we dropped out of forceMode, re‐enter it
                     rtde_c.forceMode(
-                        to_sixvec(self.T_WF),
+                        self.to_sixvec(self.T_WF),
                         [1, 1, 1, 1, 1, 1],
                         wrench_W.tolist(),
                         2,
@@ -498,7 +518,7 @@ class RTDETFFController(mp.Process):
                 else:
                     # Simply update the wrench each cycle
                     rtde_c.forceMode(
-                        to_sixvec(self.T_WF),
+                        self.to_sixvec(self.T_WF),
                         [1, 1, 1, 1, 1, 1],
                         wrench_W.tolist(),
                         2,
@@ -512,10 +532,12 @@ class RTDETFFController(mp.Process):
                 state['timestamp'] = time.time()
                 self.robot_out_rb.put(state)
 
+                #print(wrench_W, state["ActualTCPForce"])
+
                 # 6.8) Jitter print every log_interval
                 if t_now >= next_log_time and len(hist) >= 10:
                     arr = np.array(hist)
-                    print(f"[Loop Jitter] μ={arr.mean() * 1000:.2f} ms  σ={arr.std() * 1000:.2f} ms  "
+                    logging.debug(f"[Loop Jitter] μ={arr.mean() * 1000:.2f} ms  σ={arr.std() * 1000:.2f} ms  "
                           f"min={arr.min() * 1000:.2f} ms  max={arr.max() * 1000:.2f} ms")
                     next_log_time = t_now + log_interval
                     
@@ -567,19 +589,9 @@ class RTDETFFController(mp.Process):
             rtde_r.disconnect()
             self.ready_event.set()
             if self.config.verbose:
-                print(f"[RTDETFFController] Disconnected from robot {robot_ip}")
+                logging.debug(f"[RTDETFFController] Disconnected from robot {robot_ip}")
 
-    @staticmethod
-    def _rotvec_to_rpy(rv: np.ndarray) -> np.ndarray:
-        """rotation-vector → roll-pitch-yaw (xyz, radians)."""
-        return R.from_rotvec(rv).as_euler('xyz', degrees=False)
-
-    @staticmethod
-    def _rpy_to_rotvec(rpy: np.ndarray) -> np.ndarray:
-        """roll-pitch-yaw → rotation-vector (axis-angle)."""
-        return R.from_euler('xyz', rpy, degrees=False).as_rotvec()
-
-    def _clip_pose_rpy(self, pose: np.ndarray) -> np.ndarray:
+    def clip_pose(self, pose: np.ndarray) -> np.ndarray:
         """Clamp translation per-axis; clamp rotation in RPY space, return rot-vec form."""
         out = pose.copy()
 
@@ -591,12 +603,14 @@ class RTDETFFController(mp.Process):
         )
 
         # --- rotation (do clamp in Euler) ---
-        rpy = self._rotvec_to_rpy(out[3:6])
-        rpy = np.clip(rpy, self._min_pose_rpy, self._max_pose_rpy)
-        out[3:6] = self._rpy_to_rotvec(rpy)
+        if self._use_rpy_bounds:
+            rpy = self._rotvec_to_rpy(out[3:6])
+            rpy = np.clip(rpy, self._min_pose_rpy, self._max_pose_rpy)
+            out[3:6] = self._rpy_to_rotvec(rpy)
+
         return out
 
-    def _apply_wrench_bounds_rpy(self, pose: np.ndarray, wrench: np.ndarray):
+    def apply_wrench_bounds(self, pose: np.ndarray, wrench: np.ndarray):
         """
         Zero individual wrench components that would push the TCP farther
         outside its per-axis (xyz + RPY) bounds.
@@ -611,38 +625,48 @@ class RTDETFFController(mp.Process):
         # ----- rotation axes (convert to Euler first) -----
         # we ignore rotation axes for that, bc I do not care. Why would you force control rotation anyway?
 
+    @staticmethod
+    def _rotvec_to_rpy(rv: np.ndarray) -> np.ndarray:
+        """rotation-vector → roll-pitch-yaw (xyz, radians)."""
+        return R.from_rotvec(rv).as_euler('xyz', degrees=False)
 
-def to_sixvec(T):
-    """
-    Convert a 4x4 homogeneous transformation matrix into a 6-vector:
-    [tx, ty, tz, rx, ry, rz], where (rx, ry, rz) is the rotation vector (axis-angle).
+    @staticmethod
+    def _rpy_to_rotvec(rpy: np.ndarray) -> np.ndarray:
+        """roll-pitch-yaw → rotation-vector (axis-angle)."""
+        return R.from_euler('xyz', rpy, degrees=False).as_rotvec()
 
-    Parameters:
-    -----------
-    T : numpy.ndarray
-        4x4 homogeneous transformation matrix
+    @staticmethod
+    def to_sixvec(T):
+        """
+        Convert a 4x4 homogeneous transformation matrix into a 6-vector:
+        [tx, ty, tz, rx, ry, rz], where (rx, ry, rz) is the rotation vector (axis-angle).
 
-    Returns:
-    --------
-    six_vec : numpy.ndarray
-        6-element vector: [tx, ty, tz, rx, ry, rz]
-    """
-    if T.shape != (4, 4):
-        raise ValueError("Input must be a 4x4 matrix.")
+        Parameters:
+        -----------
+        T : numpy.ndarray
+            4x4 homogeneous transformation matrix
 
-    # 1) Extract the translation component
-    t = T[:3, 3]  # (tx, ty, tz)
+        Returns:
+        --------
+        six_vec : numpy.ndarray
+            6-element vector: [tx, ty, tz, rx, ry, rz]
+        """
+        if T.shape != (4, 4):
+            raise ValueError("Input must be a 4x4 matrix.")
 
-    # 2) Extract the 3×3 rotation sub‐matrix
-    R_mat = T[:3, :3]
+        # 1) Extract the translation component
+        t = T[:3, 3]  # (tx, ty, tz)
 
-    # 3) Convert rotation matrix → rotation vector (axis * angle)
-    rot = R.from_matrix(R_mat)
-    rot_vec = rot.as_rotvec()  # (rx, ry, rz)
+        # 2) Extract the 3×3 rotation sub‐matrix
+        R_mat = T[:3, :3]
 
-    # 4) Concatenate translation and rotation vector into a single 6-vector
-    six_vec = np.concatenate((t, rot_vec))
-    return list(six_vec)
+        # 3) Convert rotation matrix → rotation vector (axis * angle)
+        rot = R.from_matrix(R_mat)
+        rot_vec = rot.as_rotvec()  # (rx, ry, rz)
+
+        # 4) Concatenate translation and rotation vector into a single 6-vector
+        six_vec = np.concatenate((t, rot_vec))
+        return list(six_vec)
 
 
 def _validate_config(config: URArmConfig) -> URArmConfig:

@@ -19,6 +19,7 @@ and send orders to its motors.
 # calibration procedure, to make it easy for people to add their own robot.
 
 import json
+import logging
 from multiprocessing.managers import SharedMemoryManager
 
 import numpy as np
@@ -143,10 +144,10 @@ class UR:
 
         # Connect the arms
         for name in self.controllers:
-            print(f"Connecting {name} follower arm.")
+            logging.info(f"Connecting {name} follower arm.")
             self.controllers[name].start()
         for name in self.leader_arms:
-            print(f"Connecting {name} leader arm.")
+            logging.info(f"Connecting {name} leader arm.")
             self.leader_arms[name].connect()
 
         self.activate_calibration()
@@ -177,7 +178,7 @@ class UR:
                     calibration = json.load(f)
             else:
                 # TODO(rcadene): display a warning in __init__ if calibration file not available
-                print(f"Missing calibration file '{arm_calib_path}'")
+                logging.warn(f"Missing calibration file '{arm_calib_path}'")
 
                 if not all(arm.read("Torque_Enable") == TorqueMode.DISABLED.value):
                     input(f"Press <enter> to disable the torque of {self.robot_type} {name} {arm_type}... ")

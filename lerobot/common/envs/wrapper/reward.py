@@ -133,7 +133,7 @@ class AxisDistanceRewardWrapper(gym.Wrapper):
         # Only consider controllers/robots that exist in the wrapped env.
         self.robot_names = list(env.unwrapped.robot.controllers.keys())
 
-    def compute_extra_reward(self) -> tuple[float, Dict[str, float], bool]:
+    def compute_extra_reward(self) -> tuple[float, bool]:
         """
         Computes extra reward only for robots that have an entry in self.targets.
         Per robot, extra reward is computed as:
@@ -160,13 +160,12 @@ class AxisDistanceRewardWrapper(gym.Wrapper):
         if self.clip is not None:
             extra_reward = np.clip(extra_reward, *self.clip)
 
-        return extra_reward, rewards, success
+        return float(extra_reward), success
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
 
-        extra_reward, per_robot_rewards, success = self.compute_extra_reward()
-        info["per_robot_rewards"] = per_robot_rewards
+        extra_reward, success = self.compute_extra_reward()
         total_reward = reward + extra_reward
 
         if self.terminate_on_success:

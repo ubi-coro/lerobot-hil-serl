@@ -315,14 +315,14 @@ class TorchActionWrapper(gym.Wrapper):
     to torch tensors.
     """
 
-    def __init__(self, env: gym.Env):
+    def __init__(self, env: gym.Env, device: str = "cuda"):
         super().__init__(env)
         self.action_space = TorchBox(
             low=env.action_space.low,
             high=env.action_space.high,
             shape=env.action_space.shape,
             torch_dtype=torch.float32,
-            device=torch.device("cpu"),
+            device=device,
         )
 
     def step(self, action: torch.Tensor):

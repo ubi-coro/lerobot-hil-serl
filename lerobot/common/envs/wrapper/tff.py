@@ -1,3 +1,4 @@
+import logging
 import time
 from copy import copy
 from typing import Dict, Sequence, Optional, Literal
@@ -27,10 +28,13 @@ class StaticTaskFrameActionWrapper(gym.Wrapper):
         self,
         env: gym.Env,
         static_tffs: Dict[str, TaskFrameCommand],
+        action_bounds: Dict[str, Dict[Literal["min", "max"], Sequence[float]]],
         action_indices: Dict[str, Sequence[int]],
+        device: str = "cuda"
     ):
         super().__init__(env)
         self.robot_names = list(env.unwrapped.robot.controllers.keys())
+        self.device = device
 
         default_tff = TaskFrameCommand(
             target=np.full(6, 0.0),
@@ -42,6 +46,8 @@ class StaticTaskFrameActionWrapper(gym.Wrapper):
 
         # create an index map so we know where each robot's slice lives
         offset = 0
+        max_action_space_bounds = []
+        min_action_space_bounds = []
         self.static_tffs = {}
         self.gripper_enabled = {}
         self.action_indices = {}
@@ -54,15 +60,28 @@ class StaticTaskFrameActionWrapper(gym.Wrapper):
             self.action_indices[name] = np.array(action_indices.get(name, [1] * num_actions), dtype=bool)
             assert len(self.action_indices[name]) == num_actions
 
+            # map entries in the policy action to <name>'s controller action
             lin, rin = offset, offset + sum(self.action_indices[name])
             self.slice_map[name] = slice(lin, rin)
             offset = rin
 
-        # build new action space: sum of lengths of each robot's action_indices
-        dims = [sum(idc) for idc in action_indices.values()]
+            # handle bounds
+            assert len(action_bounds[name]["min"]) == sum(self.action_indices[name])
+            assert len(action_bounds[name]["max"]) == sum(self.action_indices[name])
+            min_action_space_bounds.append(action_bounds[name]["min"])
+            max_action_space_bounds.append(action_bounds[name]["max"])
+
+        # build new action space
+        min_action_space_bounds = np.concatenate(min_action_space_bounds)
+        max_action_space_bounds = np.concatenate(max_action_space_bounds)
         self.action_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(sum(dims),), dtype=np.float32
+            low=min_action_space_bounds,
+            high=max_action_space_bounds,
+            shape=(len(max_action_space_bounds),),
+            dtype=np.float32
         )
+        self.min_action = torch.from_numpy(min_action_space_bounds).to(dtype=torch.float32, device=self.device)
+        self.max_action = torch.from_numpy(max_action_space_bounds).to(dtype=torch.float32, device=self.device)
 
     def reset(self, **kwargs):
         # send static TFF to each controller
@@ -78,12 +97,15 @@ class StaticTaskFrameActionWrapper(gym.Wrapper):
         action: low-dim np.ndarray of shape (sum len(action_indices),)
         We expand it to the full action vector, inserting zeros for unexposed dims.
         """
+        # clip action
+        action = torch.clamp(action, min=self.min_action, max=self.max_action)
+
         # overwrite static axes with tff targets
         full_action = []
         for name in self.robot_names:
             idc = self.action_indices[name]
             slc = self.slice_map[name]
-            target = torch.Tensor(self.static_tffs[name].target)
+            target = torch.tensor(self.static_tffs[name].target).to(device=self.device)
 
             if self.gripper_enabled[name]:
                 gripper_value = action[slc][-1] if idc[-1] else 0.0
@@ -92,7 +114,8 @@ class StaticTaskFrameActionWrapper(gym.Wrapper):
             target[idc] = action[slc]
             full_action.append(target)
 
-        obs, reward, terminated, truncated, info = self.env.step(torch.cat(full_action))
+        full_action = torch.cat(full_action).to(device=self.device)
+        obs, reward, terminated, truncated, info = self.env.step(full_action)
         return obs, reward, terminated, truncated, info
 
 
@@ -171,12 +194,13 @@ class StaticTaskFrameResetWrapper(gym.Wrapper):
             rot_err = np.linalg.norm(r_err.as_rotvec())
 
             error = np.sqrt(pos_err ** 2 + rot_err ** 2)
+            #print("Tgt:", target[:3], "Pos:", pos_err)
             if error < self.threshold:
                 break
 
             if time.time() - start_time > self.timeout:
-                print(f"[WARN] {name} did not reach target within {self.timeout}s "
-                      f"(final error={error:.4f}, pos={pos_err:.4f}, rot={rot_err:.4f})")
+                logging.warn(f"[WARN] {name} did not reach target within {self.timeout}s "
+                             f"(final error={error:.4f}, pos={pos_err:.4f}, rot={rot_err:.4f})")
                 break
             time.sleep(0.01)
 

@@ -85,9 +85,13 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
         devices: Dict[str, str],
         action_indices: Dict[str, Sequence[int]],
         action_scale: Dict[str, Union[float, Sequence[float]]],
+        intercept_with_button: bool = False,
+        device: str = "cuda"
     ):
         super().__init__(env)
         self.robot_names = list(env.unwrapped.robot.controllers.keys())
+        self.intercept_with_button = intercept_with_button
+        self.device = device
         self.experts = {}
         self.action_indices = {}
         self.scales = {}
@@ -104,6 +108,7 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
         for name in self.robot_names:
             self.experts[name] = SpaceMouseExpert(device=devices.get(name, None))
             self.gripper_enabled[name] = env.unwrapped.robot.controllers[name].config.use_gripper
+            assert not (intercept_with_button and self.gripper_enabled[name])
 
             num_actions = 7 if self.gripper_enabled[name] else 6
             self.action_indices[name] = np.array(action_indices.get(name, [1] * num_actions), dtype=bool)
@@ -114,6 +119,8 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
                 scale = np.full(6, scale)
             assert scale.size == 6
             self.scales[name] = scale
+
+
 
     def action(self, policy_action: torch.Tensor) -> Tuple:
 
@@ -129,7 +136,12 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
 
             # handle spacemouse
             spacemouse_action, buttons = expert.get_action()
-            moved = np.linalg.norm(spacemouse_action) > 1e-3
+
+            if self.intercept_with_button:
+                moved = bool(buttons[0]) | bool(buttons[1])
+            else:
+                moved = np.linalg.norm(spacemouse_action) > 1e-3
+
             spacemouse_action = scale * spacemouse_action
 
             # handle gripper
@@ -156,7 +168,8 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
 
             # add filtered action to intervention action
             is_intervention = True
-            intervention_action[idx_start: idx_start + offset] = torch.Tensor(spacemouse_action[idc])
+            intervention_action_slice = torch.tensor(spacemouse_action[idc]).to(device=self.device)
+            intervention_action[idx_start: idx_start + offset] = intervention_action_slice
             idx_start += offset
 
         return policy_action, is_intervention, intervention_action

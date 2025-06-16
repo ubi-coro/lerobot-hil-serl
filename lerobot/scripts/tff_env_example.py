@@ -9,6 +9,7 @@ num_episodes = 0
 while num_episodes < config.num_episodes:
     print("Perform reset")
     env.reset()
+    print("Start episode")
 
     done = False
     sum_of_rewards = 0.0
@@ -23,7 +24,7 @@ while num_episodes < config.num_episodes:
         done = terminated | truncated
 
         #print(obs["observation.main_eef_wrench"])
-        #print(obs["observation.main_eef_pos"])
+        print(obs["observation.main_eef_pos"])
         #print(len(obs["state"]))
 
         t_loop = time.perf_counter()- t_start

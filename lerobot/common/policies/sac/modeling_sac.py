@@ -85,7 +85,6 @@ class SACPolicy(
             # Cache and normalize image features
             observation_features = self.actor.encoder.get_cached_image_features(batch, normalize=True)
 
-
         actions, _, _ = self.actor(batch, observation_features)
         actions = self.unnormalize_outputs({"action": actions})["action"]
         q_pred = self.critic_forward(batch, actions, use_target=False, observation_features=observation_features)
@@ -626,6 +625,9 @@ class SACObservationEncoder(nn.Module):
         Returns:
             Dictionary mapping image keys to their corresponding encoded features
         """
+        if not self.image_keys:
+            return {}
+
         if normalize:
             obs = self.input_normalization(obs)
         batched = torch.cat([obs[k] for k in self.image_keys], dim=0)
