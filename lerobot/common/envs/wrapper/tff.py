@@ -1,6 +1,6 @@
 import logging
 import time
-from copy import copy
+from copy import copy, deepcopy
 from typing import Dict, Sequence, Optional, Literal
 
 import gymnasium as gym
@@ -161,7 +161,9 @@ class StaticTaskFrameResetWrapper(gym.Wrapper):
                 target=np.array(reset_pos.get(name)),  # no default, should error on missing robot
                 kp=reset_kp.get(name, self.static_tffs[name].kp),
                 kd=reset_kd.get(name, self.static_tffs[name].kd),
-                T_WF = self.static_tffs[name].T_WF
+                T_WF=self.static_tffs[name].T_WF,
+                max_pose_rpy=self.static_tffs[name].max_pose_rpy,
+                min_pose_rpy=self.static_tffs[name].min_pose_rpy
             )
 
             # correctly shape noise std
@@ -194,12 +196,11 @@ class StaticTaskFrameResetWrapper(gym.Wrapper):
             rot_err = np.linalg.norm(r_err.as_rotvec())
 
             error = np.sqrt(pos_err ** 2 + rot_err ** 2)
-            #print("Tgt:", target[:3], "Pos:", pos_err)
             if error < self.threshold:
                 break
 
             if time.time() - start_time > self.timeout:
-                logging.warn(f"[WARN] {name} did not reach target within {self.timeout}s "
+                logging.warning(f"[RESET] {name} did not reach target within {self.timeout}s "
                              f"(final error={error:.4f}, pos={pos_err:.4f}, rot={rot_err:.4f})")
                 break
             time.sleep(0.01)
@@ -215,7 +216,7 @@ class StaticTaskFrameResetWrapper(gym.Wrapper):
 
             # Apply noise if provided
             if name in self.noise_std:
-                noisy_cmd = copy(base_cmd)
+                noisy_cmd = deepcopy(base_cmd)
                 if self.noise_dist == "uniform":
                     noisy_cmd.target += np.random.uniform(-self.noise_std[name], self.noise_std[name])
                 elif self.noise_dist == "normal":
@@ -228,4 +229,10 @@ class StaticTaskFrameResetWrapper(gym.Wrapper):
                 self.wait_until_reached(name, base_cmd.target)
 
         return self.env.reset(**kwargs)
+
+
+
+
+
+
 

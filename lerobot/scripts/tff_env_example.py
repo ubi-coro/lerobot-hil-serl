@@ -1,8 +1,8 @@
 import time
 
-from lerobot.experiments.nist_peg_in_hole import URPegInHoleConfig
+from lerobot.experiments.nist_peg_in_hole_c_rot import URPegInHoleCRotConfig
 
-config = URPegInHoleConfig()
+config = URPegInHoleCRotConfig()
 env = config.make()
 
 num_episodes = 0
@@ -24,7 +24,7 @@ while num_episodes < config.num_episodes:
         done = terminated | truncated
 
         #print(obs["observation.main_eef_wrench"])
-        print(obs["observation.main_eef_pos"])
+        #print(obs["observation.main_eef_pos"][2])
         #print(len(obs["state"]))
 
         t_loop = time.perf_counter()- t_start

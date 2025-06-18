@@ -247,6 +247,7 @@ class OpenCVCamera:
         # Store the raw (capture) resolution from the config.
         self.capture_width = config.width
         self.capture_height = config.height
+        self.focus = config.focus
 
         # If rotated by ±90, swap width and height.
         if config.rotation in [-90, 90]:
@@ -339,6 +340,8 @@ class OpenCVCamera:
         if self.capture_height is not None:
             self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.capture_height)
         self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        if self.focus is not None:
+            self.camera.set(cv2.CAP_PROP_FOCUS, self.focus)
 
         actual_fps = self.camera.get(cv2.CAP_PROP_FPS)
         actual_width = self.camera.get(cv2.CAP_PROP_FRAME_WIDTH)

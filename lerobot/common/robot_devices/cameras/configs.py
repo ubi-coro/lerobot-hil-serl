@@ -43,6 +43,7 @@ class OpenCVCameraConfig(CameraConfig):
     fps: int | None = None
     width: int | None = None
     height: int | None = None
+    focus: int | None = None
     color_mode: str = "rgb"
     channels: int | None = None
     rotation: int | None = None

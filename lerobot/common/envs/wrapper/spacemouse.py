@@ -121,7 +121,6 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
             self.scales[name] = scale
 
 
-
     def action(self, policy_action: torch.Tensor) -> Tuple:
 
         is_intervention = False

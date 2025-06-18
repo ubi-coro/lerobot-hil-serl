@@ -15,7 +15,7 @@
 import abc
 import importlib
 from dataclasses import dataclass, field, fields
-from typing import Any, Dict, Optional, Tuple, Sequence, Literal
+from typing import Any, Dict, Optional, Tuple, Sequence, Literal, Annotated
 
 import draccus
 import gymnasium as gym
@@ -622,6 +622,10 @@ class TaskFrameWrapperConfig:
     # Time-limit
     control_time_s: float = 10.0
 
+    # cropping
+    crop_params_dict: Optional[Dict[str, Tuple[int, int, int, int]]] = None
+    crop_resize_size: Optional[Tuple[int, int]] = None
+
     # Common static-task-frame settings (for both action & reset)
     static_tffs: Optional[Dict[str, TaskFrameCommand]] = None
     action_bounds: Dict[str, Dict[Literal["min", "max"], Sequence[float]]] = None
@@ -736,6 +740,14 @@ class UREnvConfig(HILSerlRobotEnvConfig):
             )
 
         env = ConvertToLeRobotObservation(env, device=self.device)
+
+        if self.wrapper.crop_params_dict is not None:
+            env = ImageCropResizeWrapper(
+                env=env,
+                crop_params_dict=self.wrapper.crop_params_dict,
+                resize_size=self.wrapper.crop_resize_size,
+            )
+
         env = TorchActionWrapper(env, device=self.device)
 
         return env

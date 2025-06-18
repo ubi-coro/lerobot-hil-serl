@@ -151,8 +151,8 @@ class AxisDistanceRewardWrapper(gym.Wrapper):
             actual = pose[self.axis]
             target = self.targets[name]
 
-            rewards[name] = -(actual - target)
-            successes[name] = actual < target
+            rewards[name] = -(target - actual)
+            successes[name] = actual > target
 
         extra_reward = sum(rewards.values()) * self.scale
         success = all(list(successes.values()))

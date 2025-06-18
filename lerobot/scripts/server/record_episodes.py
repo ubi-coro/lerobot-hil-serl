@@ -97,7 +97,7 @@ def record_dataset(env, policy, cfg):
             if cfg.pretrained_policy_name_or_path is not None:
                 action = policy.select_action(obs)
             else:
-                action = env.action_space.sample() * 0.0
+                action = env.action_space.sample()
 
                 #if hasattr(cfg, "wrapper") and cfg.wrapper.use_gripper:
                 #    action[-1] = 1.0  # neutral gripper action
@@ -144,6 +144,8 @@ def record_dataset(env, policy, cfg):
             continue
 
         dataset.save_episode()
+
+    env.close()
 
     # Finalize dataset
     if cfg.push_to_hub:

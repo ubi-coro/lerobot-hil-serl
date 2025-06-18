@@ -351,6 +351,7 @@ def act_with_policy(
                 )
 
             # Reset intervention counters
+            print(f"Finished episode, got {sum_reward_episode}")
             sum_reward_episode = 0.0
             episode_intervention = False
             eval_mode = False

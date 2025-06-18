@@ -82,8 +82,8 @@ class URArmConfig:
     tcp_offset_pose: Optional[list[float]] = None
 
     # safety
-    max_pose: List[float] = field(default_factory = lambda: [float("inf")] * 6)
-    min_pose: List[float] = field(default_factory = lambda: [-float("inf")] * 6)
+    max_pose_rpy: List[float] = field(default_factory = lambda: [float("inf")] * 6)
+    min_pose_rpy: List[float] = field(default_factory = lambda: [-float("inf")] * 6)
     wrench_limits: List[float] = field(default_factory = lambda: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])
     
     # latency

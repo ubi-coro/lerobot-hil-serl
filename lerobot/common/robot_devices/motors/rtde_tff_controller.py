@@ -57,11 +57,13 @@ class Command(enum.IntEnum):
 class TaskFrameCommand:
     """One message = full spec for all 6 DoF"""
     cmd: Command = Command.SET
-    T_WF: Optional[list | np.ndarray]     = None  # 4×4 homogeneous transform (world→task)
-    mode: Optional[list[AxisMode]]        = None  # len==6
-    target: Optional[list | np.ndarray]   = None  # 6 pos [m/rad], vel [m/s], or force [N]
-    kp: Optional[list | np.ndarray]       = None  # 6 proportional gains (position‐error → force)
-    kd: Optional[list | np.ndarray]       = None  # 6 derivative gains (velocity‐error → force)
+    T_WF: Optional[list | np.ndarray]         = None  # world→task transform as a 6 vec
+    mode: Optional[list[AxisMode]]            = None  # len==6
+    target: Optional[list | np.ndarray]       = None  # 6 pos [m/rad], vel [m/s], or force [N]
+    kp: Optional[list | np.ndarray]           = None  # 6 proportional gains (position‐error → force)
+    kd: Optional[list | np.ndarray]           = None  # 6 derivative gains (velocity‐error → force)
+    max_pose_rpy: Optional[list | np.ndarray] = None  # 6 pos [m], rot [rad] in rpy
+    min_pose_rpy: Optional[list | np.ndarray] = None  # 6 pos [m], rot [rad] in rpy
 
     def to_queue_dict(self):
         d = asdict(self)
@@ -72,6 +74,8 @@ class TaskFrameCommand:
             d["target"] = np.asarray(self.target).astype(np.float64)
             d["kp"]     = np.asarray(self.kp).astype(np.float64)
             d["kd"]     = np.asarray(self.kd).astype(np.float64)
+            d["max_pose_rpy"] = np.asarray(self.max_pose_rpy).astype(np.float64)
+            d["min_pose_rpy"] = np.asarray(self.min_pose_rpy).astype(np.float64)
         except Exception as e:
             print(f"TaskFrameCommand seems to be missing fields: {e}")
         return d
@@ -89,6 +93,10 @@ class TaskFrameCommand:
             self.kp = cmd.kp
         if cmd.kd is not None:
             self.kd = cmd.kd
+        if cmd.max_pose_rpy is not None:
+            self.max_pose_rpy = cmd.max_pose_rpy
+        if cmd.min_pose_rpy is not None:
+            self.min_pose_rpy = cmd.min_pose_rpy
    
 @dataclass
 class GripperCommand:
@@ -103,11 +111,13 @@ class GripperCommand:
 
 _EXAMPLE_TF_MSG = TaskFrameCommand(
     cmd=Command.SET,
-    T_WF=np.eye(4),
+    T_WF=np.zeros(6),
     mode=[AxisMode.POS]*6,
     target=np.zeros(6),
     kp=np.full(6,300.0),
-    kd=np.full(6,20.0)
+    kd=np.full(6,20.0),
+    max_pose_rpy=np.full(6, np.inf),
+    min_pose_rpy=np.full(6, -np.inf)
 ).to_queue_dict()
 
 
@@ -171,30 +181,22 @@ class RTDETFFController(mp.Process):
         )
 
         # 3) Controller state: last TaskFrameCommand, task‐frame state, gains, etc.
-        self.T_WF = np.eye(4)  # world←task
-        self.mode = np.array([AxisMode.IMPEDANCE_VEL] * 6, dtype=np.int8)
+        self.T_WF = np.zeros((6,))  # world←task
+        self.mode = [AxisMode.IMPEDANCE_VEL] * 6
         self.target = np.zeros(6)  # in task frame
         self.kp = np.array([2500, 2500, 2500, 150, 150, 150])
         self.kd = np.array([80, 80, 80, 8, 8, 8])
+        self.max_pose_rpy = np.full(6, np.inf)
+        self.min_pose_rpy = np.full(6, -np.inf)
         self.last_robot_cmd = TaskFrameCommand(
-            target=np.zeros((6,)),
-            mode=[AxisMode.IMPEDANCE_VEL] * 6,
+            target=self.target,
+            mode=self.mode,
             kp=self.kp,
             kd=self.kd,
-            T_WF=np.eye(4)
+            T_WF=self.T_WF,
+            max_pose_rpy=self.max_pose_rpy,
+            min_pose_rpy=self.min_pose_rpy
         )
-
-        # 4) transform bounds
-        rot_min = np.array(self.config.min_pose[3:6], dtype=float)
-        rot_max = np.array(self.config.max_pose[3:6], dtype=float)
-
-        # disable RPY bounds if ANY rotation-vector bound is infinite or NaN
-        if np.isfinite(rot_min).all() and np.isfinite(rot_max).all():
-            self._use_rpy_bounds = True
-            self._min_pose_rpy = R.from_rotvec(rot_min).as_euler('xyz', degrees=False)
-            self._max_pose_rpy = R.from_rotvec(rot_max).as_euler('xyz', degrees=False)
-        else:
-            self._use_rpy_bounds = False
 
     # =========== launch & shutdown =============
     def connect(self):
@@ -325,14 +327,14 @@ class RTDETFFController(mp.Process):
             # 5) Enter impedance loop via forceMode
 
             # 5.1) Initialize target pose = current task pose (so we start from zero error)
-            pose_W = np.array(rtde_r.getActualTCPPose())  # [x, y, z, Rx, Ry, Rz] in world
-            x_cmd = pose_W.copy()
+            pose_F = self.read_current_state(rtde_r)["ActualTCPPose"]
+            x_cmd = pose_F.copy()  # [x, y, z, Rx, Ry, Rz] in task
             self.mode = np.array([AxisMode.POS] * 6, dtype=np.int8)
             self.target = x_cmd.copy()  # in task frame
 
             # 5.2) Put the robot into 6D forceMode (zero‐wrench to begin)
             rtde_c.forceMode(
-                self.to_sixvec(self.T_WF),
+                self.T_WF.tolist(),
                 [1, 1, 1, 1, 1, 1],
                 [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 2,
@@ -386,6 +388,7 @@ class RTDETFFController(mp.Process):
                         new_T = single.get('T_WF', None)
                         if new_T is not None:
                             self.T_WF = new_T.copy()
+                            pose_F = self.read_current_state(rtde_r)["ActualTCPPose"]
 
                         # mode: 6×int8
                         new_mode = single.get('mode', None)
@@ -393,7 +396,7 @@ class RTDETFFController(mp.Process):
                             # reset virtual position when switching to force-based velocity control
                             for i in range(6):
                                 if new_mode[i] != self.mode[i] and new_mode[i] == AxisMode.IMPEDANCE_VEL:
-                                    x_cmd[i] = pose_W[i]
+                                    x_cmd[i] = pose_F[i]
                             self.mode = new_mode.copy()
 
                         # target: 6×float64
@@ -409,6 +412,14 @@ class RTDETFFController(mp.Process):
                         if new_kd is not None:
                             self.kd = new_kd.copy()
 
+                        # bounds
+                        new_max_pose_rpy = single.get('max_pose_rpy', None)
+                        if new_max_pose_rpy is not None:
+                            self.max_pose_rpy = new_max_pose_rpy.copy()
+                        new_min_pose_rpy = single.get('min_pose_rpy', None)
+                        if new_min_pose_rpy is not None:
+                            self.min_pose_rpy = new_min_pose_rpy.copy()
+
                         if self.config.verbose:
                             logging.debug("[RTDETFFController] Received SET, updated task‐frame state.")
 
@@ -420,9 +431,10 @@ class RTDETFFController(mp.Process):
                 if not keep_running:
                     break
 
-                # 6.3) read current state (world)
-                pose_W = np.array(rtde_r.getActualTCPPose())  # [x, y, z, Rx, Ry, Rz]
-                vel_W = np.array(rtde_r.getActualTCPSpeed())  # [vx, vy, vz, ωx, ωy, ωz]
+                # 6.3) read current state (task frame)
+                state_F = self.read_current_state(rtde_r)
+                pose_F = state_F["ActualTCPPose"]
+                v_F = state_F["ActualTCPSpeed"]
 
                 # 6.4) update virtual position
 
@@ -462,17 +474,17 @@ class RTDETFFController(mp.Process):
                 # --- translation ---
                 mask_virtual = np.array([1 if AxisMode(self.mode[i]) in (AxisMode.IMPEDANCE_VEL, AxisMode.POS) else 0 for i in range(3, 6)])
                 if np.any(mask_virtual):
-                    pos_err_vec = x_cmd[:3] - np.array(pose_W[:3])
+                    pos_err_vec = x_cmd[:3] - np.array(pose_F[:3])
 
                 for i in range(3):
                     mode_i = AxisMode(self.mode[i])
                     if mode_i == AxisMode.POS:
-                        wrench_W[i] = self.kp[i] * pos_err_vec[i] + self.kd[i] * -vel_W[i]
+                        wrench_W[i] = self.kp[i] * pos_err_vec[i] + self.kd[i] * -v_F[i]
                     elif mode_i == AxisMode.IMPEDANCE_VEL:
-                        vel_err = self.target[i] - vel_W[i]
+                        vel_err = self.target[i] - v_F[i]
                         wrench_W[i] = self.kp[i] * pos_err_vec[i] + self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
                     elif mode_i == AxisMode.PURE_VEL:
-                        vel_err = self.target[i] - vel_W[i]
+                        vel_err = self.target[i] - v_F[i]
                         wrench_W[i] = self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
                     elif mode_i == AxisMode.FORCE:
                         wrench_W[i] = float(self.target[i])  # directly obey commanded force
@@ -482,19 +494,19 @@ class RTDETFFController(mp.Process):
                 # --- rotation ---
                 if np.any(mask_virtual):
                     R_cmd = R.from_rotvec(x_cmd[3:6])
-                    R_act = R.from_rotvec(pose_W[3:6])
+                    R_act = R.from_rotvec(pose_F[3:6])
                     R_err = R_cmd * R_act.inv()
                     rot_err_vec = R_err.as_rotvec()
 
                 for i in range(3, 6):
                     mode_i = AxisMode(self.mode[i])
                     if mode_i == AxisMode.POS:
-                        wrench_W[i] = self.kp[i] * rot_err_vec[i - 3] + self.kd[i] * -vel_W[i]
+                        wrench_W[i] = self.kp[i] * rot_err_vec[i - 3] + self.kd[i] * -v_F[i]
                     elif mode_i == AxisMode.IMPEDANCE_VEL:
-                        vel_err = self.target[i] - vel_W[i]
+                        vel_err = self.target[i] - v_F[i]
                         wrench_W[i] = self.kp[i] * rot_err_vec[i - 3] + self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
                     elif mode_i == AxisMode.PURE_VEL:
-                        vel_err = self.target[i] - vel_W[i]
+                        vel_err = self.target[i] - v_F[i]
                         wrench_W[i] = self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
                     elif mode_i == AxisMode.FORCE:
                         wrench_W[i] = float(self.target[i])  # directly obey commanded wrench
@@ -502,13 +514,13 @@ class RTDETFFController(mp.Process):
                         wrench_W[i] = 0.0  # safety fallback
 
                 # --- zero wrench if current pose exceeds bounds
-                self.apply_wrench_bounds(pose_W, wrench_W)
+                self.apply_wrench_bounds(pose_F, wrench_W)
 
                 # 6.6) send the wrench to the UR via forceMode(...)
                 if not self.force_on:
                     # If for some reason we dropped out of forceMode, re‐enter it
                     rtde_c.forceMode(
-                        self.to_sixvec(self.T_WF),
+                        self.T_WF.tolist(),
                         [1, 1, 1, 1, 1, 1],
                         wrench_W.tolist(),
                         2,
@@ -518,7 +530,7 @@ class RTDETFFController(mp.Process):
                 else:
                     # Simply update the wrench each cycle
                     rtde_c.forceMode(
-                        self.to_sixvec(self.T_WF),
+                        self.T_WF.tolist(),
                         [1, 1, 1, 1, 1, 1],
                         wrench_W.tolist(),
                         2,
@@ -526,13 +538,12 @@ class RTDETFFController(mp.Process):
                     )
 
                 # 6.7) put current state in the ring buffer
-                state = {}
+                out_state = self.read_current_state(rtde_r)
                 for key in self.config.receive_keys:
-                    state[key] = np.array(getattr(rtde_r, 'get' + key)())
-                state['timestamp'] = time.time()
-                self.robot_out_rb.put(state)
-
-                #print(wrench_W, state["ActualTCPForce"])
+                    if key not in state_F:
+                        out_state[key] = np.array(getattr(rtde_r, 'get' + key)())
+                out_state['timestamp'] = time.time()
+                self.robot_out_rb.put(out_state)
 
                 # 6.8) Jitter print every log_interval
                 if t_now >= next_log_time and len(hist) >= 10:
@@ -591,6 +602,58 @@ class RTDETFFController(mp.Process):
             if self.config.verbose:
                 logging.debug(f"[RTDETFFController] Disconnected from robot {robot_ip}")
 
+    def read_current_state(self, rtde_r):
+        # 1) get the world→frame 4×4
+        T = np.linalg.inv(self.sixvec_to_homogeneous(self.T_WF))
+        R_fw = T[:3, :3]        # rotation: world → frame
+        t_fw = T[:3,  3]        # translation: world origin in frame coords
+
+        # 2) pose in world and speed
+        pose_W = np.array(rtde_r.getActualTCPPose())   # [x,y,z, Rx,Ry,Rz]
+        v_W    = np.array(rtde_r.getActualTCPSpeed())  # [vx,vy,vz, ωx,ωy,ωz]
+
+        # 3) pose in frame
+        p_W_h = np.hstack((pose_W[:3], 1.0))
+        p_F   = T.dot(p_W_h)[:3]
+        R_W   = R.from_rotvec(pose_W[3:6]).as_matrix()
+        R_F   = R_fw.dot(R_W)
+        rotvec_F = R.from_matrix(R_F).as_rotvec()
+        pose_F   = np.concatenate((p_F, rotvec_F))
+
+        # 4) twist in frame
+        v_F = np.empty(6)
+        v_F[:3]  = R_fw.dot(v_W[:3])
+        v_F[3:6] = R_fw.dot(v_W[3:6])
+
+        # 5) wrench in world
+        wrench_W = np.array(rtde_r.getActualTCPForce())  # [Fx,Fy,Fz, Mx,My,Mz]
+        f_W = wrench_W[:3]
+        m_TCP = wrench_W[3:]
+
+        # compute frame origin in world (base) coords
+        p_frame = -R_fw.T.dot(t_fw)  # your p_task
+
+        # TCP position in world coords
+        p_TCP = pose_W[:3]
+
+        # vector from TCP to frame origin
+        r = p_frame - p_TCP
+
+        # shift the moment from the TCP to your frame origin
+        m_frame = m_TCP + np.cross(r, f_W)
+
+        # now express in your frame axes
+        f_F = R_fw.dot(f_W)
+        m_F = R_fw.dot(m_frame)
+
+        wrench_F = np.concatenate((f_F, m_F))
+
+        return {
+            "ActualTCPPose": pose_F, 
+            "ActualTCPSpeed": v_F, 
+            "ActualTCPForce": wrench_F
+        }
+
     def clip_pose(self, pose: np.ndarray) -> np.ndarray:
         """Clamp translation per-axis; clamp rotation in RPY space, return rot-vec form."""
         out = pose.copy()
@@ -598,15 +661,18 @@ class RTDETFFController(mp.Process):
         # --- translation ---
         out[:3] = np.clip(
             out[:3],
-            np.array(self.config.min_pose[:3]),
-            np.array(self.config.max_pose[:3])
+            np.array(self.min_pose_rpy[:3]),
+            np.array(self.max_pose_rpy[:3])
         )
 
         # --- rotation (do clamp in Euler) ---
-        if self._use_rpy_bounds:
-            rpy = self._rotvec_to_rpy(out[3:6])
-            rpy = np.clip(rpy, self._min_pose_rpy, self._max_pose_rpy)
-            out[3:6] = self._rpy_to_rotvec(rpy)
+        rpy = self._rotvec_to_rpy(out[3:6])
+        rpy = np.clip(
+            rpy,
+            np.array(self.min_pose_rpy[3:6]),
+            np.array(self.max_pose_rpy[3:6])
+        )
+        out[3:6] = self._rpy_to_rotvec(rpy)
 
         return out
 
@@ -617,9 +683,10 @@ class RTDETFFController(mp.Process):
         """
         # ----- translation axes -----
         for i in range(3):
-            if pose[i] > self.config.max_pose[i] and wrench[i] > 0:
+            if pose[i] > self.max_pose_rpy[i] and wrench[i] > 0:
+                #print(f"Zero {['x','y','z'][i]}-axis")
                 wrench[i] = 0.0
-            elif pose[i] < self.config.min_pose[i] and wrench[i] < 0:
+            elif pose[i] < self.min_pose_rpy[i] and wrench[i] < 0:
                 wrench[i] = 0.0
 
         # ----- rotation axes (convert to Euler first) -----
@@ -636,7 +703,7 @@ class RTDETFFController(mp.Process):
         return R.from_euler('xyz', rpy, degrees=False).as_rotvec()
 
     @staticmethod
-    def to_sixvec(T):
+    def homogenous_to_sixvec(T):
         """
         Convert a 4x4 homogeneous transformation matrix into a 6-vector:
         [tx, ty, tz, rx, ry, rz], where (rx, ry, rz) is the rotation vector (axis-angle).
@@ -667,6 +734,43 @@ class RTDETFFController(mp.Process):
         # 4) Concatenate translation and rotation vector into a single 6-vector
         six_vec = np.concatenate((t, rot_vec))
         return list(six_vec)
+
+    @staticmethod
+    def sixvec_to_homogeneous(six_vec):
+        """
+        Convert a 6-element vector [tx, ty, tz, rx, ry, rz]
+        into a 4x4 homogeneous transformation matrix.
+
+        Parameters
+        ----------
+        six_vec : array-like, shape (6,)
+            First three elements are translation [tx,ty,tz];
+            last three are rotation vector (axis * angle) [rx,ry,rz].
+
+        Returns
+        -------
+        T : ndarray, shape (4,4)
+            Homogeneous transform:
+                [ R  t ]
+                [ 0  1 ]
+            where R = expmap(rot_vec) and t = [tx,ty,tz].
+        """
+        six = np.asarray(six_vec, dtype=float)
+        if six.shape != (6,):
+            raise ValueError(f"Expected 6-vector, got shape {six.shape}")
+
+        # translation
+        t = six[:3]
+
+        # rotation matrix from axis-angle
+        rot_vec = six[3:]
+        R_mat = R.from_rotvec(rot_vec).as_matrix()
+
+        # build homogeneous matrix
+        T = np.eye(4, dtype=float)
+        T[:3, :3] = R_mat
+        T[:3, 3] = t
+        return T
 
 
 def _validate_config(config: URArmConfig) -> URArmConfig:

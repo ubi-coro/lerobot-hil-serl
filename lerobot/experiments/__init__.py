@@ -2,3 +2,4 @@ from .reach_pose import SACRealReachPoseConfig, RealReachPoseEnvConfig
 from .reach_pose_sparse import SACRealReachPoseSparseConfig, RealReachPoseSparseEnvConfig
 from .grasp_cube import SACRealGraspCubeConfig, RealGraspCubeEnvConfig
 from .nist_peg_in_hole import URPegInHoleConfig, SACPegInHoleConfig
+from .nist_peg_in_hole_c_rot import URPegInHoleCRotConfig, SACPegInHoleCRotConfig

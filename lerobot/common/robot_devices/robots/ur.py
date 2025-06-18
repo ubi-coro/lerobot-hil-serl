@@ -67,7 +67,7 @@ class UR:
     def camera_features(self) -> dict:
         cam_ft = {}
         for cam_key, cam in self.cameras.items():
-            key = f"observation.images.{cam_key}"
+            key = f"observation.image.{cam_key}"
             cam_ft[key] = {
                 "shape": (cam.height, cam.width, cam.channels),
                 "names": ["height", "width", "channels"],
@@ -82,6 +82,9 @@ class UR:
         # state observations
         example_obs = self.capture_observation()
         for key, value in example_obs.items():
+            if "image" in key:
+                continue
+
             if key.endswith("q_pos"):
                 state_names = [
                     "shoulder_pan_joint",
@@ -225,7 +228,12 @@ class UR:
                 "ManipulatorRobot is not connected. You need to run `robot.connect()`."
             )
 
-        obs = dict()
+        obs = {}
+
+        # Capture images from cameras
+        for name in self.cameras:
+            img = self.cameras[name].async_read()
+            obs[f"observation.image.{name}"] = torch.from_numpy(img)
 
         # both have more than n_obs_steps data
         for name, controller in self.controllers.items():

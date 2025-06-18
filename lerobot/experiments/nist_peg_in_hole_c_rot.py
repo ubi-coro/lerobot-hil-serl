@@ -5,6 +5,7 @@ import gymnasium
 import numpy as np
 import torch
 from gymnasium import spaces
+from scipy.spatial.transform import Rotation as R
 
 from lerobot.common.constants import ACTION, OBS_ROBOT, OBS_IMAGE
 from lerobot.common.envs.configs import TaskFrameWrapperConfig, EnvConfig, UREnvConfig
@@ -24,12 +25,12 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType, PolicyFeature
 
 
-@EnvConfig.register_subclass("ur3_nist_peg_in_hole")
+@EnvConfig.register_subclass("ur3_nist_peg_in_hole_c_rot")
 @dataclass
-class URPegInHoleConfig(UREnvConfig):
+class URPegInHoleCRotConfig(UREnvConfig):
     num_episodes: int = 15
     repo_id: str = "jannick-st/nist-peg-in-hole-offline-demos"
-    dataset_root: str = "/home/jannick/data/jannick-st/nist-peg-in-hole/offline-demos-rgb"
+    dataset_root: str = "/home/jannick/data/jannick-st/nist-peg-in-hole-c-rot/offline-demos"
     task: str = "Push in the peg"
     resume: bool = False
     fps: int = 10
@@ -38,6 +39,8 @@ class URPegInHoleConfig(UREnvConfig):
 
     explore: bool = False
     xy_offset_limit_mm: float = 6.0
+    c_offset_limit_rad: float = 0.5
+    depth_to_tighten_c_bounds: float = 0.008
     use_xy_position: bool = False
     use_torque: bool = True
 
@@ -47,7 +50,7 @@ class URPegInHoleConfig(UREnvConfig):
                 robot_ip="172.22.22.2",
                 soft_real_time=True,
                 use_gripper=False,
-                wrench_limits=[4.0, 4.0, 4.0, 0.4, 0.4, 0.4],
+                wrench_limits=[0.40, 0.40, 0.40, 4.0, 4.0, 4.0],
                 payload_mass=0.925,
                 payload_cog=[0.0, 0.0, 0.058]
             )
@@ -58,44 +61,45 @@ class URPegInHoleConfig(UREnvConfig):
                 fps=30,
                 width=640,
                 height=480,
+                focus=100
             ),
         }
     )
     wrapper: TaskFrameWrapperConfig = TaskFrameWrapperConfig(
-        control_time_s=5.0,
+        control_time_s=6.0,
         crop_params_dict={
-            "observation.image.main": (280, 230, 120, 160)
+            "observation.image.main": (120, 175, 240, 260)
         },
         crop_resize_size=(128, 128),
         static_tffs={
             "main": TaskFrameCommand(
-                T_WF=np.eye(4).tolist(),
-                target=[0.0, 0.0, -4.0, 2.221, -2.221, 0.0],
-                mode=2 * [AxisMode.IMPEDANCE_VEL] + [AxisMode.FORCE] + 3 * [AxisMode.POS],
-                kp=[3000, 3000, 3000, 300, 300, 300],
-                kd=[150, 150, 300, 12, 12, 12]
+                T_WF=[0.1811, -0.3745, 0.11, 2.221, -2.221, 0.0],
+                target=[0.0, 0.0, 4.0, 0.0, -0.0, 0.0],
+                mode=2 * [AxisMode.IMPEDANCE_VEL] + [AxisMode.FORCE] + 3 * [AxisMode.IMPEDANCE_VEL],
+                kp=[3000, 3000, 3000, 100, 100, 100],
+                kd=[150, 150, 300, 6, 6, 6]
             )
         },
         action_indices={
-            "main": [1, 1, 0, 0, 0, 0]
+            "main": [1, 1, 0, 0, 0, 1]
         },
         reset_pos={
-            "main": [0.1811, -0.3745, 0.11, 2.221, -2.221, 0.0]
+            "main": [0.0] * 6  # origin in task frame
         },
         noise_dist="uniform",
         noise_std={},  # set in post_init
         safe_reset=True,
         threshold=0.0008,
-        timeout=1.5,
+        timeout=3.0,
         spacemouse_devices={
             "main": "SpaceMouse Compact"
         },
         spacemouse_action_scale={
-            "main": [1 / 25] * 6
+            "main": [0.05, -0.05, 0, 0, 0, -1.0]
         },
         spacemouse_intercept_with_button=True,
         reward_axis_targets={
-            "main": 0.096
+            "main": 0.013
         },
         reward_axis=2,
         reward_scale=1.0,
@@ -105,8 +109,8 @@ class URPegInHoleConfig(UREnvConfig):
 
     features: dict[str, PolicyFeature] = field(
         default_factory=lambda: {
-            "action": PolicyFeature(type=FeatureType.ACTION, shape=(2,)),
-            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(8,)),
+            "action": PolicyFeature(type=FeatureType.ACTION, shape=(3,)),
+            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(3,)),
             "observation.image.main": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128))
         }
     )
@@ -131,35 +135,38 @@ class URPegInHoleConfig(UREnvConfig):
             min_pose[:2] -= self.xy_offset_limit_mm / 1000.0
 
             z_range = reset_pos[2] - self.wrapper.reward_axis_targets["main"]
-            max_pose[2] = reset_pos[2] + z_range * 0.03
-            min_pose[2] = self.wrapper.reward_axis_targets["main"] - z_range * 0.03
+            max_pose[2] = self.wrapper.reward_axis_targets["main"] - z_range * 0.03
+            min_pose[2] = reset_pos[2] + z_range * 0.03
 
-            max_pose[3:] -= 1e-3
-            min_pose[3:] += 1e-3
+            max_pose[3:5] += 1e-3
+            min_pose[3:5] -= 1e-3
 
-            self.robot.follower_arms[name].max_pose = max_pose.tolist()
-            self.robot.follower_arms[name].min_pose = min_pose.tolist()
+            max_pose[5] += self.c_offset_limit_rad
+            min_pose[5] -= self.c_offset_limit_rad
+
+            self.wrapper.static_tffs[name].max_pose_rpy = max_pose.tolist()
+            self.wrapper.static_tffs[name].min_pose_rpy = min_pose.tolist()
 
             # build noise level from pose limits
             self.wrapper.noise_std[name] = (max_pose - min_pose) / 2.0
-            self.wrapper.noise_std[name][2:] = 0.0
+            self.wrapper.noise_std[name][2:4] = 0.0
             self.wrapper.noise_std[name] = self.wrapper.noise_std[name].tolist()
 
             # build action space bounds from space mouse scaling factors
             action_scale = self.wrapper.spacemouse_action_scale[name]
             action_indices = self.wrapper.action_indices[name]
             self.wrapper.action_bounds[name] = {
-                "min": [-s for i, s in enumerate(action_scale) if action_indices[i]],
-                "max": [s for i, s in enumerate(action_scale) if action_indices[i]]
+                "min": [-abs(s) for i, s in enumerate(action_scale) if action_indices[i]],
+                "max": [abs(s) for i, s in enumerate(action_scale) if action_indices[i]]
             }
 
         if self.explore:
             self.wrapper.control_time_s = 300
             self.wrapper.static_tffs["main"].target[:3] = [0.0, 0.0, 0.0]
             self.wrapper.static_tffs["main"].mode[:3] = 3 * [AxisMode.IMPEDANCE_VEL]
-            self.wrapper.action_indices["main"] = [1, 1, 1, 0, 0, 0]
+            self.wrapper.action_indices["main"] = [1, 1, 1, 0, 0, 1]
 
-        state_dim = 6
+        state_dim = 7
         if self.use_xy_position:
             state_dim += 2
         if self.use_torque:
@@ -183,6 +190,12 @@ class URPegInHoleConfig(UREnvConfig):
                 device=self.device
             )
 
+        env = TightenCBoundsWrapper(
+            env,
+            static_tffs=self.wrapper.static_tffs,
+            threshold=self.depth_to_tighten_c_bounds
+        )
+
         # Static Reset
         if self.wrapper.reset_pos:
             env = StaticTaskFrameResetWrapper(
@@ -200,7 +213,7 @@ class URPegInHoleConfig(UREnvConfig):
 
         env = AwaitForceResetWrapper(
             env,
-            threshold=2.0,
+            threshold=1.1 * self.wrapper.static_tffs["main"].target[2],
             axis=2,
             timeout=self.wrapper.timeout
         )
@@ -256,9 +269,9 @@ class URPegInHoleConfig(UREnvConfig):
         return env
 
 
-@PreTrainedConfig.register_subclass("sac_nist_peg_in_hole")
+@PreTrainedConfig.register_subclass("sac_nist_peg_in_hole_c_rot")
 @dataclass
-class SACPegInHoleConfig(SACConfig):
+class SACPegInHoleCRotConfig(SACConfig):
     # tuning recipe:
     # try to hit 30 fps
     # keep ratio of utd_ratio:num_critics at 3:2, increase as much as possible
@@ -271,13 +284,13 @@ class SACPegInHoleConfig(SACConfig):
     online_buffer_capacity: int = 10000
     offline_buffer_capacity: int = 10000
     camera_number: int = 1  # also affects fps linearly, resolution affects quadratically
-    utd_ratio: int = 3  # affects fps linearly, hil-serl default is 2
+    utd_ratio: int = 2  # affects fps linearly, hil-serl default is 2
     storage_device: str = "cuda"  # destabilizes fps, sometimes cuts 10 fps
     shared_encoder: bool = True  # does not affect fps much
     num_critics: int = 3  # affects fps sub-linearly, hil-serl default is 2
-    target_entropy: float = -1.0  # -dim(A) / 2
+    target_entropy: float = -1.5  # -dim(A) / 2
     use_backup_entropy: bool = False  # td backup the entropy too -> more stable in my experience if entropy only affects actor loss
-    freeze_vision_encoder: bool = True  # cuts ~10 fps for one camera
+    freeze_vision_encoder: bool = False  # cuts ~10 fps for one camera
 
     dataset_stats: dict[str, dict[str, list[float]]] | None = field(
         default_factory=lambda: {
@@ -286,12 +299,12 @@ class SACPegInHoleConfig(SACConfig):
                 "std": [0.229, 0.224, 0.225],
             },
             "observation.state": {
-                "min": [-8.0, -8.0, -8.0, -0.8, -0.8, -0.8, 0.09558, -0.04, -0.04],
-                "max": [8.0, 8.0, 8.0, 0.8, 0.8, 0.8, 0.11042, 0.04, 0.04]
+                "min": [-10.0, -10.0, -10.0, -2.0, -2.0, -2.0, -0.00042, -0.05, -0.05, -1.0],
+                "max": [10.0, 10.0, 10.0, 2.0, 2.0, 2.0, 0.01442, 0.05, 0.05, 1.0]
             },
             "action": {
-                "min": [-1/25, -1/25],
-                "max": [1/25, 1/25]
+                "min": [-0.05, -0.05, -1.0],
+                "max": [0.05, 0.05, 1.0]
             },
         }
     )
@@ -309,7 +322,7 @@ class AMPObsWrapper(gymnasium.Wrapper):
         self.use_xy_position = use_xy_position
         self.use_torque = use_torque
 
-        num_actions = 6
+        num_actions = 7
         if self.use_xy_position:
             num_actions += 2
         if self.use_torque:
@@ -347,7 +360,8 @@ class AMPObsWrapper(gymnasium.Wrapper):
         new_state.extend([
             obs["observation.main_eef_pos"][2],
             self.prev_action[0],
-            self.prev_action[1]
+            self.prev_action[1],
+            self.prev_action[2]
         ])
 
         return {
@@ -402,19 +416,71 @@ class AwaitForceResetWrapper(gymnasium.Wrapper):
         return obs, info
 
 
+class TightenCBoundsWrapper(gymnasium.Wrapper):
+    def __init__(
+        self,
+        env,
+        static_tffs,
+        threshold=0.0078,
+        pos_eps=1e-2,
+        rot_eps=1e-3
+    ):
+        super().__init__(env)
+        self.static_tffs = static_tffs
+        self.threshold = threshold
+        self.pos_eps = pos_eps
+        self.rot_eps = rot_eps
+
+        self._tightened = False
+        self._initial_max_pose_rpy = static_tffs["main"].max_pose_rpy
+        self._initial_min_pose_rpy = static_tffs["main"].min_pose_rpy
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+
+        pose = obs["observation.main_eef_pos"].detach().cpu().numpy()
+        if not self._tightened and pose[2] > self.threshold:
+            print("Tighten bounds")
+
+            new_min_pose_rpy = self._initial_min_pose_rpy.copy()
+            new_max_pose_rpy = self._initial_max_pose_rpy.copy()
+
+            for idx in [0, 2]:
+                new_min_pose_rpy[idx] = pose[idx] - self.pos_eps
+                new_max_pose_rpy[idx] = pose[idx] + self.pos_eps
+
+            rpy = R.from_rotvec(pose[3:6]).as_euler('xyz', degrees=False)
+            for idx in [5]:
+                new_min_pose_rpy[idx] = rpy[idx - 3] - self.rot_eps
+                new_max_pose_rpy[idx] = rpy[idx - 3] + self.rot_eps
+
+            ctrl = self.env.unwrapped.robot.controllers["main"]
+            ctrl.send_cmd(TaskFrameCommand(
+                min_pose_rpy=new_min_pose_rpy,
+                max_pose_rpy=new_max_pose_rpy
+            ))
+            self._tightened = True
+
+        return obs, reward, terminated, truncated, info
+
+    def reset(self, **kwargs):
+        self._tightened = False
+        return self.env.reset(**kwargs)
+
+
 if __name__ == "__main__":
     # print policy bounds
-    cfg = URPegInHoleConfig()
+    cfg = URPegInHoleCRotConfig()
 
-    min_pose = cfg.robot.follower_arms["main"].min_pose
-    max_pose = cfg.robot.follower_arms["main"].max_pose
+    min_pose = cfg.wrapper.static_tffs["main"].min_pose_rpy
+    max_pose = cfg.wrapper.static_tffs["main"].max_pose_rpy
 
     if cfg.use_torque:
-        min_bounds = [-8.0] * 3 + [-0.8] * 3
-        max_bounds = [8.0] * 3 + [0.8] * 3
+        min_bounds = [-10.0] * 3 + [-2.0] * 3
+        max_bounds = [10.0] * 3 + [2.0] * 3
     else:
-        min_bounds = [-8.0] * 3
-        max_bounds = [8.0] * 3
+        min_bounds = [-10.0] * 3
+        max_bounds = [10.0] * 3
 
     if cfg.use_xy_position:
         min_bounds = min_bounds + min_pose[:3] + [-s for s in cfg.wrapper.spacemouse_action_scale["main"][:2]]

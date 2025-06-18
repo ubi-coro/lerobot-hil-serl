@@ -120,7 +120,7 @@ class ImageCropResizeWrapper(gym.Wrapper):
     def __init__(
         self,
         env,
-        crop_params_dict: Dict[str, Annotated[Tuple[int], 4]],
+        crop_params_dict: Dict[str, Tuple[int, int, int, int]],
         resize_size=None,
     ):
         super().__init__(env)

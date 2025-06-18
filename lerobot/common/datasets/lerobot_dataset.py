@@ -980,7 +980,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             img_dir = self._get_image_file_path(
                 episode_index=episode_index, image_key=key, frame_index=0
             ).parent
-            encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
+            encode_video_frames(img_dir, video_path, self.fps, overwrite=True, vcodec="libx264")
 
         return video_paths
 

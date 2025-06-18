@@ -215,6 +215,8 @@ def convert_lerobot_dataset_to_cropper_lerobot_dataset(
 
         new_dataset.add_frame(new_frame)
 
+    new_dataset.save_episode()
+
     if push_to_hub:
         new_dataset.push_to_hub()
 
@@ -274,7 +276,7 @@ if __name__ == "__main__":
         crop_params_dict=rois,
         new_repo_id=new_repo_id,
         new_dataset_root=new_dataset_root,
-        resize_size=(64, 64),
+        resize_size=(128, 128),
         push_to_hub=args.push_to_hub,
     )
 

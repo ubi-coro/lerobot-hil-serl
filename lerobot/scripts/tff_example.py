@@ -11,7 +11,7 @@ from lerobot.common.robot_devices.motors.rtde_tff_controller import RTDETFFContr
     Command, GripperCommand, AxisMode
 from lerobot.common.envs.wrapper.spacemouse import SpaceMouseExpert
 
-USE_ROT = False
+USE_ROT = True
 
 # ----------------------------------------
 # 1. Configure and start the controller
@@ -31,6 +31,7 @@ config = URArmConfig(
     launch_timeout=5.0,
     mock=False,
     use_gripper=True,
+    wrench_limits=[0.40, 0.40, 0.40, 0.4, 0.4, 4.0]
 )
 
 # Instantiate and start the controller (in its own process)
@@ -38,24 +39,24 @@ controller = RTDETFFController(config)
 controller.start()  # non-blocking
 
 spacemouse_expert = SpaceMouseExpert()
-action_scale = np.array([1 / 10] * 3 + [1 / 3] * 3)
+action_scale = np.array([1 / 10] * 3 + [1.0] * 3)
 
 # setup tff command
 if USE_ROT:
     cmd = TaskFrameCommand(
-        T_WF=np.eye(4),
+        T_WF=[0.1811, -0.3745, 0.11, 2.221, -2.221, 0.0],
         target=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
         mode=6 * [AxisMode.IMPEDANCE_VEL],
         kp=np.array([2500, 2500, 2500, 100, 100, 100]),
-        kd=np.array([160, 160, 320, 16, 16, 16])
+        kd=np.array([160, 160, 320, 6, 6, 6])
     )
 else:
     cmd = TaskFrameCommand(
-        T_WF=np.eye(4),
-        target=np.array([0.0, 0.0, 0.0, 2.221, -2.221, 0.0]),
-        mode=3 * [AxisMode.IMPEDANCE_VEL] + 3 * [AxisMode.POS],
+        T_WF=[0.1811, -0.3745, 0.11, 2.221, -2.221, 0.0],
+        target=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        mode=6 * [AxisMode.IMPEDANCE_VEL],
         kp=np.array([2500, 2500, 2500, 100, 100, 100]),
-        kd=np.array([160, 160, 320, 16, 16, 16])
+        kd=np.array([160, 160, 320, 6, 6, 6])
     )
 
 # Wait until the controller signals ready
@@ -73,9 +74,9 @@ while controller.is_alive():
     if USE_ROT:
         cmd.target = action
     else:
-        cmd.target[0] = action[0]
+        cmd.target[0] = -action[0]
         cmd.target[1] = action[1]
-        cmd.target[2] = action[2]
+        cmd.target[2] = -action[2]
 
     controller.send_cmd(cmd)
 
@@ -84,7 +85,7 @@ while controller.is_alive():
     if buttons[1]:
         controller.send_cmd(GripperCommand(cmd=Command.CLOSE))
 
-    print("EE Pose:", controller.get_robot_state()["ActualTCPPose"])
+    print("EE Pose:", controller.get_robot_state()["ActualTCPPose"][:3])
 
     t_loop = time.perf_counter() - t_start
     time.sleep(1 / frequency - t_loop)
