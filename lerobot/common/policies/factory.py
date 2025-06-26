@@ -64,6 +64,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.common.policies.sac.modeling_sac import SACPolicy
 
         return SACPolicy
+    elif name.startswith("ppo"):
+        from lerobot.common.policies.ppo.modeling_ppo import PPOPolicy
+
+        return PPOPolicy
     elif name == "reward_classifier":
         from lerobot.common.policies.reward_model.modeling_classifier import Classifier
 
