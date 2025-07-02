@@ -684,9 +684,10 @@ class RTDETFFController(mp.Process):
         # ----- translation axes -----
         for i in range(3):
             if pose[i] > self.max_pose_rpy[i] and wrench[i] > 0:
-                #print(f"Zero {['x','y','z'][i]}-axis")
+                #print(f"Zero {['x','y','z'][i]}-axis", pose[i], self.max_pose_rpy[i])
                 wrench[i] = 0.0
             elif pose[i] < self.min_pose_rpy[i] and wrench[i] < 0:
+                #print(f"Zero {['x', 'y', 'z'][i]}-axis")
                 wrench[i] = 0.0
 
         # ----- rotation axes (convert to Euler first) -----

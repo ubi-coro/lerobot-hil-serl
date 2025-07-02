@@ -11,7 +11,7 @@ from lerobot.common.robot_devices.motors.rtde_tff_controller import RTDETFFContr
     Command, GripperCommand, AxisMode
 from lerobot.common.envs.wrapper.spacemouse import SpaceMouseExpert
 
-USE_ROT = True
+USE_ROT = False
 
 # ----------------------------------------
 # 1. Configure and start the controller
@@ -52,7 +52,7 @@ if USE_ROT:
     )
 else:
     cmd = TaskFrameCommand(
-        T_WF=[0.1811, -0.3745, 0.11, 2.221, -2.221, 0.0],
+        T_WF=[0.3977, -0.18, 0.11, 2.221, -2.221, 0.0],
         target=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
         mode=6 * [AxisMode.IMPEDANCE_VEL],
         kp=np.array([2500, 2500, 2500, 100, 100, 100]),
@@ -74,8 +74,8 @@ while controller.is_alive():
     if USE_ROT:
         cmd.target = action
     else:
-        cmd.target[0] = -action[0]
-        cmd.target[1] = action[1]
+        cmd.target[0] = action[0]
+        cmd.target[1] = -action[1]
         cmd.target[2] = -action[2]
 
     controller.send_cmd(cmd)

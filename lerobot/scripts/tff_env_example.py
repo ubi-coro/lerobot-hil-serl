@@ -1,8 +1,8 @@
 import time
 
-from lerobot.experiments.nist_peg_in_hole_c_rot import URPegInHoleCRotConfig
+from lerobot.experiments.nist_insertion import UR3_NIST_Insertion_XYC_Small
 
-config = URPegInHoleCRotConfig()
+config = UR3_NIST_Insertion_XYC_Small()
 env = config.make()
 
 num_episodes = 0

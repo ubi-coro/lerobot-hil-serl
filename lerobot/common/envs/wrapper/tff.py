@@ -218,9 +218,18 @@ class StaticTaskFrameResetWrapper(gym.Wrapper):
             if name in self.noise_std:
                 noisy_cmd = deepcopy(base_cmd)
                 if self.noise_dist == "uniform":
-                    noisy_cmd.target += np.random.uniform(-self.noise_std[name], self.noise_std[name])
+                    factor = np.sqrt(12) / 2
+                    noisy_cmd.target += np.random.uniform(-factor * self.noise_std[name], factor * self.noise_std[name])
                 elif self.noise_dist == "normal":
                     noisy_cmd.target += np.random.normal(0.0, self.noise_std[name])
+
+                # bound noisy target
+                noisy_cmd.target = np.clip(
+                    noisy_cmd.target,
+                    self.static_tffs[name].min_pose_rpy,
+                    self.static_tffs[name].max_pose_rpy
+                )
+
                 ctrl.send_cmd(noisy_cmd)
                 self.wait_until_reached(name, noisy_cmd.target)
 

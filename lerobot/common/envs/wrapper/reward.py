@@ -1,5 +1,5 @@
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 import gymnasium as gym
 import numpy as np
@@ -121,7 +121,8 @@ class AxisDistanceRewardWrapper(gym.Wrapper):
         axis: int = 2,
         scale: float = 1.0,
         clip: Optional[tuple[float, float]] = None,
-        terminate_on_success: bool = True
+        terminate_on_success: bool = True,
+        normalization_range: Optional[Sequence[float]] = None
     ):
         super().__init__(env)
         self.targets = targets
@@ -129,6 +130,7 @@ class AxisDistanceRewardWrapper(gym.Wrapper):
         self.scale = scale
         self.clip = clip
         self.terminate_on_success = terminate_on_success
+        self.normalization_range = normalization_range
 
         # Only consider controllers/robots that exist in the wrapped env.
         self.robot_names = list(env.unwrapped.robot.controllers.keys())
@@ -151,7 +153,12 @@ class AxisDistanceRewardWrapper(gym.Wrapper):
             actual = pose[self.axis]
             target = self.targets[name]
 
-            rewards[name] = -(target - actual)
+            reward = -(target - actual)
+
+            if self.normalization_range is not None:
+                reward = reward / (self.normalization_range[1] - self.normalization_range[0]) + self.normalization_range[0]
+
+            rewards[name] = reward
             successes[name] = actual > target
 
         extra_reward = sum(rewards.values()) * self.scale
@@ -168,6 +175,7 @@ class AxisDistanceRewardWrapper(gym.Wrapper):
         extra_reward, success = self.compute_extra_reward()
         total_reward = reward + extra_reward
 
+        info["success"] = success
         if self.terminate_on_success:
             terminated = terminated | success
 

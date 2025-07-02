@@ -56,6 +56,7 @@ from lerobot.common.utils.utils import (
 )
 from lerobot.common.utils.wandb_utils import WandBLogger
 from lerobot.configs import parser
+from lerobot.configs.default import DatasetConfig
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.experiments import *
 from lerobot.scripts.server import learner_service
@@ -306,6 +307,10 @@ def add_actor_information_and_train(
     batch_size = cfg.batch_size
     offline_replay_buffer = None
 
+    cfg.dataset = DatasetConfig(
+        root=cfg.env.dataset_root,
+        repo_id=cfg.env.repo_id
+    )
     if cfg.dataset is not None:
         offline_replay_buffer = initialize_offline_replay_buffer(
             cfg=cfg,

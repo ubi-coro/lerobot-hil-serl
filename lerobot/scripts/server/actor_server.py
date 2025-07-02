@@ -254,6 +254,7 @@ def act_with_policy(
     # Add counters for intervention rate calculation
     episode_intervention_steps = 0
     episode_total_steps = 0
+    episode_cnt = 0
 
     for interaction_step in range(cfg.policy.online_steps):
         start_time = time.perf_counter()
@@ -314,7 +315,8 @@ def act_with_policy(
         obs = next_obs
 
         if done or truncated:
-            logging.info(f"[ACTOR] Global step {interaction_step}: Episode reward: {sum_reward_episode}")
+            logging.info(f"[ACTOR] Episode: {episode_cnt}, global step: {interaction_step}, episode reward: {sum_reward_episode}")
+            episode_cnt += 1
 
             # Skip sending data for evaluation episodes
             if episode_eval:
@@ -337,6 +339,11 @@ def act_with_policy(
                 if episode_total_steps > 0:
                     intervention_rate = episode_intervention_steps / episode_total_steps
 
+                # Check complementary info
+                complementary_info = {}
+                if "success" in info:
+                    complementary_info["success"] = int(info["success"])
+
                 # Send episodic reward to the learner
                 interactions_queue.put(
                     python_object_to_bytes(
@@ -345,13 +352,13 @@ def act_with_policy(
                             "Interaction step": interaction_step,
                             "Episode intervention": int(episode_intervention),
                             "Intervention rate": intervention_rate,
+                            **complementary_info,
                             **stats,
                         }
                     )
                 )
 
             # Reset intervention counters
-            print(f"Finished episode, got {sum_reward_episode}")
             sum_reward_episode = 0.0
             episode_intervention = False
             eval_mode = False

@@ -126,8 +126,6 @@ class ImageCropResizeWrapper(gym.Wrapper):
         super().__init__(env)
         self.env = env
         self.crop_params_dict = crop_params_dict
-        print(f"obs_keys , {self.env.observation_space}")
-        print(f"crop params dict {crop_params_dict.keys()}")
         for key_crop in crop_params_dict:
             if key_crop not in self.env.observation_space.keys():  # noqa: SIM118
                 raise ValueError(f"Key {key_crop} not in observation space")
