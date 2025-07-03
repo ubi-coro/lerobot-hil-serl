@@ -72,6 +72,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.common.policies.reward_model.modeling_classifier import Classifier
 
         return Classifier
+    elif name == "mlp":
+        from lerobot.common.policies.mlp.modeling_mlp import MLPPolicy
+
+        return MLPPolicy
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
