@@ -26,6 +26,7 @@ from pynput import keyboard
 from torch import nn
 from torch.multiprocessing import Event, Queue
 
+from lerobot.common.envs.wrapper.leader import BaseLeaderControlWrapper
 from lerobot.common.policies.factory import make_policy
 from lerobot.common.policies.sac.modeling_sac import SACPolicy
 from lerobot.common.robot_devices.utils import busy_wait
@@ -51,7 +52,7 @@ from lerobot.scripts.server.utils import (
     get_last_item_from_queue,
     move_state_dict_to_device,
     move_transition_to_device,
-    setup_process_handlers,
+    setup_process_handlers, find_wrapper,
 )
 
 ACTOR_SHUTDOWN_TIMEOUT = 30
@@ -198,33 +199,8 @@ def act_with_policy(
 
     logging.info("make_env online")
 
-    # Setup eval mode
-    eval_mode = False  # toggles when you press 'e'
-    def _on_press(key):
-        nonlocal eval_mode
-        try:
-            # only set True once, when 'e' is first pressed
-            if key.char == 'e' and not eval_mode:
-                eval_mode = True
-                logging.info("[WRAPPER] eval_mode activated")
-        except Exception as e:
-            print(e)
-
-    def _on_release(key):
-        nonlocal eval_mode
-        try:
-            # only set False once, when 'e' is released
-            if key.char == 'e' and eval_mode:
-                eval_mode = False
-                logging.info("[WRAPPER] eval_mode deactivated")
-        except AttributeError:
-            pass
-
-    _listener = keyboard.Listener(on_press=_on_press, on_release=_on_release)
-    _listener.daemon = True
-    _listener.start()
-
     online_env = cfg.env.make()
+    intervention_wrapper: BaseLeaderControlWrapper | None = find_wrapper(online_env, BaseLeaderControlWrapper)
 
     set_seed(cfg.seed)
     device = get_safe_torch_device(cfg.policy.device, log=True)
@@ -249,7 +225,6 @@ def act_with_policy(
     sum_reward_episode = 0
     list_transition_to_send_to_learner = []
     list_policy_time = []
-    episode_eval = False  # true if this episode ever went into eval mode
     episode_intervention = False
     # Add counters for intervention rate calculation
     episode_intervention_steps = 0
@@ -261,6 +236,16 @@ def act_with_policy(
         if shutdown_event.is_set():
             logging.info("[ACTOR] Shutting down act_with_policy")
             return
+
+        # every 'eval_freq' episodes, run 'n_episodes' of evaluation (frozen policy parameters and no interventions)
+        # transitions are still sent and trained on
+        eval_mode = episode_cnt % (cfg.eval_freq + cfg.eval.n_episodes) < cfg.eval.n_episodes
+
+        if eval_mode:
+            logging.info(f"[ACTOR] Running evaluation episode {episode_cnt % (cfg.eval_freq + cfg.eval.n_episodes)}/{cfg.eval.n_episodes}, interventions are disabled")
+
+        if intervention_wrapper is not None:
+            intervention_wrapper.block_interventions(eval_mode)
 
         if interaction_step >= cfg.policy.online_step_before_learning:
             # Time policy inference and check if it meets FPS requirement
@@ -283,12 +268,6 @@ def act_with_policy(
         sum_reward_episode += float(reward)
         # Increment total steps counter for intervention rate
         episode_total_steps += 1
-
-        # Override termination if in eval mode
-        if eval_mode:
-            episode_eval = True
-            done = False
-            truncated = False
 
         # NOTE: We override the action if the intervention is True, because the action applied is the intervention action
         if "is_intervention" in info and info["is_intervention"]:
@@ -315,54 +294,65 @@ def act_with_policy(
         obs = next_obs
 
         if done or truncated:
-            logging.info(f"[ACTOR] Episode: {episode_cnt}, global step: {interaction_step}, episode reward: {sum_reward_episode}")
+            logging.info(f"[ACTOR] Episode: {episode_cnt} ({['Train', 'Eval'][int(eval_mode)]}), "
+                         f"global step: {interaction_step}, "
+                         f"episode reward: {sum_reward_episode}")
             episode_cnt += 1
 
-            # Skip sending data for evaluation episodes
-            if episode_eval:
+            if len(list_transition_to_send_to_learner) > 0:
+                push_transitions_to_transport_queue(
+                    transitions=list_transition_to_send_to_learner,
+                    transitions_queue=transitions_queue,
+                )
                 list_transition_to_send_to_learner = []
+
+            stats = get_frequency_stats(list_policy_time)
+            list_policy_time.clear()
+
+            # Check complementary info
+            complementary_info = {}
+            if "success" in info:
+                complementary_info["Success"] = int(info["success"])
+            if "first_success_step" in info:
+                complementary_info["Cycle time"] = int(info["first_success_step"]) * cfg.env.fps
             else:
+                complementary_info["Cycle time"] = episode_total_steps * cfg.env.fps
+
+            if not eval_mode:
                 update_policy_parameters(policy=policy.actor, parameters_queue=parameters_queue, device=device)
 
-                if len(list_transition_to_send_to_learner) > 0:
-                    push_transitions_to_transport_queue(
-                        transitions=list_transition_to_send_to_learner,
-                        transitions_queue=transitions_queue,
-                    )
-                    list_transition_to_send_to_learner = []
-
-                stats = get_frequency_stats(list_policy_time)
-                list_policy_time.clear()
+                complementary_info = {"Train/" + key: value for key, value in complementary_info.items()}
 
                 # Calculate intervention rate
                 intervention_rate = 0.0
                 if episode_total_steps > 0:
                     intervention_rate = episode_intervention_steps / episode_total_steps
 
-                # Check complementary info
-                complementary_info = {}
-                if "success" in info:
-                    complementary_info["success"] = int(info["success"])
+                msg = {
+                    "Train/Episodic reward": sum_reward_episode,
+                    "Interaction step": interaction_step,
+                    "Episode intervention": int(episode_intervention),
+                    "Intervention rate": intervention_rate,
+                    **complementary_info,
+                    **stats,
+                }
 
-                # Send episodic reward to the learner
-                interactions_queue.put(
-                    python_object_to_bytes(
-                        {
-                            "Episodic reward": sum_reward_episode,
-                            "Interaction step": interaction_step,
-                            "Episode intervention": int(episode_intervention),
-                            "Intervention rate": intervention_rate,
-                            **complementary_info,
-                            **stats,
-                        }
-                    )
-                )
+            else:
+                complementary_info = {"Eval/" + key: value for key, value in complementary_info.items()}
+
+                msg = {
+                    "Eval/Episodic reward": sum_reward_episode,
+                    "Interaction step": interaction_step,
+                    **complementary_info,
+                    **stats,
+                }
+
+            # Send episodic reward to the learner
+            interactions_queue.put(python_object_to_bytes(msg))
 
             # Reset intervention counters
             sum_reward_episode = 0.0
             episode_intervention = False
-            eval_mode = False
-            episode_eval = False
             episode_intervention_steps = 0
             episode_total_steps = 0
             obs, info = online_env.reset()
@@ -370,8 +360,6 @@ def act_with_policy(
         if cfg.env.fps is not None:
             dt_time = time.perf_counter() - start_time
             busy_wait(1 / cfg.env.fps - dt_time)
-
-    _listener.stop()
 
 
 #################################################

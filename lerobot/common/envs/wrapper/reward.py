@@ -134,6 +134,8 @@ class AxisDistanceRewardWrapper(gym.Wrapper):
 
         # Only consider controllers/robots that exist in the wrapped env.
         self.robot_names = list(env.unwrapped.robot.controllers.keys())
+        self._first_success_step = None
+        self._step = 0
 
     def compute_extra_reward(self) -> tuple[float, bool]:
         """
@@ -176,7 +178,19 @@ class AxisDistanceRewardWrapper(gym.Wrapper):
         total_reward = reward + extra_reward
 
         info["success"] = success
+
         if self.terminate_on_success:
             terminated = terminated | success
 
+        if success:
+            if self._first_success_step is None:
+                self._first_success_step = self._step
+            info["first_success_step"] = self._first_success_step
+        self._step += 1
+
         return obs, total_reward, terminated, truncated, info
+
+    def reset(self, seed=None, options=None):
+        self._step = 0
+        self._first_success_step = None
+        return self.env.reset(seed=seed, options=options)

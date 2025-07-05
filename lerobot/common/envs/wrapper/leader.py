@@ -39,6 +39,7 @@ class BaseLeaderControlWrapper(gym.Wrapper):
         self.use_target_ee_pos = hasattr(self, "target_ee_pos")
         self.last_gripper_action: int = 1
         self.foot_switch_threads = dict()
+        self._block_interventions = False
 
         if self.use_ee_action_space:
             self.action_bounds = np.array([
@@ -80,6 +81,14 @@ class BaseLeaderControlWrapper(gym.Wrapper):
         self.robot_leader.write("Position_D_Gain", 0, motor_names=xm_motors)
 
         self._init_keyboard_listener()
+
+    @property
+    def block_interventions(self):
+        return self._block_interventions
+
+    @block_interventions.setter
+    def block_interventions(self, val: bool):
+        self._block_interventions = val
 
     def _init_keyboard_events(self):
         """Initialize the keyboard events dictionary - override in subclasses."""
@@ -232,7 +241,7 @@ class BaseLeaderControlWrapper(gym.Wrapper):
         action_intervention = None
 
         # NOTE:
-        if is_intervention:
+        if is_intervention and not self._block_interventions:
             action, action_intervention = self._handle_intervention(action)
         else:
             self._handle_leader_teleoperation()

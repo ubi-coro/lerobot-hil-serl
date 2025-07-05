@@ -53,7 +53,7 @@ from lerobot.common.utils.train_utils import (
 from lerobot.common.utils.utils import (
     format_big_number,
     get_safe_torch_device,
-    init_logging,
+    init_logging, has_method,
 )
 from lerobot.common.utils.wandb_utils import WandBLogger
 from lerobot.configs import parser
@@ -401,6 +401,10 @@ def add_actor_information_and_train(
             parameters=policy.actor.parameters(), max_norm=clip_grad_norm_value
         ).item()
         optimizers["actor"].step()
+
+        if has_method(policy, "update"):
+            # To possibly update an internal buffer (for instance an Exponential Moving Average like in TDMPC).
+            policy.update()
 
         # Add actor info to training info
         training_infos = actor_output["training_infos"]
