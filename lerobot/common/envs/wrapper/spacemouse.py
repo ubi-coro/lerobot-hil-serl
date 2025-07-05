@@ -120,6 +120,13 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
             assert scale.size == 6
             self.scales[name] = scale
 
+    @property
+    def block_interventions(self):
+        return self._block_interventions
+
+    @block_interventions.setter
+    def block_interventions(self, val: bool):
+        self._block_interventions = val
 
     def action(self, policy_action: torch.Tensor) -> Tuple:
 
@@ -176,7 +183,7 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
     def step(self, action):
         policy_action, is_intervention, intervention_action = self.action(action)
 
-        if is_intervention:
+        if is_intervention and not self.block_interventions:
             new_action = intervention_action
         else:
             new_action = policy_action

@@ -1,7 +1,6 @@
 from .reach_pose import SACRealReachPoseConfig, RealReachPoseEnvConfig
 from .reach_pose_sparse import SACRealReachPoseSparseConfig, RealReachPoseSparseEnvConfig
 from .grasp_cube import SACRealGraspCubeConfig, RealGraspCubeEnvConfig
-from .nist_peg_in_hole import URPegInHoleConfig, SACPegInHoleConfig
 from .nist_insertion import (
     # environments
     UR3_NIST_Insertion_XYC_Small,
@@ -14,4 +13,5 @@ from .nist_insertion import (
     # policies
     SAC_NIST_Insertion_XYC,
     SAC_NIST_Insertion_XY,
+    DAgger_NIST_Insertion_XYC
 )

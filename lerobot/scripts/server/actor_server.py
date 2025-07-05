@@ -27,6 +27,7 @@ from torch import nn
 from torch.multiprocessing import Event, Queue
 
 from lerobot.common.envs.wrapper.leader import BaseLeaderControlWrapper
+from lerobot.common.envs.wrapper.spacemouse import SpaceMouseInterventionWrapper
 from lerobot.common.policies.factory import make_policy
 from lerobot.common.policies.sac.modeling_sac import SACPolicy
 from lerobot.common.robot_devices.utils import busy_wait
@@ -200,7 +201,8 @@ def act_with_policy(
     logging.info("make_env online")
 
     online_env = cfg.env.make()
-    intervention_wrapper: BaseLeaderControlWrapper | None = find_wrapper(online_env, BaseLeaderControlWrapper)
+    intervention_wrapper: BaseLeaderControlWrapper | SpaceMouseInterventionWrapper | None = (
+        find_wrapper(online_env, {BaseLeaderControlWrapper, SpaceMouseInterventionWrapper}))
 
     set_seed(cfg.seed)
     device = get_safe_torch_device(cfg.policy.device, log=True)
@@ -226,6 +228,7 @@ def act_with_policy(
     list_transition_to_send_to_learner = []
     list_policy_time = []
     episode_intervention = False
+    eval_mode = False
     # Add counters for intervention rate calculation
     episode_intervention_steps = 0
     episode_total_steps = 0
@@ -237,15 +240,8 @@ def act_with_policy(
             logging.info("[ACTOR] Shutting down act_with_policy")
             return
 
-        # every 'eval_freq' episodes, run 'n_episodes' of evaluation (frozen policy parameters and no interventions)
-        # transitions are still sent and trained on
-        eval_mode = episode_cnt % (cfg.eval_freq + cfg.eval.n_episodes) < cfg.eval.n_episodes
-
-        if eval_mode:
-            logging.info(f"[ACTOR] Running evaluation episode {episode_cnt % (cfg.eval_freq + cfg.eval.n_episodes)}/{cfg.eval.n_episodes}, interventions are disabled")
-
         if intervention_wrapper is not None:
-            intervention_wrapper.block_interventions(eval_mode)
+            intervention_wrapper.block_interventions = eval_mode
 
         if interaction_step >= cfg.policy.online_step_before_learning:
             # Time policy inference and check if it meets FPS requirement
@@ -254,7 +250,7 @@ def act_with_policy(
                 label="Policy inference time",
                 log=False,
             ) as timer:  # noqa: F841
-                action, q_value = policy.select_action(batch=obs)
+                action = policy.select_action(batch=obs)
             policy_fps = 1.0 / (list_policy_time[-1] + 1e-9)
 
             log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
@@ -298,6 +294,14 @@ def act_with_policy(
                          f"global step: {interaction_step}, "
                          f"episode reward: {sum_reward_episode}")
             episode_cnt += 1
+
+            # every 'eval_freq' episodes, run 'n_episodes' of evaluation (frozen policy parameters and no interventions)
+            # transitions are still sent and trained on
+            eval_mode = (episode_cnt % (cfg.eval_freq + cfg.eval.n_episodes) <= cfg.eval.n_episodes
+                         and episode_cnt > cfg.eval_freq + cfg.eval.n_episodes)
+            if eval_mode:
+                logging.info(f"[ACTOR] Running evaluation episode {episode_cnt % (cfg.eval_freq + cfg.eval.n_episodes)}"
+                             f"/{cfg.eval.n_episodes}, interventions are disabled")
 
             if len(list_transition_to_send_to_learner) > 0:
                 push_transitions_to_transport_queue(

@@ -38,9 +38,8 @@ from lerobot.common.constants import (
 )
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.common.policies.dagger.modeling_dagger import MLPPolicy
+from lerobot.common.policies.mlp.modeling_mlp import MLPPolicy
 from lerobot.common.policies.factory import make_policy
-from lerobot.common.policies.sac.modeling_sac import SACPolicy
 from lerobot.common.utils.random_utils import set_seed
 from lerobot.common.utils.train_utils import (
     get_step_checkpoint_dir,
@@ -302,7 +301,6 @@ def add_actor_information_and_train(
 
     log_training_info(cfg=cfg, policy=policy)
 
-    replay_buffer = initialize_replay_buffer(cfg, device, storage_device)
     batch_size = cfg.batch_size
     offline_replay_buffer = None
 
@@ -310,13 +308,11 @@ def add_actor_information_and_train(
         root=cfg.env.dataset_root,
         repo_id=cfg.env.repo_id
     )
-    if cfg.dataset is not None:
-        offline_replay_buffer = initialize_offline_replay_buffer(
-            cfg=cfg,
-            device=device,
-            storage_device=storage_device,
-        )
-        batch_size: int = batch_size // 2  # We will sample from both replay buffer
+    replay_buffer = initialize_replay_buffer(
+        cfg=cfg,
+        device=device,
+        storage_device=storage_device,
+    )
 
     logging.info("Starting learner thread")
     interaction_message = None
@@ -328,7 +324,7 @@ def add_actor_information_and_train(
         dataset_repo_id = cfg.dataset.repo_id
 
     # Initialize iterators
-    offline_iterator = None
+    iterator = None
 
     # NOTE: THIS IS THE MAIN LOOP OF THE LEARNER
     while True:
@@ -341,7 +337,6 @@ def add_actor_information_and_train(
         process_transitions(
             transition_queue=transition_queue,
             replay_buffer=replay_buffer,
-            offline_replay_buffer=offline_replay_buffer,
             device=device,
             dataset_repo_id=dataset_repo_id,
             shutdown_event=shutdown_event,
@@ -359,15 +354,12 @@ def add_actor_information_and_train(
         if len(replay_buffer) < online_step_before_learning:
             continue
 
-        if offline_replay_buffer is not None and offline_iterator is None:
-            offline_iterator = offline_replay_buffer.get_iterator(
-                batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2
-            )
+        if replay_buffer is not None and iterator is None:
+            iterator = replay_buffer.get_iterator(batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2)
 
         time_for_one_optimization_step = time.time()
 
-        # Sample for the last update in the UTD ratio
-        batch = next(offline_iterator)
+        batch = next(iterator)
 
         actions = batch["action"]
         rewards = batch["reward"]
@@ -407,23 +399,16 @@ def add_actor_information_and_train(
             policy.update()
 
         # Add actor info to training info
-        training_infos = actor_output["training_infos"]
-        training_infos["loss_actor"] = loss_actor.item()
-        training_infos["actor_grad_norm"] = actor_grad_norm
+        training_infos = {"loss_actor": loss_actor.item(), "actor_grad_norm": actor_grad_norm}
 
         # Push policy to actors if needed
         if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:
             push_actor_policy_to_queue(parameters_queue=parameters_queue, policy=policy)
             last_time_policy_pushed = time.time()
 
-        # Update target networks (main and discrete)
-        policy.update_target_networks()
-
         # Log training metrics at specified intervals
         if optimization_step % log_freq == 0:
             training_infos["replay_buffer_size"] = len(replay_buffer)
-            if offline_replay_buffer is not None:
-                training_infos["offline_replay_buffer_size"] = len(offline_replay_buffer)
             training_infos["Optimization step"] = optimization_step
 
             # Log training metrics
@@ -652,25 +637,13 @@ def make_optimizers_and_scheduler(cfg: TrainPipelineConfig, policy: nn.Module):
         params=[
             p
             for n, p in policy.actor.named_parameters()
-            if not policy.config.shared_encoder or not n.startswith("encoder")
         ],
-        lr=cfg.policy.actor_lr,
+        lr=cfg.policy.bc_lr,
     )
-    optimizer_critic = torch.optim.Adam(params=policy.critic_ensemble.parameters(), lr=cfg.policy.critic_lr)
-
-    if cfg.policy.num_discrete_actions is not None:
-        optimizer_discrete_critic = torch.optim.Adam(
-            params=policy.discrete_critic.parameters(), lr=cfg.policy.critic_lr
-        )
-    optimizer_temperature = torch.optim.Adam(params=[policy.log_alpha], lr=cfg.policy.critic_lr)
     lr_scheduler = None
     optimizers = {
         "actor": optimizer_actor,
-        "critic": optimizer_critic,
-        "temperature": optimizer_temperature,
     }
-    if cfg.policy.num_discrete_actions is not None:
-        optimizers["discrete_critic"] = optimizer_discrete_critic
     return optimizers, lr_scheduler
 
 
@@ -795,48 +768,7 @@ def log_training_info(cfg: TrainPipelineConfig, policy: nn.Module) -> None:
     logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
 
-def initialize_replay_buffer(cfg: TrainPipelineConfig, device: str, storage_device: str) -> ReplayBuffer:
-    """
-    Initialize a replay buffer, either empty or from a dataset if resuming.
-
-    Args:
-        cfg (TrainPipelineConfig): Training configuration
-        device (str): Device to store tensors on
-        storage_device (str): Device for storage optimization
-
-    Returns:
-        ReplayBuffer: Initialized replay buffer
-    """
-    if not cfg.resume:
-        return ReplayBuffer(
-            capacity=cfg.policy.online_buffer_capacity,
-            device=device,
-            state_keys=cfg.policy.input_features.keys(),
-            storage_device=storage_device,
-            optimize_memory=True,
-        )
-
-    logging.info("Resume training load the online dataset")
-    dataset_path = os.path.join(cfg.output_dir, "dataset")
-
-    # NOTE: In RL is possible to not have a dataset.
-    repo_id = None
-    if cfg.dataset is not None:
-        repo_id = cfg.dataset.repo_id
-    dataset = LeRobotDataset(
-        repo_id=repo_id,
-        root=dataset_path,
-    )
-    return ReplayBuffer.from_lerobot_dataset(
-        lerobot_dataset=dataset,
-        capacity=cfg.policy.online_buffer_capacity,
-        device=device,
-        state_keys=cfg.policy.input_features.keys(),
-        optimize_memory=True,
-    )
-
-
-def initialize_offline_replay_buffer(
+def initialize_replay_buffer(
     cfg: TrainPipelineConfig,
     device: str,
     storage_device: str,
@@ -870,7 +802,7 @@ def initialize_offline_replay_buffer(
         state_keys=cfg.policy.input_features.keys(),
         storage_device=storage_device,
         optimize_memory=True,
-        capacity=cfg.policy.offline_buffer_capacity,
+        capacity=cfg.policy.buffer_capacity,
     )
     return offline_replay_buffer
 
@@ -881,7 +813,7 @@ def initialize_offline_replay_buffer(
 
 
 def get_observation_features(
-    policy: SACPolicy, observations: torch.Tensor, next_observations: torch.Tensor
+    policy: MLPPolicy, observations: torch.Tensor, next_observations: torch.Tensor
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """
     Get observation features from the policy encoder. It act as cache for the observation features.
@@ -984,7 +916,6 @@ def process_interaction_message(
 def process_transitions(
     transition_queue: Queue,
     replay_buffer: ReplayBuffer,
-    offline_replay_buffer: ReplayBuffer,
     device: str,
     dataset_repo_id: str | None,
     shutdown_event: any,
@@ -1004,24 +935,22 @@ def process_transitions(
         transition_list = bytes_to_transitions(buffer=transition_list)
 
         for transition in transition_list:
-            transition = move_transition_to_device(transition=transition, device=device)
-
-            # Skip transitions with NaN values
-            if check_nan_in_transition(
-                observations=transition["state"],
-                actions=transition["action"],
-                next_state=transition["next_state"],
-            ):
-                logging.warning("[LEARNER] NaN detected in transition, skipping")
-                continue
-
-            replay_buffer.add(**transition)
-
-            # Add to offline buffer if it's an intervention
             if dataset_repo_id is not None and transition.get("complementary_info", {}).get(
-                "is_intervention"
+                    "is_intervention"
             ):
-                offline_replay_buffer.add(**transition)
+                transition = move_transition_to_device(transition=transition, device=device)
+
+                # Skip transitions with NaN values
+                if check_nan_in_transition(
+                    observations=transition["state"],
+                    actions=transition["action"],
+                    next_state=transition["next_state"],
+                ):
+                    logging.warning("[LEARNER] NaN detected in transition, skipping")
+                    continue
+
+                # Add to buffer if it's an intervention
+                replay_buffer.add(**transition)
 
 
 def process_interaction_messages(

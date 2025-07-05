@@ -50,17 +50,19 @@ class MLPPolicy(PreTrainedPolicy):
     def get_optim_params(self) -> dict:
         return {"actor": self.actor.parameters()}
 
+    def reset(self):
+        """Reset the policy"""
+        pass
+
     @torch.no_grad()
     def select_action(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         """
         Deterministic action selection (mode of the policy).
         """
         obs_feats = None
-        if self.shared_encoder:
-            obs_feats = self.actor.encoder.get_cached_image_features(batch, normalize=True)
 
         # Encode observations
-        features = self.actor.encoder(batch, cache=obs_feats, detach=self.shared_encoder)
+        features = self.actor.encoder(batch, cache=obs_feats, detach=False)
         net_out = self.actor.network(features)
         mean = self.actor.mean_layer(net_out)
         if self.actor.use_tanh_squash:
@@ -99,7 +101,7 @@ class MLPPolicy(PreTrainedPolicy):
         # Normalize gt actions
         actions_gt = self.normalize_targets({"action": actions_gt})["action"]
         # Encode
-        features = self.actor.encoder(observations, cache=observation_features, detach=self.shared_encoder)
+        features = self.actor.encoder(observations, cache=observation_features, detach=False)
         net_out = self.actor.network(features)
         mean = self.actor.mean_layer(net_out)
         # Squash if needed

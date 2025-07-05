@@ -16,6 +16,7 @@ from lerobot.common.envs.wrapper.hilserl import ConvertToLeRobotObservation, Tor
 from lerobot.common.envs.wrapper.reward import AxisDistanceRewardWrapper
 from lerobot.common.envs.wrapper.spacemouse import SpaceMouseInterventionWrapper
 from lerobot.common.envs.wrapper.tff import StaticTaskFrameResetWrapper, StaticTaskFrameActionWrapper
+from lerobot.common.policies.mlp.configuration_mlp import MLPConfig
 from lerobot.common.policies.sac.configuration_sac import SACConfig
 from lerobot.common.robot_devices.cameras.configs import OpenCVCameraConfig
 from lerobot.common.robot_devices.motors.configs import URArmConfig
@@ -409,6 +410,40 @@ class SAC_NIST_Insertion_XY(SAC_NIST_Insertion_XYC):
         }
     )
 
+
+@PreTrainedConfig.register_subclass("mlp_nist_insertion_xyc")
+@dataclass
+class DAgger_NIST_Insertion_XYC(MLPConfig):
+    # tuning recipe:
+    # try to hit 30 fps
+    # keep ratio of utd_ratio:num_critics at 3:2, increase as much as possible
+    # freeze and share the encoder
+    # if possible, use "cuda" as the storage device, decrease buffer sizes accordingly
+    # run the actor on cpu for maximum throughput
+
+    online_steps: int = 10000000
+    online_step_before_learning: int = 60
+    buffer_capacity: int = 25000
+    camera_number: int = 1  # also affects fps linearly, resolution affects quadratically
+    storage_device: str = "cuda"  # destabilizes fps, sometimes cuts 10 fps
+    freeze_vision_encoder: bool = False  # cuts ~10 fps for one camera
+
+    dataset_stats: dict[str, dict[str, list[float]]] | None = field(
+        default_factory=lambda: {
+            "observation.image.main": {
+                "mean": [0.485, 0.456, 0.406],
+                "std": [0.229, 0.224, 0.225],
+            },
+            "observation.state": {
+                "min": [-10.0, -10.0, -10.0, -2.0, -2.0, -2.0, -0.00042, -0.02, -0.02, -1.0],
+                "max": [10.0, 10.0, 10.0, 2.0, 2.0, 2.0, 0.01442, 0.02, 0.02, 1.0]
+            },
+            "action": {
+                "min": [-0.02, -0.02, -1.0],
+                "max": [0.02, 0.02, 1.0]
+            },
+        }
+    )
 
 # -----------------
 # Wrapper

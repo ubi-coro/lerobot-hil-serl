@@ -145,11 +145,11 @@ def move_state_dict_to_device(state_dict, device="cpu"):
         return state_dict
 
 
-def find_wrapper(env, wrapper_type):
+def find_wrapper(env, wrapper_types):
     """Recursively search for a wrapper of type `wrapper_type`."""
     current = env
     while True:
-        if isinstance(current, wrapper_type):
+        if any([isinstance(current, t) for t in wrapper_types]):
             return current
         if not hasattr(current, 'env'):
             break
