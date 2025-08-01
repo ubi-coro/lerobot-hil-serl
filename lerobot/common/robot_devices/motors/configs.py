@@ -72,6 +72,8 @@ class URArmConfig:
     # gripper
     use_gripper: bool = False  # attempts to initialize gripper from RTDEControlInterface
     gripper_frequency: float = 30.0
+    gripper_vel: float = 100.0  # [%]
+    gripper_force: float = 100.0  # [%]
 
     # controller parameters
     lookahead_time: float = 0.1

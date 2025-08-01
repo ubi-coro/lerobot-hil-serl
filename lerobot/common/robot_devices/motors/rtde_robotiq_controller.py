@@ -1,117 +1,214 @@
 import time
+import enum
+import multiprocessing as mp
+from dataclasses import dataclass, asdict
+from multiprocessing.managers import SharedMemoryManager
 
-import rtde_control
+from lerobot.common.robot_devices.motors.robotiq_gripper import RobotiqGripper
+from lerobot.common.utils.shared_memory import SharedMemoryQueue, SharedMemoryRingBuffer, Empty
 
-from lerobot.common.robot_devices.motors.rtde_robotiq_preamble import ROBOTIQ_PREAMBLE
+
+class Command(enum.IntEnum):
+    """Simple commands for gripper process."""
+    OPEN = 0
+    CLOSE = 1
+    MOVE = 2   # payload in 'value'
+    STOP = 3
 
 
-class RobotiqGripper(object):
+@dataclass
+class GripperCommand:
+    cmd: Command = Command.OPEN
+    pos: float = 0.0  # for MOVE: target position (0-255)
+    vel: float = 100.0  # [%]
+    force: float = 100.0  # [%]
+
+    def to_queue_dict(self):
+        d = asdict(self)
+        d['cmd'] = int(self.cmd.value)
+        d['value'] = float(self.value)
+        d['vel'] = float(self.vel)
+        d['force'] = float(self.force)
+        return d
+
+
+class RTDERobotiqController(mp.Process):
     """
-    RobotiqGripper is a class for controlling a robotiq gripper using the
-    ur_rtde robot interface.
+    Separate process to drive the Robotiq 2F-85 gripper via shared-memory queues.
 
-    Attributes:
-        rtde_c (rtde_control.RTDEControlInterface): The interface to use for the communication
+    - gripper_cmd_queue: receive GripperCommand messages
+    - gripper_out_rb: push back current width & status periodically
     """
 
-    def __init__(self, rtde_c):
-        """
-        The constructor for RobotiqGripper class.
+    def __init__(self,
+                 hostname: str,
+                 port: int = 63352,
+                 shm_manager: SharedMemoryManager = None,
+                 frequency: float = 20.0):
+        super().__init__(name='GripperProcess')
+        # network settings
+        self.hostname = hostname
+        self.port = port
+        self.frequency = frequency
 
-        Parameters:
-           rtde_c (rtde_control.RTDEControlInterface): The interface to use for the communication
-        """
-        self.rtde_c = rtde_c
+        # shared-memory setup
+        if shm_manager is None:
+            shm_manager = SharedMemoryManager()
+            shm_manager.start()
+        self.shm_manager = shm_manager
 
-    def call(self, script_name, script_function):
-        return self.rtde_c.sendCustomScriptFunction(
-            "ROBOTIQ_" + script_name,
-            ROBOTIQ_PREAMBLE + script_function
+        # command queue example
+        example_cmd = GripperCommand().to_queue_dict()
+        self.gripper_cmd_queue = SharedMemoryQueue.create_from_examples(
+            shm_manager=self.shm_manager,
+            examples=example_cmd,
+            buffer_size=64
         )
 
-    def activate(self):
-        """
-        Activates the gripper. Currently the activation will take 5 seconds.
+        # state ring-buffer example
+        example_state = {
+            'width': 0.0,
+            'object_status': 0,
+            'fault': 0,
+            'timestamp': time.time()
+        }
+        self.gripper_out_rb = SharedMemoryRingBuffer.create_from_examples(
+            shm_manager=self.shm_manager,
+            examples=example_state,
+            get_max_k=256,
+            get_time_budget=0.1,
+            put_desired_frequency=self.frequency
+        )
 
-        Returns:
-            True if the command succeeded, otherwise it returns False
-        """
-        ret = self.call("ACTIVATE", "rq_activate()")
-        time.sleep(5)  # HACK
-        return ret
+        # internal control
+        self.ready_event = mp.Event()
 
-    def set_speed(self, speed):
-        """
-        Set the speed of the gripper.
+    # =========== launch & shutdown =============
+    def connect(self):
+        self.start()
 
-        Parameters:
-            speed (int): speed as a percentage [0-100]
-
-        Returns:
-            True if the command succeeded, otherwise it returns False
-        """
-        return self.call("SET_SPEED", "rq_set_speed_norm(" + str(speed) + ")")
-
-    def set_force(self, force):
-        """
-        Set the force of the gripper.
-
-        Parameters:
-            force (int): force as a percentage [0-100]
-
-        Returns:
-            True if the command succeeded, otherwise it returns False
-        """
-        return self.call("SET_FORCE", "rq_set_force_norm(" + str(force) + ")")
-
-    def move(self, pos_in_mm, wait: bool = False):
-        """
-        Move the gripper to a specified position in (mm).
-
-        Parameters:
-            pos_in_mm (int): position in millimeters.
-            wait (bool): await finished or fire-and-forget
-
-        Returns:
-            True if the command succeeded, otherwise it returns False
-        """
+    def start(self, wait=True):
+        super().start()
         if wait:
-            return self.call("MOVE", "rq_move_and_wait_mm(" + str(pos_in_mm) + ")")
-        else:
-            return self.call("MOVE", "rq_move_mm(" + str(pos_in_mm) + ")")
+            self.start_wait()
 
-    def get_pos(self):
-        """
-        Returns the current position of the robot in (mm).
-        """
-        return self.call("READ", "rq_current_pos_mm()")
-
-    def open(self, wait: bool = False):
-        """
-        Open the gripper.
-
-        Parameters:
-            wait (bool): await finished or fire-and-forget
-
-        Returns:
-            True if the command succeeded, otherwise it returns False
-        """
+    def stop(self, wait=True):
+        # Send a STOP command
+        msg = {'cmd': Command.STOP.value}
+        self.gripper_cmd_queue.put(msg)
         if wait:
-            return self.call("OPEN", "rq_open_and_wait()")
+            self.stop_wait()
+
+    def start_wait(self):
+        self.ready_event.wait(5)
+        assert self.is_alive()
+
+    def stop_wait(self):
+        self.join()
+
+    @property
+    def is_ready(self):
+        return self.ready_event.is_set()
+
+    # =========== context manager ============
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
+
+    # ========= command methods ============
+    def move(self, pos: float, vel: float = 100.0, force: float = 100.0):
+        msg = {
+            'cmd': Command.MOVE.value,
+            'pos': pos,
+            'vel': vel,
+            'force': force,
+        }
+        self.gripper_cmd_queue.put(msg)
+
+    def open_gripper(self, vel: float = 100.0, force: float = 100.0):
+        msg = {
+            'cmd': Command.OPEN.value,
+            'vel': vel,
+            'force': force,
+        }
+        self.gripper_cmd_queue.put(msg)
+
+    def close_gripper(self, vel: float = 100.0, force: float = 100.0):
+        msg = {
+            'cmd': Command.CLOSE.value,
+            'vel': vel,
+            'force': force,
+        }
+        self.gripper_cmd_queue.put(msg)
+
+    # ========= receive APIs =============
+    def get_state(self, k=None, out=None):
+        if k is None:
+            return self.gripper_out_rb.get(out=out)
         else:
-            return self.call("OPEN", "rq_open()")
+            return self.gripper_out_rb.get_last_k(k=k, out=out)
 
-    def close(self, wait: bool = False):
-        """
-        Close the gripper.
+    def get_all_state(self):
+        return self.gripper_out_rb.get_all()
 
-        Parameters:
-            wait (bool): await finished or fire-and-forget
+    def run(self):
+        try:
+            # 1) Connect to gripper
+            gr = RobotiqGripper()
+            gr.connect(self.hostname, self.port)
+            gr.activate()
 
-        Returns:
-            True if the command succeeded, otherwise it returns False
-        """
-        if wait:
-            self.call("CLOSE", "rq_close_and_wait()")
-        else:
-            self.call("CLOSE", "rq_close()")
+            keep_running = True
+            iter_idx = 0
+            t_start = time.monotonic()
+            while keep_running:#
+                t_now = time.monotonic()
+
+                # 2) Get state from robot
+                state = {
+                    'width': float(gr.get_current_position()),
+                    'object_status': int(gr._get_var(gr.OBJ)),
+                    'fault': int(gr._get_var(gr.FLT)),
+                    'timestamp': t_now
+                }
+                self.gripper_out_rb.put(state)
+
+                # 3) Fetch command from queue
+                try:
+                    msgs = self.gripper_cmd_queue.get_all()
+                    n_cmd = len(msgs['cmd'])
+                except Empty:
+                    n_cmd = 0
+
+                for i in range(n_cmd):
+                    cmd_id = int(msgs['cmd'][i])
+                    vel = int(255.0 * msgs['vel'][i])
+                    force = int(255.0 * msgs['force'][i])
+
+                    if cmd_id == Command.OPEN.value:
+                        gr.move(gr.get_open_position(), vel, force)
+                    elif cmd_id == Command.CLOSE.value:
+                        gr.move(gr.get_closed_position(), vel, force)
+                    elif cmd_id == Command.MOVE.value:
+                        pos = int(msgs['pos'][i])
+                        gr.move(pos, vel, force)
+                    elif cmd_id == Command.STOP.value:
+                        keep_running = False
+                        # stop immediately, ignore later commands
+                        break
+
+                # 4) First loop successful, ready to receive command
+                if iter_idx == 0:
+                    self.ready_event.set()
+                iter_idx += 1
+
+                # 5) Regulate frequency
+                dt = 1 / self.frequency
+                t_end = t_start + dt * iter_idx
+                time.sleep(t_end - t_start)
+        finally:
+            self.ready_event.set()
+            gr.disconnect()

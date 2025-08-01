@@ -30,7 +30,6 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from lerobot.common.robot_devices.motors.configs import URArmConfig
-from lerobot.common.robot_devices.motors.rtde_robotiq_controller import RobotiqGripper
 from lerobot.common.utils.shared_memory import SharedMemoryRingBuffer, SharedMemoryQueue, Empty
 
 
@@ -97,16 +96,6 @@ class TaskFrameCommand:
             self.max_pose_rpy = cmd.max_pose_rpy
         if cmd.min_pose_rpy is not None:
             self.min_pose_rpy = cmd.min_pose_rpy
-   
-@dataclass
-class GripperCommand:
-    cmd: Command = Command.OPEN
-    value: float = 0.0
-    
-    def to_queue_dict(self):
-        d = asdict(self)
-        d["cmd"] = self.cmd.value
-        return d
 
 
 _EXAMPLE_TF_MSG = TaskFrameCommand(
@@ -140,11 +129,6 @@ class RTDETFFController(mp.Process):
             examples=_EXAMPLE_TF_MSG,
             buffer_size=256
         )
-        self.gripper_cmd_queue = SharedMemoryQueue.create_from_examples(
-            shm_manager=config.shm_manager,
-            examples=GripperCommand().to_queue_dict(),
-            buffer_size=256
-        )
 
         # 2) Build the ring buffer for streaming back pose/vel/force
         if self.config.mock:
@@ -171,13 +155,6 @@ class RTDETFFController(mp.Process):
             get_max_k=config.get_max_k,
             get_time_budget=0.4,
             put_desired_frequency=config.frequency
-        )
-        self.gripper_out_rb = SharedMemoryRingBuffer.create_from_examples(
-            shm_manager=config.shm_manager,
-            examples={"width_mm": 0.0, "timestamp": time.time()},
-            get_max_k=config.get_max_k,
-            get_time_budget=0.4,
-            put_desired_frequency=config.gripper_frequency
         )
 
         # 3) Controller state: last TaskFrameCommand, task‐frame state, gains, etc.
@@ -234,32 +211,27 @@ class RTDETFFController(mp.Process):
         self.stop()
 
     # =========== sending a new TaskFrameCommand ============
-    def send_cmd(self, cmd: TaskFrameCommand | GripperCommand):
+    def send_cmd(self, cmd: TaskFrameCommand):
         """
         Merges the incoming cmd fields into the last_robot_cmd,
         then pushes the updated last_robot_cmd into the shared queue.
         """
+        if self.last_robot_cmd is None:
+            # First time ever: store a full copy
+            self.last_robot_cmd = TaskFrameCommand(
+                cmd=cmd.cmd,
+                T_WF=cmd.T_WF.copy(),
+                mode=cmd.mode.copy(),
+                target=cmd.target.copy(),
+                kp=cmd.kp.copy(),
+                kd=cmd.kd.copy()
+            )
+        else:
+            # Only update the fields that are not None
+            self.last_robot_cmd.update(cmd)
 
-        if isinstance(cmd, TaskFrameCommand):
-            if self.last_robot_cmd is None:
-                # First time ever: store a full copy
-                self.last_robot_cmd = TaskFrameCommand(
-                    cmd=cmd.cmd,
-                    T_WF=cmd.T_WF.copy(),
-                    mode=cmd.mode.copy(),
-                    target=cmd.target.copy(),
-                    kp=cmd.kp.copy(),
-                    kd=cmd.kd.copy()
-                )
-            else:
-                # Only update the fields that are not None
-                self.last_robot_cmd.update(cmd)
-
-            # Push the entire updated struct into the queue
-            self.robot_cmd_queue.put(self.last_robot_cmd.to_queue_dict())
-
-        elif isinstance(cmd, GripperCommand):
-            self.gripper_cmd_queue.put(cmd.to_queue_dict())
+        # Push the entire updated struct into the queue
+        self.robot_cmd_queue.put(self.last_robot_cmd.to_queue_dict())
 
     def zero_ft(self):
         """Tell the controller thread to re‐zero the force‐torque sensor."""
@@ -276,15 +248,6 @@ class RTDETFFController(mp.Process):
 
     def get_all_robot_states(self):
         return self.robot_out_rb.get_all()
-
-    def get_gripper_state(self, k=None, out=None):
-        if k is None:
-            return self.gripper_out_rb.get(out=out)
-        else:
-            return self.gripper_out_rb.get_last_k(k=k, out=out)
-
-    def get_all_gripper_states(self):
-        return self.gripper_out_rb.get_all()
 
     # ========= main loop in process ============
     def run(self):
@@ -307,15 +270,11 @@ class RTDETFFController(mp.Process):
         rtde_c = RTDEControlInterface(robot_ip, frequency)
         rtde_r = RTDEReceiveInterface(robot_ip)
 
-        # 3) Connect to gripper
-        if self.config.use_gripper:
-            self.gripper = RobotiqGripper(rtde_c)
-
         try:
             if self.config.verbose:
                 print(f"[RTDETFFController] Connecting to {robot_ip}…")
 
-            # 4) Set TCP offset & payload (if provided)
+            # 3) Set TCP offset & payload (if provided)
             if self.config.tcp_offset_pose is not None:
                 rtde_c.setTcp(self.config.tcp_offset_pose)
             if self.config.payload_mass is not None:
@@ -324,7 +283,7 @@ class RTDETFFController(mp.Process):
                 else:
                     assert rtde_c.setPayload(self.config.payload_mass)
 
-            # 5) Enter impedance loop via forceMode
+            # 4) Enter impedance loop via forceMode
 
             # 5.1) Initialize target pose = current task pose (so we start from zero error)
             pose_F = self.read_current_state(rtde_r)["ActualTCPPose"]
@@ -345,7 +304,6 @@ class RTDETFFController(mp.Process):
             # 5.3) Mark the loop as “ready” from the first successful iteration
             iter_idx = 0
             keep_running = True
-            last_gripper_time = time.monotonic()
 
             # 5.4) Prepare for jitter logging
             hist = collections.deque(maxlen=1000)
@@ -551,44 +509,13 @@ class RTDETFFController(mp.Process):
                     logging.debug(f"[Loop Jitter] μ={arr.mean() * 1000:.2f} ms  σ={arr.std() * 1000:.2f} ms  "
                           f"min={arr.min() * 1000:.2f} ms  max={arr.max() * 1000:.2f} ms")
                     next_log_time = t_now + log_interval
-                    
-                # 6.9) Handle robotiq gripper
 
-                # only poll every 1 / gripper_frequency seconds
-                gripper_dt = 1.0 / self.config.gripper_frequency
-                if (t_now - last_gripper_time) >= gripper_dt:
-                    last_gripper_time = t_now
-
-                    # 6.9.1) Read all pending gripper commands
-                    try:
-                        gr_msgs = self.gripper_cmd_queue.get_all()
-                        n_gr = len(gr_msgs['cmd'])
-                    except Empty:
-                        n_gr = 0
-
-                    for j in range(n_gr):
-                        single = {k: gr_msgs[k][j] for k in gr_msgs}
-                        cmd_id = int(single['cmd'])
-                        if cmd_id == Command.OPEN.value:
-                            self.gripper.open()
-                        elif cmd_id == Command.CLOSE.value:
-                            self.gripper.close()
-                        elif cmd_id == Command.SET.value:
-                            self.gripper.move(single["value"])
-
-                    # 6.9.2) Push back the current gripper state
-                    #gr_state = {
-                    #    'width_mm': float(self.gripper.get_pos()),
-                    #    'timestamp': t_now
-                    #}
-                    #self.gripper_out_rb.put(gr_state)
-
-                # 6.10) After first iteration signal ready
+                # 6.9) After first iteration signal ready
                 if iter_idx == 0:
                     self.ready_event.set()
                 iter_idx += 1
 
-                # 6.11) regulate loop frequency
+                # 6.10) regulate loop frequency
                 rtde_c.waitPeriod(t_loop_start)
 
             # end of while keep_running

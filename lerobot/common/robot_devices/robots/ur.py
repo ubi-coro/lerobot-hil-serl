@@ -27,6 +27,7 @@ import torch
 
 from lerobot.common.robot_devices.cameras.utils import make_cameras_from_configs
 from lerobot.common.robot_devices.motors.dynamixel import TorqueMode
+from lerobot.common.robot_devices.motors.rtde_robotiq_controller import RTDERobotiqController
 from lerobot.common.robot_devices.motors.rtde_tff_controller import RTDETFFController, TaskFrameCommand
 from lerobot.common.robot_devices.motors.utils import make_motors_buses_from_configs
 from lerobot.common.robot_devices.robots.configs import URConfig
@@ -47,11 +48,18 @@ class UR:
         self.shm.start()
 
         # -------------------------- URs ------------------------- #
-        self.controllers = {}
+        self.controllers: dict[str, RTDETFFController] = {}
+        self.grippers: dict[str, RTDERobotiqController] = {}
         for name, follower_config in self.config.follower_arms.items():
             follower_config.shm_manager = self.shm
-            controller = RTDETFFController(follower_config)
-            self.controllers[name] = controller
+            self.controllers[name] = RTDETFFController(follower_config)
+
+            if follower_config.use_gripper:
+                self.grippers[name] = RTDERobotiqController(
+                    hostname=follower_config.robot_ip,
+                    shm_manager=self.shm,
+                    frequency=follower_config.gripper_frequency
+                )
 
         # -------------------------- dynamixel & cameras ------------------------- #
         self.leader_arms = make_motors_buses_from_configs(self.config.leader_arms)
@@ -149,6 +157,9 @@ class UR:
         for name in self.controllers:
             logging.info(f"Connecting {name} follower arm.")
             self.controllers[name].start()
+        for name in self.grippers:
+            logging.info(f"Connecting {name} follower arm.")
+            self.grippers[name].start()
         for name in self.leader_arms:
             logging.info(f"Connecting {name} leader arm.")
             self.leader_arms[name].connect()
@@ -158,6 +169,8 @@ class UR:
         # Check if all components can be read
         for name in self.controllers:
             self.controllers[name].get_robot_state()
+        for name in self.grippers:
+            self.grippers[name].get_state()
         for name in self.leader_arms:
             self.leader_arms[name].read("Present_Position")
 
@@ -216,13 +229,6 @@ class UR:
         pass
 
     def capture_observation(self):
-        """
-        Timestamp alignment policy
-        We assume the cameras used for obs are always [0, k - 1], where k is the number of robots
-        All other cameras, find corresponding frame with the nearest timestamp
-        All low-dim observations, interpolate with respect to 'current' time
-        The returned observations do not have a batch dimension.
-        """
         if not self.is_connected:
             raise RobotDeviceNotConnectedError(
                 "ManipulatorRobot is not connected. You need to run `robot.connect()`."
@@ -239,9 +245,10 @@ class UR:
         for name, controller in self.controllers.items():
             controller_data = controller.get_robot_state()
 
-            if getattr(controller.config, 'use_gripper', False):
-                gripper_pos = controller.get_robot_state()["width_mm"]
-                obs[f'observation.{name}_eef_pos'] = np.concatenate([controller_data['ActualTCPPose'], [gripper_pos]])
+            if controller.config.use_gripper:
+                gripper = self.grippers[name]
+                gripper_width = gripper.get_state()["width"]
+                obs[f'observation.{name}_eef_pos'] = np.concatenate([controller_data['ActualTCPPose'], [gripper_width]])
             else:
                 obs[f'observation.{name}_eef_pos'] = controller_data['ActualTCPPose']
 
@@ -273,7 +280,7 @@ class UR:
             raise ValueError(f"Action length ({total_len}) does not match expected ({expected}) for current controllers.")
 
         for name, controller in self.controllers.items():
-            length = 7 if getattr(controller.config, 'use_gripper', False) else 6
+            length = 7 if controller.config.use_gripper else 6
             seg = arr[idx: idx + length]
             idx += length
 
@@ -283,9 +290,8 @@ class UR:
 
             # if gripper flag, last element is width in metres
             if length == 7:
-                width_mm = float(seg[6])
-                # assumes controller.gripper exists
-                controller.gripper.move(width_mm, wait=False)
+                width = float(seg[6])
+                self.grippers[name].move(width, vel=controller.config.gripper_vel, force=controller.config.gripper_force)
         return action
 
 
