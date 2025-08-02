@@ -23,6 +23,15 @@ from lerobot.configs.types import NormalizationMode
 
 
 @dataclass
+class DataGuidedNoiseConfig:
+    enable: bool = True
+    initial_eps: float = 0.8
+    tau: float = 10_000
+    predict_residual: bool = False
+    update_freq: int = 1000
+    update_steps: int = 250
+
+@dataclass
 class ConcurrencyConfig:
     actor: str = "threads"
     learner: str = "threads"
@@ -174,6 +183,7 @@ class SACConfig(PreTrainedConfig):
     critic_lr: float = 3e-4
     actor_lr: float = 3e-4
     temperature_lr: float = 3e-4
+    noise_lr: float = 3e-4
     critic_target_update_weight: float = 0.005
     utd_ratio: int = 1  # If you want enable utd_ratio, you need to set it to >1
     state_encoder_hidden_dim: int = 256
@@ -188,6 +198,7 @@ class SACConfig(PreTrainedConfig):
     policy_kwargs: PolicyConfig = field(default_factory=PolicyConfig)
     discrete_critic_network_kwargs: CriticNetworkConfig = field(default_factory=CriticNetworkConfig)
     actor_learner_config: ActorLearnerConfig = field(default_factory=ActorLearnerConfig)
+    noise_config: DataGuidedNoiseConfig  = field(default_factory=DataGuidedNoiseConfig)
     concurrency: ConcurrencyConfig = field(default_factory=ConcurrencyConfig)
 
     def __post_init__(self):
@@ -201,6 +212,7 @@ class SACConfig(PreTrainedConfig):
                 "actor": {"lr": self.actor_lr},
                 "critic": {"lr": self.critic_lr},
                 "temperature": {"lr": self.temperature_lr},
+                "noise": {"lr": self.noise_lr}
             },
         )
 

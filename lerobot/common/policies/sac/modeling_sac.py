@@ -36,6 +36,12 @@ from lerobot.common.policies.utils import get_device_from_parameters
 DISCRETE_DIMENSION_INDEX = -1  # Gripper is always the last dimension
 
 
+# todo:
+# init
+# loss
+# inference
+# training script
+
 class SACPolicy(
     PreTrainedPolicy,
 ):
@@ -57,6 +63,7 @@ class SACPolicy(
         self._init_encoders()
         self._init_critics(continuous_action_dim)
         self._init_actor(continuous_action_dim)
+        self._init_noise()
         self._init_temperature()
 
     def get_optim_params(self) -> dict:
@@ -71,6 +78,12 @@ class SACPolicy(
         }
         if self.config.num_discrete_actions is not None:
             optim_params["discrete_critic"] = self.discrete_critic.parameters()
+        if self.config.noise_config.enable:
+            optim_params["noise"] = [
+                p
+                for n, p in self.noise_net.named_parameters()
+                if not n.startswith("encoder") or not self.shared_encoder
+            ],
         return optim_params
 
     def reset(self):
@@ -78,7 +91,7 @@ class SACPolicy(
         pass
 
     @torch.no_grad()
-    def select_action(self, batch: dict[str, Tensor]) -> tuple[Tensor, float]:
+    def select_action(self, batch: dict[str, Tensor], step, add_structured_noise: bool = True) -> tuple[Tensor, float]:
         """Select action for inference/evaluation"""
         observation_features = None
         if self.shared_encoder:
@@ -93,6 +106,9 @@ class SACPolicy(
             discrete_action_value = self.discrete_critic(batch, observation_features)
             discrete_action = torch.argmax(discrete_action_value, dim=-1, keepdim=True)
             actions = torch.cat([actions, discrete_action], dim=-1)
+
+        if self.config.noise_config.enable and add_structured_noise:
+            actions = self.add_structured_noise(actions, batch, observation_features)
 
         return actions, q_pred.min().detach().item()
 
@@ -209,6 +225,15 @@ class SACPolicy(
         if model == "temperature":
             return {
                 "loss_temperature": self.compute_loss_temperature(
+                    observations=observations,
+                    observation_features=observation_features,
+                )
+            }
+
+        if model == "noise":
+            return {
+                "loss_noise": self.compute_loss_noise(
+                    actions=actions,
                     observations=observations,
                     observation_features=observation_features,
                 )
@@ -401,6 +426,63 @@ class SACPolicy(
         actor_loss = ((self.temperature * log_probs) - min_q_preds).mean()
         return actor_loss
 
+    def compute_loss_noise(
+        self,
+        actions,
+        observations,
+        observation_features: Tensor | None = None,
+    ) -> Tensor:
+        with torch.no_grad():
+            mean_action = self.select_action(observations, step=0, add_structured_noise=False)
+
+        _, noise_dist = self.add_structured_noise(mean_action, observations, observation_features, step=0)
+
+        noise_loss = -noise_dist.log_prob(actions).mean()
+        return noise_loss
+
+    def add_structured_noise(self, actions: Tensor, observations: dict[str, Tensor] , observation_features: Tensor | None = None, step: int = 0):
+        batch_size = actions.shape[0]
+        action_dim = actions.shape[1]
+        noise_params = self.noise_net(observations, observation_features)
+
+        if self.config.noise_config.predict_residual:
+            cov_cholemsky = noise_params[..., action_dim:]
+            mean = noise_params[..., :action_dim]
+        else:
+            cov_cholemsky = noise_params
+            mean = torch.zeros_like(actions)
+
+        # Create lower triangular matrix
+        L = torch.zeros((batch_size, action_dim, action_dim), device=actions.device)
+
+        tril_indices = torch.tril_indices(row=action_dim, col=action_dim, offset=0)
+        L[:, tril_indices[0], tril_indices[1]] = cov_cholemsky
+
+        # Optionally apply softplus to diagonal elements to ensure positive definiteness
+        diagonal_indices = torch.arange(action_dim)
+        L[:, diagonal_indices, diagonal_indices] = torch.nn.functional.softplus(
+            L[:, diagonal_indices, diagonal_indices]
+        ) + 1e-6
+
+        # Compute covariance matrix explicitly via Cholesky factorization
+        cov = torch.bmm(L, L.transpose(1, 2))
+
+        # sample from multivariate normal
+        noise_dist = torch.distributions.MultivariateNormal(mean, covariance_matrix=cov)
+        noise = noise_dist.rsample()
+
+        # downscale noise
+        eps = self.config.noise_config.initial_eps * np.exp(-step /  self.config.noise_config.tau)
+        noise = eps * noise
+
+        # add actions and clamp accordingly
+        action_normalized = self.normalize_targets({"action": actions})["action"]
+        action_normalized = action_normalized + noise
+        action_normalized = torch.clamp(action_normalized, -1, 1)
+
+        actions_final = self.unnormalize_outputs({"action": action_normalized})["action"]
+        return actions_final, noise_dist
+
     def _init_normalization(self, dataset_stats):
         """Initialize input/output normalization modules."""
         self.normalize_inputs = nn.Identity()
@@ -428,6 +510,13 @@ class SACPolicy(
             if self.shared_encoder
             else SACObservationEncoder(self.config, self.normalize_inputs)
         )
+
+        if self.config.noise_config.enable:
+            self.encoder_noise = (
+                self.encoder_critic
+                if self.shared_encoder
+                else SACObservationEncoder(self.config, self.normalize_inputs)
+            )
 
     def _init_critics(self, continuous_action_dim):
         """Build critic ensemble, targets, and optional discrete critic."""
@@ -495,6 +584,28 @@ class SACPolicy(
         temp_init = self.config.temperature_init
         self.log_alpha = nn.Parameter(torch.tensor([math.log(temp_init)]))
         self.temperature = self.log_alpha.exp().item()
+
+    def _init_noise(self):
+        if not self.config.noise_config.enable:
+            return
+
+        action_dim = self.config.output_features["action"].shape[0]
+        if self.config.num_discrete_actions is not None:
+            action_dim += 1
+        output_dim = action_dim * (action_dim + 1) // 2  # num of elements in lower triangular matrix
+
+        if self.config.noise_config.predict_residual:
+            output_dim += action_dim
+
+
+        self.noise_net = Policy(
+            encoder=self.encoder_noise,
+            network=MLP(input_dim=self.encoder_actor.output_dim, **asdict(self.config.actor_network_kwargs)),
+            action_dim=output_dim,
+            encoder_is_shared=self.shared_encoder,
+            **asdict(self.config.policy_kwargs),
+        )
+
 
 
 class SACObservationEncoder(nn.Module):

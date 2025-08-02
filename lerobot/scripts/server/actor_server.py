@@ -250,7 +250,7 @@ def act_with_policy(
                 label="Policy inference time",
                 log=False,
             ) as timer:  # noqa: F841
-                action = policy.select_action(batch=obs)
+                action = policy.select_action(batch=obs, step=interaction_step)
             policy_fps = 1.0 / (list_policy_time[-1] + 1e-9)
 
             log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)

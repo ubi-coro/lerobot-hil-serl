@@ -269,6 +269,9 @@ def add_actor_information_and_train(
     save_freq = cfg.save_freq
     policy_update_freq = cfg.policy.policy_update_freq
     policy_parameters_push_frequency = cfg.policy.actor_learner_config.policy_parameters_push_frequency
+    noise_enable = cfg.policy.noise_config.enable
+    noise_update_freq = cfg.policy.noise_config.update_freq
+    noise_update_steps = cfg.policy.noise_config.update_steps
     saving_checkpoint = cfg.save_checkpoint
     online_steps = cfg.policy.online_steps
     async_prefetch = cfg.policy.async_prefetch
@@ -327,10 +330,38 @@ def add_actor_information_and_train(
     dataset_repo_id = None
     if cfg.dataset is not None:
         dataset_repo_id = cfg.dataset.repo_id
+    assert not (dataset_repo_id is None and noise_enable)
 
     # Initialize iterators
     online_iterator = None
     offline_iterator = None
+    noise_iterator = None
+
+    def prepare_batch(batch):
+        actions = batch["action"]
+        rewards = batch["reward"]
+        observations = batch["state"]
+        next_observations = batch["next_state"]
+        done = batch["done"]
+        check_nan_in_transition(observations=observations, actions=actions, next_state=next_observations)
+
+        observation_features, next_observation_features = get_observation_features(
+            policy=policy, observations=observations, next_observations=next_observations
+        )
+
+        # Create a batch dictionary with all required elements for the forward method
+        forward_batch = {
+            "action": actions,
+            "reward": rewards,
+            "state": observations,
+            "next_state": next_observations,
+            "done": done,
+            "observation_feature": observation_features,
+            "next_observation_feature": next_observation_features,
+            "complementary_info": batch["complementary_info"],
+        }
+
+        return forward_batch
 
     # NOTE: THIS IS THE MAIN LOOP OF THE LEARNER
     while True:
@@ -371,6 +402,11 @@ def add_actor_information_and_train(
                 batch_size=batch_size, async_prefetch=async_prefetch, queue_size=2
             )
 
+        if noise_enable and optimization_step % noise_update_freq:
+            noise_iterator = offline_replay_buffer.get_iterator(
+                batch_size=2 * batch_size, async_prefetch=async_prefetch, queue_size=2
+            )
+
         time_for_one_optimization_step = time.time()
         for _ in range(utd_ratio - 1):
             # Sample from the iterators
@@ -382,28 +418,7 @@ def add_actor_information_and_train(
                     left_batch_transitions=batch, right_batch_transition=batch_offline
                 )
 
-            actions = batch["action"]
-            rewards = batch["reward"]
-            observations = batch["state"]
-            next_observations = batch["next_state"]
-            done = batch["done"]
-            check_nan_in_transition(observations=observations, actions=actions, next_state=next_observations)
-
-            observation_features, next_observation_features = get_observation_features(
-                policy=policy, observations=observations, next_observations=next_observations
-            )
-
-            # Create a batch dictionary with all required elements for the forward method
-            forward_batch = {
-                "action": actions,
-                "reward": rewards,
-                "state": observations,
-                "next_state": next_observations,
-                "done": done,
-                "observation_feature": observation_features,
-                "next_observation_feature": next_observation_features,
-                "complementary_info": batch["complementary_info"],
-            }
+            forward_batch = prepare_batch(batch)
 
             # Use the forward method for critic loss
             critic_output = policy.forward(forward_batch, model="critic")
@@ -440,28 +455,7 @@ def add_actor_information_and_train(
                 left_batch_transitions=batch, right_batch_transition=batch_offline
             )
 
-        actions = batch["action"]
-        rewards = batch["reward"]
-        observations = batch["state"]
-        next_observations = batch["next_state"]
-        done = batch["done"]
-
-        check_nan_in_transition(observations=observations, actions=actions, next_state=next_observations)
-
-        observation_features, next_observation_features = get_observation_features(
-            policy=policy, observations=observations, next_observations=next_observations
-        )
-
-        # Create a batch dictionary with all required elements for the forward method
-        forward_batch = {
-            "action": actions,
-            "reward": rewards,
-            "state": observations,
-            "next_state": next_observations,
-            "done": done,
-            "observation_feature": observation_features,
-            "next_observation_feature": next_observation_features,
-        }
+        forward_batch = prepare_batch(batch)
 
         critic_output = policy.forward(forward_batch, model="critic")
 
@@ -527,6 +521,19 @@ def add_actor_information_and_train(
 
                 # Update temperature
                 policy.update_temperature()
+
+        if noise_enable and optimization_step % noise_update_freq:
+            for _ in range(noise_update_steps):
+                # Structured noise optimization
+                batch = next(noise_iterator)
+                forward_batch = prepare_batch(batch)
+
+                noise_output = policy.forward(forward_batch, model="noise")
+
+                loss_noise = noise_output["noise"]
+                optimizers["noise"].zero_grad()
+                loss_noise.backward()
+                optimizers["noise"].step()
 
         # Push policy to actors if needed
         if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:
