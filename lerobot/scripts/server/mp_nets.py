@@ -1,19 +1,16 @@
-import abc
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Literal, Sequence, Callable, Optional, Dict, Tuple, Any
 
 import draccus
 
 from lerobot.common.constants import ACTION, OBS_ROBOT
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.common.envs import EnvConfig
 from lerobot.common.envs.ur_env import UREnv
 from lerobot.common.envs.wrapper.hilserl import TimeLimitWrapper, ImageCropResizeWrapper, TorchActionWrapper, ConvertToLeRobotObservation
 from lerobot.common.envs.wrapper.spacemouse import SpaceMouseInterventionWrapper
 from lerobot.common.envs.wrapper.tff import StaticTaskFrameActionWrapper, StaticTaskFrameResetWrapper
+from lerobot.common.policies.factory import make_policy
 from lerobot.common.policies.reward_model.configuration_classifier import RewardClassifierConfig
-from lerobot.common.policies.reward_model.modeling_classifier import Classifier
 from lerobot.common.policies.sac.configuration_sac import SACConfig
 from lerobot.common.policies.sac.modeling_sac import SACPolicy
 from lerobot.common.robot_devices.motors.rtde_tff_controller import TaskFrameCommand
@@ -217,12 +214,16 @@ class MPNetConfig(draccus.ChoiceRegistry):
         for _id, p in self.primitives.values():
             setattr(p, "id", _id)
 
+            if p.is_adaptive:
+                p.policy = make_policy(cfg=p.policy, env_cfg=p)
+                policy = policy.eval()
+
         # init models
 
     def get_policies(self):
         return {name: p.policy for name, p in self.primitives.items() if p.is_adaptive and p.policy is not None}
 
-    def get_interaction_counter(self) -> InteractionCounter:
+    def get_step_counter(self) -> InteractionCounter:
         """
         Returns a fresh InteractionCounter that tracks how many interaction
         steps each adaptive primitive has taken, and knows when each
@@ -231,65 +232,22 @@ class MPNetConfig(draccus.ChoiceRegistry):
         return InteractionCounter(self.primitives)
 
 
-def init_datasets(cfg: MPNetConfig) -> Tuple[Dict[str, LeRobotDataset], int]:
-    datasets = {}
-    min_episode = float('inf')
-    for name, primitive in cfg.primitives.values():
-        # Configure dataset features based on environment spaces
-        features = {
-            "observation.state": {
-                "dtype": "float32",
-                "shape": primitive.features["observation.state"].shape,
-                "names": None,
-            },
-            "action": {
-                "dtype": "float32",
-                "shape": primitive.features["action"].shape,
-                "names": None,
-            },
-            "next.reward": {"dtype": "float32", "shape": (1,), "names": None},
-            "next.done": {"dtype": "bool", "shape": (1,), "names": None},
-        }
+def reset_mp_net(env, cfg: MPNetConfig):
+    reset_env = StaticTaskFrameResetWrapper(
+        env,
+        static_tffs=cfg.reset.static_tffs or {},
+        reset_pos=cfg.reset.reset_pos,
+        reset_kp=cfg.reset.reset_kp,
+        reset_kd=cfg.reset.reset_kd,
+        noise_std=cfg.reset.noise_std,
+        noise_dist=cfg.reset.noise_dist,
+        safe_reset=cfg.reset.safe_reset,
+        threshold=cfg.reset.threshold,
+        timeout=cfg.reset.timeout
+    )
 
-        # Add image features
-        for key in primitive.features:
-            if "image" in key:
-                features[key] = {
-                    "dtype": "video",
-                    "shape": primitive.features[key].shape,
-                    "names": None,
-                }
-
-        # Create dataset
-        dataset_root = Path(cfg.dataset_root) / name
-        repo_id = cfg.repo_id + f"-{name}"
-        if cfg.resume:
-            datasets[primitive.id] = LeRobotDataset(cfg.repo_id, root=dataset_root)
-            datasets[primitive.id].start_image_writer(
-                num_processes=2,
-                num_threads=4 * len(cfg.robot.cameras),
-            )
-        else:
-            datasets[primitive.id] = LeRobotDataset.create(
-                cfg.fps,
-                repo_id,
-                root=dataset_root,
-                use_videos=True,
-                image_writer_threads=4 * len(cfg.robot.cameras),
-                image_writer_processes=2,
-                features=features,
-            )
-
-        # Update min_episode
-        if datasets[primitive.id].num_episodes < min_episode:
-            min_episode = datasets[primitive.id].num_episodes
-
-    return datasets, min_episode
-
-
-def init_models(cfg: MPNetConfig) -> MPNetConfig:
-    # not supported yet
-    return cfg
+    obs, info = reset_env.reset()
+    return obs, info
 
 
 

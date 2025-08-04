@@ -38,7 +38,7 @@ from lerobot.configs.train import TrainPipelineConfig
 from lerobot.experiments import *
 from lerobot.scripts.server import hilserl_pb2, hilserl_pb2_grpc, learner_service
 from lerobot.scripts.server.buffer import Transition
-from lerobot.scripts.server.mp_nets import MPNetConfig
+from lerobot.scripts.server.mp_nets import MPNetConfig, reset_mp_net
 from lerobot.scripts.server.network_utils import (
     bytes_to_state_dict,
     python_object_to_bytes,
@@ -46,7 +46,6 @@ from lerobot.scripts.server.network_utils import (
     send_bytes_in_chunks,
     transitions_to_bytes,
 )
-from lerobot.scripts.server.record_episodes_mpn import reset_mp_net
 from lerobot.scripts.server.utils import (
     get_last_item_from_queue,
     move_state_dict_to_device,
@@ -202,26 +201,16 @@ def act_with_policy(
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
-    sum_reward_episode = 0
-    list_transition_to_send_to_learner = []
-    list_policy_time = []
-    episode_intervention = False
-    eval_mode = False
-    # Add counters for intervention rate calculation
-    episode_intervention_steps = 0
-    episode_total_steps = 0
-    episode_cnt = 0
-
     mp_net: MPNetConfig = cfg.env
-    interaction_counter = mp_net.get_interaction_counter()
-    while not interaction_counter.all_finished():
+    eval_mode = False
+    step_counter = mp_net.get_step_counter()
+    while not step_counter.all_finished():
         current_primitive = cfg.primitives[cfg.start_primitive]
 
         sum_reward_episode = 0
         list_transition_to_send_to_learner = []
         list_policy_time = []
         episode_intervention = False
-        eval_mode = False
 
         # Add counters for intervention rate calculation
         episode_intervention_steps = 0
@@ -238,7 +227,7 @@ def act_with_policy(
         # Run episode steps
         while not current_primitive.is_terminal:
             start_time = time.perf_counter()
-            step = interaction_counter[current_primitive.id]
+            step = step_counter[current_primitive.id]
             prev_primitive = current_primitive
 
             if shutdown_event.is_set():
@@ -282,21 +271,26 @@ def act_with_policy(
                 # Increment intervention steps counter
                 episode_intervention_steps += 1
 
-            list_transition_to_send_to_learner.append(
-                Transition(
-                    id=current_primitive.id,
-                    state=obs,
-                    action=action,
-                    q_value=q_value,
-                    reward=reward,
-                    next_state=next_obs,
-                    done=done,
-                    truncated=truncated,  # TODO: (azouitine) Handle truncation properly
-                    complementary_info=info,
+            if current_primitive.is_adaptive:
+                list_transition_to_send_to_learner.append(
+                    Transition(
+                        id=current_primitive.id,
+                        state=obs,
+                        action=action,
+                        q_value=q_value,
+                        reward=reward,
+                        next_state=next_obs,
+                        done=done,
+                        truncated=truncated,  # TODO: (azouitine) Handle truncation properly
+                        complementary_info=info,
+                    )
                 )
-            )
-            # assign obs to the next obs and continue the rollout
+
+            # Assign obs to the next obs and continue the rollout
             obs = next_obs
+
+            # Increment that primitive's step counter
+            step_counter.increment(current_primitive.id)
 
             # Check stop triggered by timeout, spacemouse or classifier
             if done and info.get("success", False):  # done could be after timeout, task might not be successful
@@ -310,58 +304,59 @@ def act_with_policy(
 
             # If primitive changed, send messages, close old env and make new env
             if prev_primitive != current_primitive:
+                if prev_primitive.is_adaptive:
 
-                # Push over transitions
-                if len(list_transition_to_send_to_learner) > 0:
-                    push_transitions_to_transport_queue(
-                        transitions=list_transition_to_send_to_learner,
-                        transitions_queue=transitions_queue,
-                    )
-                    list_transition_to_send_to_learner = []
+                    # Push over transitions
+                    if len(list_transition_to_send_to_learner) > 0:
+                        push_transitions_to_transport_queue(
+                            transitions=list_transition_to_send_to_learner,
+                            transitions_queue=transitions_queue,
+                        )
+                        list_transition_to_send_to_learner = []
 
-                stats = get_frequency_stats(list_policy_time)
-                list_policy_time.clear()
+                    stats = get_frequency_stats(list_policy_time)
+                    list_policy_time.clear()
 
-                # Check complementary info
-                complementary_info = {}
-                if "success" in info:
-                    complementary_info["Success"] = int(info["success"])
-                if "first_success_step" in info:
-                    complementary_info["Cycle time"] = int(info["first_success_step"]) * cfg.env.fps
-                else:
-                    complementary_info["Cycle time"] = episode_total_steps * cfg.env.fps
+                    # Check complementary info
+                    complementary_info = {}
+                    if "success" in info:
+                        complementary_info["Success"] = int(info["success"])
+                    if "first_success_step" in info:
+                        complementary_info["Cycle time"] = int(info["first_success_step"]) * cfg.env.fps
+                    else:
+                        complementary_info["Cycle time"] = episode_total_steps * cfg.env.fps
 
-                if not eval_mode:
-                    complementary_info = {"Train/" + key: value for key, value in complementary_info.items()}
+                    if not eval_mode:
+                        complementary_info = {"Train/" + key: value for key, value in complementary_info.items()}
 
-                    # Calculate intervention rate
-                    intervention_rate = 0.0
-                    if episode_total_steps > 0:
-                        intervention_rate = episode_intervention_steps / episode_total_steps
+                        # Calculate intervention rate
+                        intervention_rate = 0.0
+                        if episode_total_steps > 0:
+                            intervention_rate = episode_intervention_steps / episode_total_steps
 
-                    msg = {
-                        "Primitive": current_primitive.id,
-                        "Train/Episodic reward": sum_reward_episode,
-                        "Interaction step": step,
-                        "Episode intervention": int(episode_intervention),
-                        "Intervention rate": intervention_rate,
-                        **complementary_info,
-                        **stats,
-                    }
+                        msg = {
+                            "Primitive": prev_primitive.id,
+                            "Train/Episodic reward": sum_reward_episode,
+                            "Interaction step": step,
+                            "Episode intervention": int(episode_intervention),
+                            "Intervention rate": intervention_rate,
+                            **complementary_info,
+                            **stats,
+                        }
 
-                else:
-                    complementary_info = {"Eval/" + key: value for key, value in complementary_info.items()}
+                    else:
+                        complementary_info = {"Eval/" + key: value for key, value in complementary_info.items()}
 
-                    msg = {
-                        "Primitive": current_primitive.id,
-                        "Eval/Episodic reward": sum_reward_episode,
-                        "Interaction step": step,
-                        **complementary_info,
-                        **stats,
-                    }
+                        msg = {
+                            "Primitive": prev_primitive.id,
+                            "Eval/Episodic reward": sum_reward_episode,
+                            "Interaction step": step,
+                            **complementary_info,
+                            **stats,
+                        }
 
-                # Send episodic reward to the learner
-                interactions_queue.put(python_object_to_bytes(msg))
+                    # Send episodic reward to the learner
+                    interactions_queue.put(python_object_to_bytes(msg))
 
                 # Reset running variables
                 sum_reward_episode = 0.0
