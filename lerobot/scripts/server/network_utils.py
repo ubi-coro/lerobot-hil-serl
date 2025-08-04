@@ -67,6 +67,7 @@ def send_bytes_in_chunks(buffer: bytes, message_class: Any, log_prefix: str = ""
 def receive_bytes_in_chunks(iterator, queue: Queue, shutdown_event: Event, log_prefix: str = ""):  # type: ignore
     bytes_buffer = io.BytesIO()
     step = 0
+    current_pid = None
 
     logging.info(f"{log_prefix} Starting receiver")
     for item in iterator:
@@ -76,6 +77,7 @@ def receive_bytes_in_chunks(iterator, queue: Queue, shutdown_event: Event, log_p
             return
 
         if item.transfer_state == hilserl_pb2.TransferState.TRANSFER_BEGIN:
+            current_pid = item.primitive_id
             bytes_buffer.seek(0)
             bytes_buffer.truncate(0)
             bytes_buffer.write(item.data)
@@ -88,13 +90,17 @@ def receive_bytes_in_chunks(iterator, queue: Queue, shutdown_event: Event, log_p
             logging.debug(f"{log_prefix} Received data at step {step}")
         elif item.transfer_state == hilserl_pb2.TransferState.TRANSFER_END:
             bytes_buffer.write(item.data)
-            logging.debug(f"{log_prefix} Received data at step end size {bytes_buffer_size(bytes_buffer)}")
+            full_bytes = bytes_buffer.getvalue()
+            logging.debug(f"{log_prefix} [{current_pid}] Received END chunk, size={len(full_bytes)}")
 
-            queue.put(bytes_buffer.getvalue())
+            # enqueue tagged payload
+            queue.put((current_pid, full_bytes))
+            logging.debug(f"{log_prefix} Queued parameters for '{current_pid}'")
 
             bytes_buffer.seek(0)
             bytes_buffer.truncate(0)
             step = 0
+            current_pid = None
 
             logging.debug(f"{log_prefix} Queue updated")
 
