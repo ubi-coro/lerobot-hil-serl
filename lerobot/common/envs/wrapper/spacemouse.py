@@ -91,6 +91,7 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
         super().__init__(env)
         self.robot_names = list(env.unwrapped.robot.controllers.keys())
         self.intercept_with_button = intercept_with_button
+        self.block_interventions = False
         self.device = device
         self.experts = {}
         self.action_indices = {}
@@ -119,14 +120,6 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
                 scale = np.full(6, scale)
             assert scale.size == 6
             self.scales[name] = scale
-
-    @property
-    def block_interventions(self):
-        return self._block_interventions
-
-    @block_interventions.setter
-    def block_interventions(self, val: bool):
-        self._block_interventions = val
 
     def action(self, policy_action: torch.Tensor) -> Tuple:
 

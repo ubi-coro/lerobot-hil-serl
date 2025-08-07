@@ -57,7 +57,7 @@ class StaticTaskFrameActionWrapper(gym.Wrapper):
 
             self.gripper_enabled[name] = env.unwrapped.robot.controllers[name].config.use_gripper
             num_actions = 7 if self.gripper_enabled[name] else 6
-            self.action_indices[name] = np.array(action_indices.get(name, [1] * num_actions), dtype=bool)
+            self.action_indices[name] = np.array(action_indices.get(name, [0] * num_actions), dtype=bool)
             assert len(self.action_indices[name]) == num_actions
 
             # map entries in the policy action to <name>'s controller action
@@ -66,10 +66,11 @@ class StaticTaskFrameActionWrapper(gym.Wrapper):
             offset = rin
 
             # handle bounds
-            assert len(action_bounds[name]["min"]) == sum(self.action_indices[name])
-            assert len(action_bounds[name]["max"]) == sum(self.action_indices[name])
-            min_action_space_bounds.append(action_bounds[name]["min"])
-            max_action_space_bounds.append(action_bounds[name]["max"])
+            bounds = action_bounds.get(name, {"min": [], "max": []})
+            assert len(bounds["min"]) == sum(self.action_indices[name])
+            assert len(bounds["max"]) == sum(self.action_indices[name])
+            min_action_space_bounds.append(bounds["min"])
+            max_action_space_bounds.append(bounds["max"])
 
         # build new action space
         min_action_space_bounds = np.concatenate(min_action_space_bounds)

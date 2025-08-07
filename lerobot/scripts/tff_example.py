@@ -3,12 +3,12 @@ import matplotlib.pyplot as plt
 from collections import deque
 
 import numpy as np
+from jedi.debug import speed
 from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (needed for 3D projection)
 
 from lerobot.common.robot_devices.motors.configs import URArmConfig
-from lerobot.common.robot_devices.motors.rtde_tff_controller import RTDETFFController, TaskFrameCommand, \
-    Command, GripperCommand, AxisMode
+from lerobot.common.robot_devices.motors.rtde_tff_controller import RTDETFFController, TaskFrameCommand, AxisMode
 from lerobot.common.envs.wrapper.spacemouse import SpaceMouseExpert
 
 USE_ROT = False
@@ -19,9 +19,8 @@ USE_ROT = False
 config = URArmConfig(
     robot_ip="172.22.22.2",
     frequency=500,
-    gain=300,
-    payload_mass=None,
-    payload_cog=None,
+    payload_mass=1.080,
+    payload_cog=[-0.000, 0.000, 0.071],
     shm_manager=None,
     receive_keys=None,
     get_max_k=10,
@@ -31,7 +30,13 @@ config = URArmConfig(
     launch_timeout=5.0,
     mock=False,
     use_gripper=True,
-    wrench_limits=[0.40, 0.40, 0.40, 0.4, 0.4, 4.0]
+    speed_limits=[15.0, 15.0, 15.0, 0.40, 0.40, 1.0],
+    wrench_limits=[30.0, 30.0, 30.0, 15.0, 15.0, 5.0],
+    enable_contact_aware_force_scaling=[True, True, False, False, False, True],
+    contact_desired_wrench=[3.0, 3.0, 0, 0, 0, 0.4],
+    contact_limit_scale_min=[0.09, 0.09, 0, 0, 0, 0.06],
+    debug=False,
+    debug_axis=1
 )
 
 # Instantiate and start the controller (in its own process)
@@ -44,19 +49,19 @@ action_scale = np.array([1 / 10] * 3 + [1.0] * 3)
 # setup tff command
 if USE_ROT:
     cmd = TaskFrameCommand(
-        T_WF=[0.1811, -0.3745, 0.11, 2.221, -2.221, 0.0],
+        T_WF=[0.04659, -0.33303, 0.170, 0.0, float(np.pi), 0.0],
         target=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-        mode=6 * [AxisMode.IMPEDANCE_VEL],
+        mode=3 * [AxisMode.IMPEDANCE_VEL],
         kp=np.array([2500, 2500, 2500, 100, 100, 100]),
         kd=np.array([160, 160, 320, 6, 6, 6])
     )
 else:
     cmd = TaskFrameCommand(
-        T_WF=[0.3977, -0.18, 0.11, 2.221, -2.221, 0.0],
+        T_WF=[0.04659, -0.33303, 0.170, 0.0, float(np.pi), 0.0],
         target=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-        mode=6 * [AxisMode.IMPEDANCE_VEL],
+        mode=2 * [AxisMode.PURE_VEL] + 1 * [AxisMode.IMPEDANCE_VEL] + 2 * [AxisMode.POS] + 1 * [AxisMode.PURE_VEL],
         kp=np.array([2500, 2500, 2500, 100, 100, 100]),
-        kd=np.array([160, 160, 320, 6, 6, 6])
+        kd=np.array([960, 960, 320, 6, 6, 6])
     )
 
 # Wait until the controller signals ready
@@ -72,20 +77,22 @@ while controller.is_alive():
     action = action_scale * action
 
     if USE_ROT:
-        cmd.target = action
-    else:
-        cmd.target[0] = action[0]
-        cmd.target[1] = -action[1]
+        cmd.target[0] = -action[0]
+        cmd.target[1] = action[1]
         cmd.target[2] = -action[2]
+        cmd.target[3] = 0.2 * -action[3]
+        cmd.target[4] = 0.2 * action[4]
+        cmd.target[5] = 0.2 * -action[5]
+    else:
+        cmd.target[0] = 0.5 * -action[0]
+        cmd.target[1] = 0.5 * action[1]
+        cmd.target[2] = 0.5 * -action[2]
+        cmd.target[5] = 1.0 * -action[5]
 
     controller.send_cmd(cmd)
 
-    if buttons[0]:
-        controller.send_cmd(GripperCommand(cmd=Command.OPEN))
-    if buttons[1]:
-        controller.send_cmd(GripperCommand(cmd=Command.CLOSE))
-
-    print("EE Pose:", controller.get_robot_state()["ActualTCPPose"][:3])
+    print("EE Pose:", controller.get_robot_state()["ActualTCPPose"][:])
+    #print("EE Wrench:", controller.get_robot_state()["ActualTCPForce"][:])
 
     t_loop = time.perf_counter() - t_start
     time.sleep(1 / frequency - t_loop)

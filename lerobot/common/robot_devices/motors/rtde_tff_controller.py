@@ -175,6 +175,7 @@ class RTDETFFController(mp.Process):
             min_pose_rpy=self.min_pose_rpy
         )
 
+
     # =========== launch & shutdown =============
     def connect(self):
         self.start()
@@ -250,6 +251,7 @@ class RTDETFFController(mp.Process):
         return self.robot_out_rb.get_all()
 
     # ========= main loop in process ============
+    # noinspection PyUnreachableCode
     def run(self):
         # 1) Enable soft real‐time (optional)
         if self.config.soft_real_time:
@@ -283,45 +285,45 @@ class RTDETFFController(mp.Process):
                 else:
                     assert rtde_c.setPayload(self.config.payload_mass)
 
-            # 4) Enter impedance loop via forceMode
+            # 4) Initialize ur force mode
 
-            # 5.1) Initialize target pose = current task pose (so we start from zero error)
+            # 4.1) Initialize target pose = current task pose (so we start from zero error)
             pose_F = self.read_current_state(rtde_r)["ActualTCPPose"]
             x_cmd = pose_F.copy()  # [x, y, z, Rx, Ry, Rz] in task
             self.mode = np.array([AxisMode.POS] * 6, dtype=np.int8)
             self.target = x_cmd.copy()  # in task frame
 
-            # 5.2) Put the robot into 6D forceMode (zero‐wrench to begin)
+            # 4.2) Put the robot into 6D forceMode (zero‐wrench to begin)
             rtde_c.forceMode(
                 self.T_WF.tolist(),
                 [1, 1, 1, 1, 1, 1],
                 [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 2,
-                self.config.wrench_limits
+                self.config.speed_limits
             )
             self.force_on = True
 
-            # 5.3) Mark the loop as “ready” from the first successful iteration
+            # 4.3) Mark the loop as “ready” from the first successful iteration
             iter_idx = 0
             keep_running = True
 
-            # 5.4) Prepare for jitter logging
+            # 4.4) Prepare for jitter logging
             hist = collections.deque(maxlen=1000)
             t_prev = time.monotonic()
             log_interval = 5.0
             next_log_time = t_prev + log_interval
 
-            # 6) Start main control loop
+            # 5) Start main control loop
             while keep_running:
                 t_loop_start = rtde_c.initPeriod()
 
-                # 6.1) Jitter measurement
+                # 5.1) Jitter measurement
                 t_now = time.monotonic()
                 dt_loop = t_now - t_prev
                 hist.append(dt_loop)
                 t_prev = t_now
 
-                # 6.2) read any pending commands
+                # 5.2) read any pending commands
                 try:
                     msgs = self.robot_cmd_queue.get_all()
                     n_cmd = len(msgs['cmd'])
@@ -342,7 +344,7 @@ class RTDETFFController(mp.Process):
                     # Only SET is supported besides STOP
                     elif cmd_id == Command.SET.value:
                         # Update any fields that arrived in the queue
-                        # (T_WF, mode, target, kp, kd)
+                        # (T_WF, mode, target, gains, bounds)
                         new_T = single.get('T_WF', None)
                         if new_T is not None:
                             self.T_WF = new_T.copy()
@@ -379,22 +381,33 @@ class RTDETFFController(mp.Process):
                             self.min_pose_rpy = new_min_pose_rpy.copy()
 
                         if self.config.verbose:
-                            logging.debug("[RTDETFFController] Received SET, updated task‐frame state.")
+                            print("[RTDETFFController] Received SET, updated task‐frame state.")
 
                     else:
                         # Unknown command → treat as STOP
                         keep_running = False
                         break
 
+                # 5.3) exit loop on stop command
                 if not keep_running:
                     break
 
-                # 6.3) read current state (task frame)
-                state_F = self.read_current_state(rtde_r)
-                pose_F = state_F["ActualTCPPose"]
-                v_F = state_F["ActualTCPSpeed"]
+                # 5.4) read current state (task frame)
+                current_state = self.read_current_state(rtde_r)
+                pose_F = current_state["ActualTCPPose"]
+                v_F = current_state["ActualTCPSpeed"]
+                measured_wrench_F = current_state["ActualTCPForce"]
 
-                # 6.4) update virtual position
+                # read remaining keys
+                for key in self.config.receive_keys:
+                    if key not in current_state:
+                        current_state[key] = np.array(getattr(rtde_r, 'get' + key)())
+                current_state['timestamp'] = time.time()
+
+                # push new state into the ring buffer
+                self.robot_out_rb.put(current_state)
+
+                # 5.5) update virtual position
 
                 # --- translation ---
                 for i in range(3):
@@ -406,7 +419,7 @@ class RTDETFFController(mp.Process):
                     elif mode_i == AxisMode.PURE_VEL or mode_i == AxisMode.FORCE:
                         pass  # we do not track a virtual position in these modes
 
-                # --- rotation (SO(3) integration) ---
+                # --- rotation ---
                 for i in range(3, 6):
                     mode_i = AxisMode(self.mode[i])
                     if mode_i == AxisMode.POS:
@@ -416,6 +429,7 @@ class RTDETFFController(mp.Process):
                     elif mode_i == AxisMode.PURE_VEL or mode_i == AxisMode.FORCE:
                         pass  # we do not track a virtual position in these modes
 
+                # SO(3) integration for velocity
                 mask_vel = np.array([1 if AxisMode(self.mode[i]) == AxisMode.IMPEDANCE_VEL else 0 for i in range(3, 6)])
                 if np.any(mask_vel):
                     R_cmd = R.from_rotvec(x_cmd[3:6])
@@ -426,7 +440,7 @@ class RTDETFFController(mp.Process):
                 # --- clamp virtual target pos ---
                 x_cmd = self.clip_pose(x_cmd)
 
-                # 6.5) compute wrench based on mode and target
+                # 5.6) compute wrench based on mode and target
                 wrench_W = np.zeros(6, dtype=np.float64)
 
                 # --- translation ---
@@ -471,10 +485,10 @@ class RTDETFFController(mp.Process):
                     else:
                         wrench_W[i] = 0.0  # safety fallback
 
-                # --- zero wrench if current pose exceeds bounds
-                self.apply_wrench_bounds(pose_F, wrench_W)
+                # 5.7) bound the wrench based on pose constraints and contact forcesyy
+                self.apply_wrench_bounds(pose_F, desired_wrench=wrench_W, measured_wrench=measured_wrench_F)
 
-                # 6.6) send the wrench to the UR via forceMode(...)
+                # 5.8) command the task space wrench via forceMode(...)
                 if not self.force_on:
                     # If for some reason we dropped out of forceMode, re‐enter it
                     rtde_c.forceMode(
@@ -482,7 +496,7 @@ class RTDETFFController(mp.Process):
                         [1, 1, 1, 1, 1, 1],
                         wrench_W.tolist(),
                         2,
-                        self.config.wrench_limits
+                        self.config.speed_limits
                     )
                     self.force_on = True
                 else:
@@ -492,42 +506,34 @@ class RTDETFFController(mp.Process):
                         [1, 1, 1, 1, 1, 1],
                         wrench_W.tolist(),
                         2,
-                        self.config.wrench_limits
+                        self.config.speed_limits
                     )
 
-                # 6.7) put current state in the ring buffer
-                out_state = self.read_current_state(rtde_r)
-                for key in self.config.receive_keys:
-                    if key not in state_F:
-                        out_state[key] = np.array(getattr(rtde_r, 'get' + key)())
-                out_state['timestamp'] = time.time()
-                self.robot_out_rb.put(out_state)
-
-                # 6.8) Jitter print every log_interval
+                # 5.9) Jitter print every log_interval
                 if t_now >= next_log_time and len(hist) >= 10:
                     arr = np.array(hist)
-                    logging.debug(f"[Loop Jitter] μ={arr.mean() * 1000:.2f} ms  σ={arr.std() * 1000:.2f} ms  "
+                    print(f"[Loop Jitter] μ={arr.mean() * 1000:.2f} ms  σ={arr.std() * 1000:.2f} ms  "
                           f"min={arr.min() * 1000:.2f} ms  max={arr.max() * 1000:.2f} ms")
                     next_log_time = t_now + log_interval
 
-                # 6.9) After first iteration signal ready
+                # 5.10) After first iteration signal ready
                 if iter_idx == 0:
                     self.ready_event.set()
                 iter_idx += 1
 
-                # 6.10) regulate loop frequency
+                # 5.11) regulate loop frequency
                 rtde_c.waitPeriod(t_loop_start)
 
             # end of while keep_running
         finally:
-            # 7) cleanup: exit force‐mode, disconnect RTDE
+            # 6) cleanup: exit force‐mode, disconnect RTDE
             if self.force_on:
                 rtde_c.forceModeStop()
             rtde_c.disconnect()
             rtde_r.disconnect()
             self.ready_event.set()
             if self.config.verbose:
-                logging.debug(f"[RTDETFFController] Disconnected from robot {robot_ip}")
+                print(f"[RTDETFFController] Disconnected from robot {robot_ip}")
 
     def read_current_state(self, rtde_r):
         # 1) get the world→frame 4×4
@@ -576,8 +582,8 @@ class RTDETFFController(mp.Process):
         wrench_F = np.concatenate((f_F, m_F))
 
         return {
-            "ActualTCPPose": pose_F, 
-            "ActualTCPSpeed": v_F, 
+            "ActualTCPPose": pose_F,
+            "ActualTCPSpeed": v_F,
             "ActualTCPForce": wrench_F
         }
 
@@ -603,22 +609,55 @@ class RTDETFFController(mp.Process):
 
         return out
 
-    def apply_wrench_bounds(self, pose: np.ndarray, wrench: np.ndarray):
+    def apply_wrench_bounds(self, pose: np.ndarray, desired_wrench: np.ndarray, measured_wrench: np.ndarray):
         """
         Zero individual wrench components that would push the TCP farther
         outside its per-axis (xyz + RPY) bounds.
         """
+        scale_vec = np.array([1.0] * 6)
+        for i in range(6):
+            if not self.config.enable_contact_aware_force_scaling[i]:
+                continue
+
+            f_measured = measured_wrench[i]
+
+            if np.sign(desired_wrench[i]) == np.sign(f_measured):
+                f_measured = 0.0
+
+            scale_vec[i] = self.exp_scale(
+                abs(f_measured),
+                self.config.wrench_limits[i],
+                self.config.contact_limit_scale_min[i],
+                self.config.contact_limit_scale_theta[i],
+            )
+
+        scaled_wrench_limits = scale_vec * np.array(self.config.wrench_limits)
+
         # ----- translation axes -----
         for i in range(3):
-            if pose[i] > self.max_pose_rpy[i] and wrench[i] > 0:
-                #print(f"Zero {['x','y','z'][i]}-axis", pose[i], self.max_pose_rpy[i])
-                wrench[i] = 0.0
-            elif pose[i] < self.min_pose_rpy[i] and wrench[i] < 0:
-                #print(f"Zero {['x', 'y', 'z'][i]}-axis")
-                wrench[i] = 0.0
+            # hard clip wrench
+            desired_wrench[i] = np.clip(desired_wrench[i], -scaled_wrench_limits[i], scaled_wrench_limits[i])
+
+            if pose[i] > self.max_pose_rpy[i] and desired_wrench[i] > 0:
+                desired_wrench[i] = 0.0
+
+            elif pose[i] < self.min_pose_rpy[i] and desired_wrench[i] < 0:
+                desired_wrench[i] = 0.0
 
         # ----- rotation axes (convert to Euler first) -----
-        # we ignore rotation axes for that, bc I do not care. Why would you force control rotation anyway?
+        for i in range(3, 6):
+            desired_wrench[i] = np.clip(desired_wrench[i], -scaled_wrench_limits[i], scaled_wrench_limits[i])
+            # we ignore rotation pose limits, bc I do not care. Why would you force control rotation anyway?
+
+        if self.config.debug:
+            axis = self.config.debug_axis
+            print(
+                f"[{['X', 'Y', 'Z', 'A', 'B', 'C'][axis]}-Axis]  "
+                f"{'Crtl':<6}: {desired_wrench[axis]:10.3f}   "
+                f"{'Meas':<6}: {measured_wrench[axis]:10.3f}   "
+                f"{'a':<6}: {scale_vec[axis]:10.3f}   "
+                f"{'a * F_max':<10}: {scaled_wrench_limits[axis]:10.3f}"
+            )
 
     @staticmethod
     def _rotvec_to_rpy(rv: np.ndarray) -> np.ndarray:
@@ -700,10 +739,13 @@ class RTDETFFController(mp.Process):
         T[:3, 3] = t
         return T
 
+    @staticmethod
+    def exp_scale(f_meas, f_thresh, s_min=0.2, theta=0.1):
+        return s_min + (1 - s_min) * np.exp(-f_meas / theta)
+
 
 def _validate_config(config: URArmConfig) -> URArmConfig:
     assert 0 < config.frequency <= 500
-    assert 0.03 <= config.lookahead_time <= 0.2
     if config.tcp_offset_pose is not None:
         config.tcp_offset_pose = np.array(config.tcp_offset_pose)
         assert config.tcp_offset_pose.shape == (6,)

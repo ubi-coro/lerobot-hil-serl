@@ -2,11 +2,16 @@ from dataclasses import dataclass, field
 from typing import Literal, Sequence, Callable, Optional, Dict, Tuple, Any
 
 import draccus
+import gymnasium
+import numpy as np
+import torch
+from gymnasium import spaces
 
 from lerobot.common.constants import ACTION, OBS_ROBOT
 from lerobot.common.envs import EnvConfig
 from lerobot.common.envs.ur_env import UREnv
-from lerobot.common.envs.wrapper.hilserl import TimeLimitWrapper, ImageCropResizeWrapper, TorchActionWrapper, ConvertToLeRobotObservation
+from lerobot.common.envs.wrapper.hilserl import TimeLimitWrapper, ImageCropResizeWrapper, TorchActionWrapper, \
+    ConvertToLeRobotObservation, BatchCompatibleWrapper
 from lerobot.common.envs.wrapper.spacemouse import SpaceMouseInterventionWrapper
 from lerobot.common.envs.wrapper.tff import StaticTaskFrameActionWrapper, StaticTaskFrameResetWrapper
 from lerobot.common.policies.factory import make_policy
@@ -15,28 +20,99 @@ from lerobot.common.policies.sac.configuration_sac import SACConfig
 from lerobot.common.policies.sac.modeling_sac import SACPolicy
 from lerobot.common.robot_devices.motors.rtde_tff_controller import TaskFrameCommand
 from lerobot.common.robot_devices.robots.configs import URConfig
+from lerobot.common.robot_devices.robots.ur import UR
 from lerobot.common.robot_devices.robots.utils import make_robot_from_config
 from lerobot.configs.types import PolicyFeature, FeatureType
+
+
+class AMPObsWrapper(gymnasium.Wrapper):
+    def __init__(self,
+                 env,
+                 use_xy_position: bool = False,
+                 use_torque: bool = False,
+                 device: str = "cuda"):
+        super().__init__(env)
+        self.device = device
+        self.prev_action = np.zeros(env.action_space.shape, dtype=np.float32)
+        self.use_xy_position = use_xy_position
+        self.use_torque = use_torque
+
+        num_actions = 4 + env.action_space.shape[0]
+        if self.use_xy_position:
+            num_actions += 2
+        if self.use_torque:
+            num_actions += 3
+
+        self.observation_space = spaces.Dict({
+            "observation.state": spaces.Box(
+                low=np.full(num_actions, -np.inf),
+                high=np.full(num_actions, np.inf),
+                shape=(num_actions, ),
+                dtype=np.uint8),
+            **{key: value for key, value in env.observation_space.items() if "image" in key}
+        })
+
+    def _obs(self, obs):
+        new_state = [
+            obs["observation.main_eef_wrench"][0],
+            obs["observation.main_eef_wrench"][1],
+            obs["observation.main_eef_wrench"][2],
+            *self.prev_action
+        ]
+
+        if self.use_torque:
+            new_state.extend([
+                obs["observation.main_eef_wrench"][3],
+                obs["observation.main_eef_wrench"][4],
+                obs["observation.main_eef_wrench"][5]
+            ])
+
+        if self.use_xy_position:
+            new_state.extend([
+                obs["observation.main_eef_pos"][0],
+                obs["observation.main_eef_pos"][1],
+            ])
+        new_state.append(obs["observation.main_eef_pos"][2])
+
+        return {
+            "observation.state": torch.tensor(new_state).to(device=self.device),
+            **{key: value for key, value in obs.items() if "image" in key}
+        }
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+
+        if info.get("is_intervention", False):
+            self.prev_action = info["action_intervention"]
+        else:
+            self.prev_action = action
+
+        new_state = self._obs(obs)
+
+        return new_state, reward, terminated, truncated, info
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        self.prev_action[:] = 0.0
+        obs = self._obs(obs)
+        return obs, info
+
+@dataclass
+class PolicyConfig:
+    indices: Dict[str, Sequence[int]] = field(default_factory=lambda: dict())
+    action_bounds: Dict[str, Dict[Literal["min", "max"], Sequence[float]]] = field(default_factory=lambda: dict())
+    config: Optional[SACConfig] = None
+    pretrained_policy_name_or_path: Optional[str] = None
 
 
 @dataclass
 class WrapperConfig:
     # Time-limit
-    control_time_s: float = 10.0
+    control_time_s: Optional[float] = None
 
     # cropping
     crop_params_dict: Optional[Dict[str, Tuple[int, int, int, int]]] = None
     crop_resize_size: Optional[Tuple[int, int]] = None
-
-    # Reset wrapper settings
-    reset_pos: Optional[Dict[str, Sequence[float]]] = None
-    reset_kp: Optional[Dict[str, Sequence[float]]] = None
-    reset_kd: Optional[Dict[str, Sequence[float]]] = None
-    noise_std: Optional[Dict[str, Sequence[float]]] = None
-    noise_dist: Literal['normal', 'uniform'] = 'uniform'
-    safe_reset: bool = True
-    threshold: float = 0.005
-    timeout: float = 5.0
 
     # SpaceMouse wrapper settings
     spacemouse_devices: Optional[Dict[str, Any]] = None
@@ -45,15 +121,12 @@ class WrapperConfig:
 
 
 @dataclass
-class ManipulationPrimitiveConfig(EnvConfig):
+class MPConfig(EnvConfig):
     is_terminal: bool = False
-    tff:            Dict[str, TaskFrameCommand]                                       = field(default_factory=lambda: dict())
-    transitions:    Dict[str, Callable | RewardClassifierConfig]                      = field(default_factory=lambda: dict())
-    policy_indices: Dict[str, Sequence[int]]                                          = field(default_factory=lambda: dict())
-    policy_bounds:  Optional[Dict[str, Dict[Literal["min", "max"], Sequence[float]]]] = None
-    policy:         Optional[SACConfig]                                               = None
-    pretrained_policy_name_or_path: Optional[str]                                     = None
-    wrapper:        WrapperConfig                                                     = WrapperConfig()
+    transitions: Dict[str, Callable | RewardClassifierConfig] = field(default_factory=lambda: dict())
+    tff: Dict[str, TaskFrameCommand] = field(default_factory=lambda: dict())
+    policy: PolicyConfig = PolicyConfig()
+    wrapper: WrapperConfig = WrapperConfig()
 
     features: dict[str, PolicyFeature] = field(
         default_factory=lambda: {
@@ -68,68 +141,64 @@ class ManipulationPrimitiveConfig(EnvConfig):
         }
     )
 
-    @property
-    def is_adaptive(self):
-        return any([any(indices) for indices in self.policy_indices.values()])
+    def __post_init__(self):
+        # build action space bounds from space mouse scaling factors
+        if (
+            self.is_adaptive and
+            self.wrapper.spacemouse_devices and
+            self.wrapper.spacemouse_action_scale
+        ):
+            for name in self.tff:
+                action_scale = self.wrapper.spacemouse_action_scale[name]
+                policy_indices = self.policy.indices[name]
+                self.policy.action_bounds[name] = {
+                    "min": [-abs(s) for i, s in enumerate(action_scale) if policy_indices[i]],
+                    "max": [abs(s) for i, s in enumerate(action_scale) if policy_indices[i]]
+                }
 
     @property
-    def has_policy(self):
-        return (
-            self.is_adaptive and
-            self.pretrained_policy_name_or_path is not None and
-            isinstance(self.policy, SACPolicy)
-        )
+    def is_adaptive(self):
+        return any([any(indices) for indices in self.policy.indices.values()])
 
     def gym_kwargs(self) -> dict:
         return {}
 
-    def make(self):
+    def make(self, mp_net: 'MPNetConfig', robot: Optional[UR] = None):
+        if robot is None:
+            robot = make_robot_from_config(mp_net.robot)
+
         env = UREnv(
-            robot=make_robot_from_config(self.robot),
-            display_cameras=self.display_cameras
+            robot=robot,
+            display_cameras=mp_net.display_cameras
         )
 
         env = StaticTaskFrameActionWrapper(
             env,
             static_tffs=self.tff,
-            action_bounds=self.policy_bounds,
-            action_indices=self.policy_indices,
-            device=self.device
+            action_bounds=self.policy.action_bounds,
+            action_indices=self.policy.indices,
+            device=mp_net.device
         )
 
-        # Static Reset
-        if self.wrapper.reset_pos:
-            env = StaticTaskFrameResetWrapper(
-                env,
-                static_tffs=self.tff or {},
-                reset_pos=self.wrapper.reset_pos,
-                reset_kp=self.wrapper.reset_kp,
-                reset_kd=self.wrapper.reset_kd,
-                noise_std=self.wrapper.noise_std,
-                noise_dist=self.wrapper.noise_dist,
-                safe_reset=self.wrapper.safe_reset,
-                threshold=self.wrapper.threshold,
-                timeout=self.wrapper.timeout
-            )
-
-        env = TimeLimitWrapper(env, fps=self.fps, control_time_s=self.wrapper.control_time_s)
+        if self.wrapper.control_time_s is not None:
+            env = TimeLimitWrapper(env, fps=mp_net.fps, control_time_s=self.wrapper.control_time_s)
 
         # SpaceMouse Intervention
         if (
-            self.policy_indices and
+            self.is_adaptive and
             self.wrapper.spacemouse_devices and
             self.wrapper.spacemouse_action_scale
         ):
             env = SpaceMouseInterventionWrapper(
                 env,
                 devices=self.wrapper.spacemouse_devices,
-                action_indices=self.policy_indices,
+                action_indices=self.policy.indices,
                 action_scale=self.wrapper.spacemouse_action_scale,
                 intercept_with_button=self.wrapper.spacemouse_intercept_with_button,
-                device=self.device
+                device=mp_net.device
             )
 
-        env = ConvertToLeRobotObservation(env, device=self.device)
+        env = ConvertToLeRobotObservation(env, device=mp_net.device)
 
         if self.wrapper.crop_params_dict is not None:
             env = ImageCropResizeWrapper(
@@ -138,17 +207,29 @@ class ManipulationPrimitiveConfig(EnvConfig):
                 resize_size=self.wrapper.crop_resize_size,
             )
 
-        env = TorchActionWrapper(env, device=self.device)
+        env = AMPObsWrapper(
+            env,
+            use_xy_position=getattr(mp_net, "use_xy_position", True),
+            use_torque=getattr(mp_net, "use_torque", True),
+            device=mp_net.device
+        )
+
+        env = BatchCompatibleWrapper(env=env)
+        env = TorchActionWrapper(env, device=mp_net.device)
 
         return env
 
 
+# Temporary solutions to implement resets from terminal (sometimes any) states
+# Ideally, this is just part of the MP net.
+# As this introduces cycles, episodes cannot be clearly counted. Still trackable
+# as the min / max of episodes run by individual primitives
 @dataclass
 class ResetConfig:
     # Reset wrapper settings
-    reset_pos: Optional[Dict[str, Sequence[float]]] = None
-    reset_kp: Optional[Dict[str, Sequence[float]]] = None
-    reset_kd: Optional[Dict[str, Sequence[float]]] = None
+    pos: Optional[Dict[str, Sequence[float]]] = None
+    kp: Optional[Dict[str, Sequence[float]]] = None
+    kd: Optional[Dict[str, Sequence[float]]] = None
     noise_std: Optional[Dict[str, Sequence[float]]] = None
     noise_dist: Literal['normal', 'uniform'] = 'uniform'
     safe_reset: bool = True
@@ -157,14 +238,14 @@ class ResetConfig:
 
 
 class InteractionCounter:
-    def __init__(self, primitives: dict[str, ManipulationPrimitiveConfig]):
+    def __init__(self, primitives: dict[str, MPConfig]):
         # initialize per-primitive step budgets and counters
         self._budget: dict[str, int] = {}
         self._count: dict[str, int] = {}
         for name, p in primitives.items():
             if p.is_adaptive and p.policy is not None:
                 # use the online_steps from the primitive's SACConfig
-                self._budget[name] = p.policy.online_steps
+                self._budget[name] = p.policy.config.online_steps
                 self._count[name] = 0
             else:
                 # non-adaptive → treat as already "finished"
@@ -185,6 +266,10 @@ class InteractionCounter:
         return self._count.get(name, 0) >= self._budget.get(name, 0)
 
     @property
+    def global_step(self):
+        return sum(self._count.values())
+
+    @property
     def all_finished(self) -> bool:
         """True when every primitive is finished."""
         return all(self.is_finished(pid) for pid in self._count)
@@ -193,7 +278,8 @@ class InteractionCounter:
 @dataclass
 class MPNetConfig(draccus.ChoiceRegistry):
     start_primitive: str
-    primitives: dict[str, ManipulationPrimitiveConfig]
+    primitives: dict[str, MPConfig]
+    policies: dict[str, SACPolicy] = field(default_factory=lambda: {})
     reset: ResetConfig = ResetConfig()
 
     robot: URConfig = URConfig()
@@ -210,18 +296,20 @@ class MPNetConfig(draccus.ChoiceRegistry):
     push_to_hub: bool = True
     seed: int = 42
 
+    @property
+    def type(self) -> str:
+        return self.get_choice_name(self.__class__)
+
     def __post_init__(self):
-        for _id, p in self.primitives.values():
+        assert self.start_primitive in self.primitives
+
+        # give each primitive unique id to make indexing with primitives cleaner
+        for _id, p in self.primitives.items():
             setattr(p, "id", _id)
 
             if p.is_adaptive:
-                p.policy = make_policy(cfg=p.policy, env_cfg=p)
-                policy = policy.eval()
-
-        # init models
-
-    def get_policies(self):
-        return {name: p.policy for name, p in self.primitives.items() if p.is_adaptive and p.policy is not None}
+                self.policies[_id] = make_policy(cfg=p.policy.config, env_cfg=p)
+                self.policies[_id] = self.policies[_id].eval()
 
     def get_step_counter(self) -> InteractionCounter:
         """
@@ -231,14 +319,17 @@ class MPNetConfig(draccus.ChoiceRegistry):
         """
         return InteractionCounter(self.primitives)
 
+    def get_policy_configs(self):
+        return [p.policy.config for p in self.primitives.values() if p.policy.config is not None]
+
 
 def reset_mp_net(env, cfg: MPNetConfig):
     reset_env = StaticTaskFrameResetWrapper(
         env,
-        static_tffs=cfg.reset.static_tffs or {},
-        reset_pos=cfg.reset.reset_pos,
-        reset_kp=cfg.reset.reset_kp,
-        reset_kd=cfg.reset.reset_kd,
+        static_tffs=cfg.primitives[cfg.start_primitive].tff,
+        reset_pos=cfg.reset.pos,
+        reset_kp=cfg.reset.kp,
+        reset_kd=cfg.reset.kd,
         noise_std=cfg.reset.noise_std,
         noise_dist=cfg.reset.noise_dist,
         safe_reset=cfg.reset.safe_reset,

@@ -91,7 +91,7 @@ class SACPolicy(
         pass
 
     @torch.no_grad()
-    def select_action(self, batch: dict[str, Tensor], step, add_structured_noise: bool = True) -> tuple[Tensor, float]:
+    def select_action(self, batch: dict[str, Tensor], step: int = 0, add_structured_noise: bool = True) -> tuple[Tensor, float]:
         """Select action for inference/evaluation"""
         observation_features = None
         if self.shared_encoder:
