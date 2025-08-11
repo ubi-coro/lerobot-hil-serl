@@ -45,7 +45,6 @@ message Transition {
 message Parameters {
   TransferState transfer_state = 1;
   bytes data = 2;
-  string primitive_id = 3;
 }
 
 message InteractionMessage {

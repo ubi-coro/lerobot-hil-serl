@@ -15,3 +15,12 @@ from .nist_insertion import (
     SAC_NIST_Insertion_XY,
     DAgger_NIST_Insertion_XYC
 )
+#from .han_insertion import (
+#    UR3_HAN_Insertion
+#)
+from .han_insertion_3d_printed import (
+    UR3_HAN_Insertion_3d_Printed
+)
+from .han_insertion import (
+    UR3_HAN_Insertion
+)

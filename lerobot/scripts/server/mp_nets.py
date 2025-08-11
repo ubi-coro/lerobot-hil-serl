@@ -53,6 +53,8 @@ class AMPObsWrapper(gymnasium.Wrapper):
         })
 
     def _obs(self, obs):
+        # [f_x, f_y, f_z, a_0, a_1, a_2, (t_0, t_1, t_2,) (p_x, p_y,) p_z]
+
         new_state = [
             obs["observation.main_eef_wrench"][0],
             obs["observation.main_eef_wrench"][1],
@@ -121,9 +123,9 @@ class WrapperConfig:
 
 
 @dataclass
-class MPConfig(EnvConfig):
+class MPConfig:
     is_terminal: bool = False
-    transitions: Dict[str, Callable | RewardClassifierConfig] = field(default_factory=lambda: dict())
+    transitions: Dict[str, str] = field(default_factory=lambda: dict())
     tff: Dict[str, TaskFrameCommand] = field(default_factory=lambda: dict())
     policy: PolicyConfig = PolicyConfig()
     wrapper: WrapperConfig = WrapperConfig()
@@ -157,7 +159,7 @@ class MPConfig(EnvConfig):
                 }
 
     @property
-    def is_adaptive(self):
+    def is_adaptive(self) -> bool:
         return any([any(indices) for indices in self.policy.indices.values()])
 
     def gym_kwargs(self) -> dict:
@@ -216,6 +218,11 @@ class MPConfig(EnvConfig):
 
         env = BatchCompatibleWrapper(env=env)
         env = TorchActionWrapper(env, device=mp_net.device)
+
+        # set tff manually
+        controllers = env.unwrapped.robot.controllers
+        for name, tff in self.tff.items():
+            controllers[name].send_cmd(tff)
 
         return env
 
@@ -279,8 +286,8 @@ class InteractionCounter:
 class MPNetConfig(draccus.ChoiceRegistry):
     start_primitive: str
     primitives: dict[str, MPConfig]
-    policies: dict[str, SACPolicy] = field(default_factory=lambda: {})
     reset: ResetConfig = ResetConfig()
+    preload_envs: bool = False
 
     robot: URConfig = URConfig()
     display_cameras: bool = False
@@ -300,6 +307,10 @@ class MPNetConfig(draccus.ChoiceRegistry):
     def type(self) -> str:
         return self.get_choice_name(self.__class__)
 
+    @property
+    def condition_registry(self) -> dict[str, Callable | RewardClassifierConfig]:
+        return {}
+
     def __post_init__(self):
         assert self.start_primitive in self.primitives
 
@@ -307,9 +318,34 @@ class MPNetConfig(draccus.ChoiceRegistry):
         for _id, p in self.primitives.items():
             setattr(p, "id", _id)
 
+    def check_transitions(
+        self,
+        current_primitive: MPConfig,
+        obs: dict,
+        done: bool
+    ) -> 'MPConfig':
+        if done:  # done could be after timeout, task might not be successful
+            assert len(current_primitive.transitions) == 1, \
+                "Transitions are ambiguous, only one transition per primitive at the moment."
+            return self.primitives[list(current_primitive.transitions)[0]]
+
+        for primitive_name, condition_str in current_primitive.transitions.items():
+            condition = self.condition_registry[condition_str]
+
+            if condition(obs):
+                return self.primitives[primitive_name]
+
+        return current_primitive
+
+
+    def make_policies(self):
+        policies = {}
+        for _id, p in self.primitives.items():
             if p.is_adaptive:
-                self.policies[_id] = make_policy(cfg=p.policy.config, env_cfg=p)
-                self.policies[_id] = self.policies[_id].eval()
+                policies[_id] = make_policy(cfg=p.policy.config, env_cfg=p)
+                policies[_id] = policies[_id].eval()
+        return policies
+
 
     def get_step_counter(self) -> InteractionCounter:
         """

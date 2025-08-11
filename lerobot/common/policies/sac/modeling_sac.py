@@ -108,7 +108,7 @@ class SACPolicy(
             actions = torch.cat([actions, discrete_action], dim=-1)
 
         if self.config.noise_config.enable and add_structured_noise:
-            actions = self.add_structured_noise(actions, batch, observation_features)
+            actions, _ = self.add_structured_noise(actions, batch, observation_features)
 
         return actions, q_pred.min().detach().item()
 
@@ -433,7 +433,7 @@ class SACPolicy(
         observation_features: Tensor | None = None,
     ) -> Tensor:
         with torch.no_grad():
-            mean_action = self.select_action(observations, step=0, add_structured_noise=False)
+            mean_action, _ = self.select_action(observations, step=0, add_structured_noise=False)
 
         _, noise_dist = self.add_structured_noise(mean_action, observations, observation_features, step=0)
 
@@ -443,7 +443,7 @@ class SACPolicy(
     def add_structured_noise(self, actions: Tensor, observations: dict[str, Tensor] , observation_features: Tensor | None = None, step: int = 0):
         batch_size = actions.shape[0]
         action_dim = actions.shape[1]
-        noise_params = self.noise_net(observations, observation_features)
+        _, _, noise_params = self.noise_net(observations, observation_features)
 
         if self.config.noise_config.predict_residual:
             cov_cholemsky = noise_params[..., action_dim:]
@@ -603,6 +603,7 @@ class SACPolicy(
             network=MLP(input_dim=self.encoder_actor.output_dim, **asdict(self.config.actor_network_kwargs)),
             action_dim=output_dim,
             encoder_is_shared=self.shared_encoder,
+            fixed_std=torch.tensor([0.0]),
             **asdict(self.config.policy_kwargs),
         )
 
@@ -1022,10 +1023,11 @@ class Policy(nn.Module):
         # Compute standard deviations
         if self.fixed_std is None:
             log_std = self.std_layer(outputs)
-            std = torch.exp(log_std)  # Match JAX "exp"
-            std = torch.clamp(std, self.log_std_min, self.log_std_max)  # Match JAX default clip
         else:
-            log_std = self.fixed_std.expand_as(means)
+            log_std = self.fixed_std.expand_as(means).to(means.device)
+
+        std = torch.exp(log_std)  # Match JAX "exp"
+        std = torch.clamp(std, self.log_std_min, self.log_std_max)  # Match JAX default clip
 
         # Build transformed distribution
         dist = TanhMultivariateNormalDiag(loc=means, scale_diag=std)

@@ -26,6 +26,8 @@ from torch.multiprocessing import Event, Queue
 
 from lerobot.common.envs.wrapper.leader import BaseLeaderControlWrapper
 from lerobot.common.envs.wrapper.spacemouse import SpaceMouseInterventionWrapper
+from lerobot.common.robot_devices.robots.ur import UR
+from lerobot.common.robot_devices.robots.utils import make_robot_from_config
 from lerobot.common.robot_devices.utils import busy_wait
 from lerobot.common.utils.random_utils import set_seed
 from lerobot.common.utils.utils import (
@@ -81,8 +83,8 @@ def actor_cli(cfg: TrainPipelineConfig):
     shutdown_event = setup_process_handlers(use_threads(cfg))
 
     learner_client, grpc_channel = learner_service_client(
-        host=cfg.policy.actor_learner_config.learner_host,
-        port=cfg.policy.actor_learner_config.learner_port,
+        host=cfg.env.get_policy_configs()[0].actor_learner_config.learner_host,
+        port=cfg.env.get_policy_configs()[0].actor_learner_config.learner_port,
     )
 
     logging.info("[ACTOR] Establishing connection with Learner")
@@ -197,16 +199,25 @@ def act_with_policy(
 
     # Initialize rgn and torch
     set_seed(cfg.seed)
-    device = get_safe_torch_device(cfg.device, log=True)
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
+    # noinspection PyTypeChecker
     mp_net: MPNetConfig = cfg.env
-    eval_mode = False
+    policies = mp_net.make_policies()
+    robot: UR = make_robot_from_config(mp_net.robot)
     step_counter = mp_net.get_step_counter()
-    while not step_counter.all_finished():
-        current_primitive = cfg.primitives[cfg.start_primitive]
+    device = get_safe_torch_device(mp_net.device, log=True)
+    eval_mode = False
+    episode_cnt = 0
 
+    if mp_net.preload_envs:
+        preloaded_envs = {primitive_id: p.make(mp_net, robot) for primitive_id, p in mp_net.primitives.items()}
+
+    while not step_counter.all_finished:
+        current_primitive = mp_net.primitives[mp_net.start_primitive]
+
+        # Reset running vars
         sum_reward_episode = 0
         list_transition_to_send_to_learner = []
         list_policy_time = []
@@ -215,14 +226,15 @@ def act_with_policy(
         # Add counters for intervention rate calculation
         episode_intervention_steps = 0
         episode_total_steps = 0
-        episode_cnt = 0
 
-        # at the beginning of a sequence, make the environment of the initial primitive
-        logging.info("make_env online")
-        online_env = current_primitive.make()
+        # At the beginning of a sequence, make the environment of the initial primitive
+        logging.info(f"[ACTOR] Reset environment for episode {episode_cnt}")
+
+        online_env = preloaded_envs.get(current_primitive.id, current_primitive.make(mp_net, robot))
         intervention_wrapper = find_wrapper(online_env, {BaseLeaderControlWrapper, SpaceMouseInterventionWrapper})
 
-        obs, info = reset_mp_net(online_env, cfg)
+        # Full reset at the beginning of each sequence
+        obs, info = reset_mp_net(online_env, mp_net)
 
         # Run episode steps
         while not current_primitive.is_terminal:
@@ -235,14 +247,14 @@ def act_with_policy(
                 return
 
             # Sample action
-            if step >= current_primitive.policy.online_step_before_learning:
+            if current_primitive.is_adaptive and step >= policies[current_primitive.id].config.online_step_before_learning:
                 # Time policy inference and check if it meets FPS requirement
                 with TimerManager(
                     elapsed_time_list=list_policy_time,
                     label="Policy inference time",
                     log=False,
                 ) as timer:  # noqa: F841
-                    action = current_primitive.policy.select_action(batch=obs, step=step)
+                    action, q_value = policies[current_primitive.id].select_action(batch=obs, step=step)
                 policy_fps = 1.0 / (list_policy_time[-1] + 1e-9)
 
                 log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=step)
@@ -256,22 +268,23 @@ def act_with_policy(
                 intervention_wrapper.block_interventions = eval_mode
 
             # Step environment
-            next_obs, reward, done, truncated, info = online_env.step(action)
+            next_obs, reward, terminated, truncated, info = online_env.step(action)
 
             sum_reward_episode += float(reward)
+
             # Increment total steps counter for intervention rate
             episode_total_steps += 1
 
-            # NOTE: We override the action if the intervention is True, because the action applied is the intervention action
-            if "is_intervention" in info and info["is_intervention"]:
-                # NOTE: The action space for demonstration before hand is with the full action space
-                # but sometimes for example we want to deactivate the gripper
-                action = info["action_intervention"]
-                episode_intervention = True
-                # Increment intervention steps counter
-                episode_intervention_steps += 1
-
             if current_primitive.is_adaptive:
+                # NOTE: We override the action if the intervention is True, because the action applied is the intervention action
+                if info.get("is_intervention", False):
+                    # NOTE: The action space for demonstration beforehand is with the full action space
+                    # but sometimes, for example, we want to deactivate the gripper
+                    action = info["action_intervention"]
+                    episode_intervention = True
+                    # Increment intervention steps counter
+                    episode_intervention_steps += 1
+
                 list_transition_to_send_to_learner.append(
                     Transition(
                         id=current_primitive.id,
@@ -280,7 +293,7 @@ def act_with_policy(
                         q_value=q_value,
                         reward=reward,
                         next_state=next_obs,
-                        done=done,
+                        done=terminated or truncated,
                         truncated=truncated,  # TODO: (azouitine) Handle truncation properly
                         complementary_info=info,
                     )
@@ -292,20 +305,13 @@ def act_with_policy(
             # Increment that primitive's step counter
             step_counter.increment(current_primitive.id)
 
-            # Check stop triggered by timeout, spacemouse or classifier
-            if done and info.get("success", False):  # done could be after timeout, task might not be successful
-                assert len(current_primitive.transitions) == 1, "Transitions are ambiguous, only one transition per primitive at the moment."
-                current_primitive = cfg.primitives[list(current_primitive.transitions)[0]]
-
             # Check stop triggered by transition function
-            for primitive_name, stop_condition in current_primitive.transitions.items():
-                if stop_condition(obs):
-                    current_primitive = cfg.primitives[primitive_name]
+            done = (terminated or truncated)  # and info.get("success", False)
+            current_primitive = mp_net.check_transitions(current_primitive, obs, done)
 
             # If primitive changed, send messages, close old env and make new env
             if prev_primitive != current_primitive:
                 if prev_primitive.is_adaptive:
-
                     # Push over transitions
                     if len(list_transition_to_send_to_learner) > 0:
                         push_transitions_to_transport_queue(
@@ -358,24 +364,39 @@ def act_with_policy(
                     # Send episodic reward to the learner
                     interactions_queue.put(python_object_to_bytes(msg))
 
+                    logging.info(
+                        f"[ACTOR] Finished {episode_cnt} episode for {prev_primitive.id} primitive ({['Train', 'Eval'][int(eval_mode)]}), "
+                        f"episode reward: {sum_reward_episode}, "
+                        f"local step: {step}, "
+                        f"global step: {step_counter.global_step}"
+                    )
+                else:
+                    logging.info(
+                        f"[ACTOR] Finished {episode_cnt} episode for {prev_primitive.id} primitive ({['Train', 'Eval'][int(eval_mode)]})"
+                    )
+
+                logging.info(f"[ACTOR] Now transition to {current_primitive.id} primitive")
+
+                if not mp_net.preload_envs:
+                    online_env.close()
+
+                if current_primitive.is_terminal:
+                    break
+
                 # Reset running variables
                 sum_reward_episode = 0.0
                 episode_intervention = False
                 episode_intervention_steps = 0
                 episode_total_steps = 0
 
-                # Close env and make new one
-                env.close()
-                env = current_primitive.make()
+                online_env = preloaded_envs.get(current_primitive.id, current_primitive.make(mp_net, robot))
+                obs, info = online_env.reset()
 
             if cfg.env.fps is not None:
                 dt_time = time.perf_counter() - start_time
                 busy_wait(1 / cfg.env.fps - dt_time)
 
         # Post-process episode
-        logging.info(f"[ACTOR] Episode: {episode_cnt} ({['Train', 'Eval'][int(eval_mode)]}), "
-                     f"global step: {step}, "
-                     f"episode reward: {sum_reward_episode}")
         episode_cnt += 1
 
         # every 'eval_freq' episodes, run 'n_episodes' of evaluation (frozen policy parameters and no interventions)
@@ -387,7 +408,7 @@ def act_with_policy(
                          f"/{cfg.eval.n_episodes}, interventions are disabled")
         else:
             update_all_policy_parameters(
-                policies=mp_net.get_policies(),
+                policies=policies,
                 parameters_queue=parameters_queue,
                 device=device
             )
@@ -506,7 +527,7 @@ def receive_policy(
         setup_process_handlers(use_threads=False)
 
     if grpc_channel is None or learner_client is None:
-        policy = cfg.env.get_policies()[0]
+        policy = cfg.env.get_policy_configs()[0]
         learner_client, grpc_channel = learner_service_client(
             host=policy.actor_learner_config.learner_host,
             port=policy.actor_learner_config.learner_port,
@@ -563,8 +584,8 @@ def send_transitions(
 
     if grpc_channel is None or learner_client is None:
         learner_client, grpc_channel = learner_service_client(
-            host=cfg.policy.actor_learner_config.learner_host,
-            port=cfg.policy.actor_learner_config.learner_port,
+            host=cfg.env.get_policy_configs()[0].actor_learner_config.learner_host,
+            port=cfg.env.get_policy_configs()[0].actor_learner_config.learner_port,
         )
 
     try:
@@ -612,8 +633,8 @@ def send_interactions(
 
     if grpc_channel is None or learner_client is None:
         learner_client, grpc_channel = learner_service_client(
-            host=cfg.policy.actor_learner_config.learner_host,
-            port=cfg.policy.actor_learner_config.learner_port,
+            host=cfg.env.get_policy_configs()[0].actor_learner_config.learner_host,
+            port=cfg.env.get_policy_configs()[0].actor_learner_config.learner_port,
         )
 
     try:
@@ -673,25 +694,14 @@ def update_all_policy_parameters(policies, parameters_queue: Queue, device):
     Empty the queue of (primitive_id, state_bytes) and
     load the latest state_dict into each matching policy.
     """
-    # If multiple updates for same pid arrive, keep only the last
-    latest: dict[str, bytes] = {}
-
-    # Drain queue
-    while not parameters_queue.empty():
-        pid, raw_bytes = get_last_item_from_queue(parameters_queue)
-        latest[pid] = raw_bytes
-
-    # Now load each
-    for pid, raw_bytes in latest.items():
-        state_dict = bytes_to_state_dict(raw_bytes)
+    if not parameters_queue.empty():
+        logging.info("[ACTOR] Load new parameters from Learner.")
+        bytes_state_dict = get_last_item_from_queue(parameters_queue)
+        state_dict = bytes_to_state_dict(bytes_state_dict)
+        pid = state_dict["primitive_id"]
+        del state_dict["primitive_id"]
         state_dict = move_state_dict_to_device(state_dict, device=device)
-
-        policy = policies.get(pid)
-        if policy is not None:
-            policy.load_state_dict(state_dict)
-            logging.info(f"[ACTOR] Loaded parameters for primitive '{pid}'")
-        else:
-            logging.warning(f"[ACTOR] No policy found for primitive '{pid}'")
+        policies[pid].load_state_dict(state_dict)
 
 
 #################################################
@@ -750,7 +760,7 @@ def log_policy_frequency_issue(policy_fps: float, cfg: TrainPipelineConfig, inte
 
 
 def use_threads(cfg: TrainPipelineConfig) -> bool:
-    return cfg.get_policies[0].actor == "threads"
+    return cfg.env.get_policy_configs()[0].concurrency.actor == "threads"
 
 
 if __name__ == "__main__":

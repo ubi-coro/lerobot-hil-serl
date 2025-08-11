@@ -32,9 +32,9 @@ def exp_scale_and_derivative(f: float, theta: float, s_min: float) -> tuple:
 
 if __name__ == "__main__":
     # Example parameters
-    F_max   = 5.0   # N
-    s_min   = 0.06    # floor
-    f_star  = 0.4    # desired equilibrium
+    F_max   = 10.0   # N
+    s_min   = 0.04   # floor
+    f_star  = 0.5    # desired equilibrium
 
     # Compute θ
     theta = compute_theta(f_star, F_max, s_min)

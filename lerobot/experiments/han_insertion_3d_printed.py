@@ -40,9 +40,9 @@ class InsertionPrimitive(MPConfig):
     # MP parameters
     is_terminal: bool = False
     tff: Dict[str, TaskFrameCommand] = field(default_factory=lambda: {
-            "main": TaskFrameCommand(  # z_succ: 0.10340
-                T_WF=[0.01954, -0.25457, 0.138, 0.0, float(np.pi), 0.0],
-                target=[0.0, 0.0, 5.0, 0.0, -0.0, 0.0],
+            "main": TaskFrameCommand(
+                T_WF=[0.04659, -0.33303, 0.120, 0.0, float(np.pi), 0.0],
+                target=[0.0, 0.0, 7.0, 0.0, -0.0, 0.0],
                 mode=2 * [AxisMode.PURE_VEL] + [AxisMode.FORCE] + 2 * [AxisMode.POS] + [AxisMode.PURE_VEL],
                 kp=[2500, 2500, 2500, 100, 100, 100],
                 kd=[960, 960, 320, 6, 6, 6]
@@ -51,7 +51,7 @@ class InsertionPrimitive(MPConfig):
 
     # Reward parameters
     reward_axis_targets: Optional[Dict[str, float]] = field(default_factory=lambda: {
-        "main": 0.03  # -> max_depth += 5%: 0.01575
+        "main": 0.015  # -> max_depth += 5%: 0.01575
     })
     reward_axis: int = 2  # z
     reward_scale: float = 1.0
@@ -73,7 +73,7 @@ class InsertionPrimitive(MPConfig):
             target_entropy=-1.5,
             use_backup_entropy=False,
             freeze_vision_encoder=False,
-            noise_config=DataGuidedNoiseConfig(enable=True),
+            noise_config=DataGuidedNoiseConfig(enable=False),
             dataset_stats={
                 "observation.image.main": {
                     "mean": [0.485, 0.456, 0.406],
@@ -87,7 +87,7 @@ class InsertionPrimitive(MPConfig):
                 # t_z: 2 * contact_desired_wrench -> [3.0, 3.0, 0, 0, 0, 0.4]
                 # p workspace
                 "observation.state": {
-                    "min": [-6.0, -6.0, -8.0, -0.02, -0.02, -0.75, -2.0, -2.0, -0.8, -0.005],
+                    "min": [-6.0, -6.0, -13.0, -0.02, -0.02, -0.75, -2.0, -2.0, -0.8, -0.005],
                     "max": [6.0,  6.0,  3.0,   0.02,   0.02,  0.75,  2.0,  2.0,  0.8,  0.01575]
                 },
                 "action": {
@@ -101,10 +101,10 @@ class InsertionPrimitive(MPConfig):
 
     wrapper: WrapperConfig = WrapperConfig(
         control_time_s=7.0,
-        crop_params_dict={"observation.image.main": (190, 260, 140, 190)},
+        crop_params_dict={"observation.image.main": (150, 260, 150, 170)},
         crop_resize_size=(128, 128),
         spacemouse_devices={"main": "SpaceMouse Compact"},
-        spacemouse_action_scale={"main": [0.02, -0.02, 0, 0, 0, -0.75]},
+        spacemouse_action_scale={"main": [-0.02, 0.02, 0, 0, 0, -0.75]},
         spacemouse_intercept_with_button=True
     )
 
@@ -200,9 +200,9 @@ class InsertionPrimitive(MPConfig):
         return (curr_force > max_force) or (curr_z > max_z)
 
 
-@MPNetConfig.register_subclass("ur3_han_insertion")
+@MPNetConfig.register_subclass("ur3_han_insertion_3d_printed")
 @dataclass
-class UR3_HAN_Insertion(MPNetConfig):
+class UR3_HAN_Insertion_3d_Printed(MPNetConfig):
     start_primitive: str = "press"
     primitives: dict[str, MPConfig] = field(default_factory=lambda: {
         "press": MPConfig(
@@ -214,13 +214,12 @@ class UR3_HAN_Insertion(MPNetConfig):
         ),
         "terminal": MPConfig(is_terminal=True),
     })
-    preload_envs: bool = True
 
     display_cameras: bool = False
     fps: int = 10
     resume: bool = False
-    repo_id: str = "jannick-st/ur3-han-insertion-offline-demos"
-    dataset_root: str = "/home/jannick/data/jannick-st/ur3-han-insertion/offline-demos"
+    repo_id: str = "jannick-st/ur3-han-insertion-3d-printed-offline-demos"
+    dataset_root: str = "/home/jannick/data/jannick-st/ur3-han-insertion-3d-printed/offline-demos"
     task: str = ""
     num_episodes: int = 10
     episode: int = 0
@@ -230,8 +229,8 @@ class UR3_HAN_Insertion(MPNetConfig):
     seed: int = 42
 
     # Insertion parameters
-    xy_offset_std_mm: float = 2.0
-    c_offset_std_rad: float = 0.25
+    xy_offset_std_mm: float = 1.5
+    c_offset_std_rad: float = 0.3
     use_xy_position: bool = False
     use_torque: bool = True
     use_vision: bool = True
@@ -248,13 +247,12 @@ class UR3_HAN_Insertion(MPNetConfig):
                 get_max_k=10,
                 use_gripper=False,
                 speed_limits=[15.0, 15.0, 15.0, 0.40, 0.40, 1.0],
-                wrench_limits=[30.0, 30.0, 30.0, 15.0, 15.0, 10.0],
+                wrench_limits=[30.0, 30.0, 30.0, 15.0, 15.0, 5.0],
                 enable_contact_aware_force_scaling=[True, True, False, False, False, True],
-                contact_desired_wrench=[4.0, 4.0, 0, 0, 0, 0.5],
-                contact_limit_scale_min=[0.09, 0.09, 0, 0, 0, 0.04],
+                contact_desired_wrench=[3.0, 3.0, 0, 0, 0, 0.4],
+                contact_limit_scale_min=[0.09, 0.09, 0, 0, 0, 0.06],
                 debug=False,
-                debug_axis=0,
-                mock=False
+                debug_axis=0
             )
         },
         cameras={
@@ -357,7 +355,7 @@ class UR3_HAN_Insertion(MPNetConfig):
 
 
 if __name__ == "__main__":
-    cfg = UR3_HAN_Insertion()
+    cfg = UR3_HAN_Insertion_3d_Printed()
     cfg.robot.follower_arms["main"].verbose = True
     cfg.__post_init__()
 

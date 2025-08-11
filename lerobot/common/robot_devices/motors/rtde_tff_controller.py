@@ -510,9 +510,9 @@ class RTDETFFController(mp.Process):
                     )
 
                 # 5.9) Jitter print every log_interval
-                if t_now >= next_log_time and len(hist) >= 10:
+                if self.config.verbose and t_now >= next_log_time and len(hist) >= 10:
                     arr = np.array(hist)
-                    print(f"[Loop Jitter] μ={arr.mean() * 1000:.2f} ms  σ={arr.std() * 1000:.2f} ms  "
+                    print(f"[RTDETFFController] Loop Jitter: μ={arr.mean() * 1000:.2f} ms  σ={arr.std() * 1000:.2f} ms  "
                           f"min={arr.min() * 1000:.2f} ms  max={arr.max() * 1000:.2f} ms")
                     next_log_time = t_now + log_interval
 

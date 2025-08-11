@@ -29,6 +29,7 @@ from lerobot.common.robot_devices.cameras.utils import make_cameras_from_configs
 from lerobot.common.robot_devices.motors.dynamixel import TorqueMode
 from lerobot.common.robot_devices.motors.rtde_robotiq_controller import RTDERobotiqController
 from lerobot.common.robot_devices.motors.rtde_tff_controller import RTDETFFController, TaskFrameCommand
+from lerobot.common.robot_devices.motors.rtde_tff_mock_controller import RTDETFFMockController
 from lerobot.common.robot_devices.motors.utils import make_motors_buses_from_configs
 from lerobot.common.robot_devices.robots.configs import URConfig
 from lerobot.common.robot_devices.robots.utils import get_arm_id
@@ -48,11 +49,16 @@ class UR:
         self.shm.start()
 
         # -------------------------- URs ------------------------- #
-        self.controllers: dict[str, RTDETFFController] = {}
+        self.controllers: dict[str, RTDETFFController | RTDETFFMockController] = {}
         self.grippers: dict[str, RTDERobotiqController] = {}
         for name, follower_config in self.config.follower_arms.items():
             follower_config.shm_manager = self.shm
-            self.controllers[name] = RTDETFFController(follower_config)
+
+            if follower_config.mock:
+                self.controllers[name] = RTDETFFMockController(follower_config)
+            else:
+                self.controllers[name] = RTDETFFController(follower_config)
+
 
             if follower_config.use_gripper:
                 self.grippers[name] = RTDERobotiqController(

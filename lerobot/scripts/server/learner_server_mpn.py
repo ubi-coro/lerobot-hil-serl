@@ -16,12 +16,14 @@
 # limitations under the License.
 import logging
 import os
+import pathlib
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy
 from pathlib import Path
 from pprint import pformat
+from typing import Optional
 
 import grpc
 import hilserl_pb2_grpc  # type: ignore
@@ -40,6 +42,7 @@ from lerobot.common.constants import (
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.common.policies.factory import make_policy
+from lerobot.common.policies.sac.configuration_sac import SACConfig
 from lerobot.common.policies.sac.modeling_sac import SACPolicy
 from lerobot.common.utils.random_utils import set_seed
 from lerobot.common.utils.train_utils import (
@@ -111,6 +114,7 @@ def train(cfg: TrainPipelineConfig, job_name: str | None = None):
     """
 
     cfg.validate()
+    cfg.policy = SACConfig()
 
     if job_name is None:
         job_name = cfg.job_name
@@ -126,7 +130,6 @@ def train(cfg: TrainPipelineConfig, job_name: str | None = None):
     # Initialize logging with explicit log file
     init_logging(log_file=log_file)
     logging.info(f"Learner logging initialized, writing to {log_file}")
-    logging.info(pformat(cfg.to_dict()))
 
     # Setup WandB logging if enabled
     if cfg.wandb.enable and cfg.wandb.project:
@@ -168,9 +171,9 @@ def start_learner_threads(
         shutdown_event: Event to signal shutdown
     """
     # Create multiprocessing queues
-    transition_queue = Queue()
-    interaction_message_queue = Queue()
-    parameters_queue = Queue()
+    transition_queue = Queue(maxsize=10)
+    interaction_message_queue = Queue(maxsize=10)
+    parameters_queue = Queue(maxsize=10)
 
     concurrency_entity = None
 
@@ -277,13 +280,13 @@ def add_actor_information_and_train(
     storage_device = get_safe_torch_device(try_device=mp_net.storage_device)
 
     # Read parameters from policies
-    policies = mp_net.get_policies()
+    policies = mp_net.make_policies()
+    policy_parameters_push_frequency = cfg.env.get_policy_configs()[0].actor_learner_config.policy_parameters_push_frequency
 
     clip_grad_norm_value = {}
     online_step_before_learning = {}
     utd_ratio = {}
     policy_update_freq = {}
-    policy_parameters_push_frequency = {}
     noise_enable = {}
     noise_update_freq = {}
     noise_update_steps = {}
@@ -291,41 +294,42 @@ def add_actor_information_and_train(
     async_prefetch = {}
     optimization_step = {}
     interaction_step_shift = {}
+    last_messages = {}
     for name, policy in policies.items():
         assert isinstance(policy, nn.Module)
         policy.train()
 
-        clip_grad_norm_value[name] = policy.grad_clip_norm
-        online_step_before_learning[name] = policy.online_step_before_learning
-        utd_ratio[name] = policy.utd_ratio
-        policy_update_freq[name] = policy.policy_update_freq
-        policy_parameters_push_frequency[name] = policy.actor_learner_config.policy_parameters_push_frequency
-        noise_enable[name] = policy.noise_config.enable
-        noise_update_freq[name] = policy.noise_config.update_freq
-        noise_update_steps[name] = policy.noise_config.update_steps
-        online_steps[name] = policy.online_steps
-        async_prefetch[name] = policy.async_prefetch
+        clip_grad_norm_value[name] = policy.config.grad_clip_norm
+        online_step_before_learning[name] = policy.config.online_step_before_learning
+        utd_ratio[name] = policy.config.utd_ratio
+        policy_update_freq[name] = policy.config.policy_update_freq
+        noise_enable[name] = policy.config.noise_config.enable
+        noise_update_freq[name] = policy.config.noise_config.update_freq
+        noise_update_steps[name] = policy.config.noise_config.update_steps
+        online_steps[name] = policy.config.online_steps
+        async_prefetch[name] = policy.config.async_prefetch
         optimization_step[name] = 0
         interaction_step_shift[name] = 0
+        last_messages[name] = None
 
-    push_actor_all_policies_to_queue(parameters_queue=parameters_queue, policies=policies)
+    push_all_actor_policies_to_queue(parameters_queue=parameters_queue, policies=policies)
 
     last_time_policy_pushed = time.time()
 
-    optimizers, lr_scheduler = make_optimizers_and_scheduler(cfg=cfg, policies=policies)
+    optimizers, lr_scheduler = make_optimizers_and_scheduler(policies=policies)
 
     # If we are resuming, we need to load the training state
     resume_optimization_step, resume_interaction_step = load_training_state(cfg=cfg, optimizers=optimizers)
 
-    log_training_info(cfg=cfg, policy=policy)
+    log_training_info(cfg=cfg, policies=policies)
 
     replay_buffers = initialize_replay_buffer(cfg, policies, device, storage_device)
     batch_size = cfg.batch_size
 
     offline_replay_buffers = None
     has_offline_ds = cfg.env.dataset_root is not None
-    assert not has_offline_ds and any(list(noise_enable.values)), "Noise batches need to sample from offline buffer"
-    if has_offline_ds is not None:
+    assert has_offline_ds or any(list(noise_enable.values())), "Noise batches need to sample from offline buffer"
+    if has_offline_ds:
         offline_replay_buffers = initialize_offline_replay_buffer(cfg, policies, device, storage_device)
         batch_size: int = batch_size // 2  # We will sample from both replay buffers
 
@@ -338,7 +342,7 @@ def add_actor_information_and_train(
     offline_iterator = None
     noise_iterator = None
 
-    def prepare_batch(batch):
+    def prepare_batch(current_policy, batch):
         actions = batch["action"]
         rewards = batch["reward"]
         observations = batch["state"]
@@ -347,7 +351,7 @@ def add_actor_information_and_train(
         check_nan_in_transition(observations=observations, actions=actions, next_state=next_observations)
 
         observation_features, next_observation_features = get_observation_features(
-            policy=policy, observations=observations, next_observations=next_observations
+            policy=current_policy, observations=observations, next_observations=next_observations
         )
 
         # Create a batch dictionary with all required elements for the forward method
@@ -371,6 +375,7 @@ def add_actor_information_and_train(
             logging.info("[LEARNER] Shutdown signal received. Exiting...")
             break
 
+        time_for_one_optimization_step = time.time()
         for name, policy in policies.items():
 
             # Process all available transitions to the replay buffer, send by the actor server
@@ -383,11 +388,12 @@ def add_actor_information_and_train(
             )
 
             # Process all available interaction messages sent by the actor server
-            interaction_message = process_interaction_messages(
+            process_interaction_messages(
                 interaction_message_queue=interaction_message_queue,
                 interaction_step_shift=interaction_step_shift,
                 wandb_logger=wandb_logger,
                 shutdown_event=shutdown_event,
+                last_messages=last_messages
             )
 
             # Wait until the replay buffer has enough samples to start training
@@ -407,12 +413,11 @@ def add_actor_information_and_train(
                     batch_size=batch_size, async_prefetch=async_prefetch[name], queue_size=2
                 )
 
-            if noise_enable[name] and optimization_step[name] % noise_update_freq[name]:
+            if noise_enable[name] and optimization_step[name] % noise_update_freq[name] == 0:
                 noise_iterator = offline_replay_buffers[name].get_iterator(
                     batch_size=2 * batch_size, async_prefetch=async_prefetch[name], queue_size=2
                 )
 
-            time_for_one_optimization_step = time.time()
             for _ in range(utd_ratio[name] - 1):
                 # Sample from the iterators
                 batch = next(online_iterator)
@@ -423,30 +428,30 @@ def add_actor_information_and_train(
                         left_batch_transitions=batch, right_batch_transition=batch_offline
                     )
 
-                forward_batch = prepare_batch(batch)
+                forward_batch = prepare_batch(policy, batch)
 
                 # Use the forward method for critic loss
                 critic_output = policy.forward(forward_batch, model="critic")
 
                 # Main critic optimization
                 loss_critic = critic_output["loss_critic"]
-                optimizers["critic"].zero_grad()
+                optimizers[name]["critic"].zero_grad()
                 loss_critic.backward()
                 critic_grad_norm = torch.nn.utils.clip_grad_norm_(
                     parameters=policy.critic_ensemble.parameters(), max_norm=clip_grad_norm_value[name]
                 )
-                optimizers["critic"].step()
+                optimizers[name]["critic"].step()
 
                 # Discrete critic optimization (if available)
                 if policy.config.num_discrete_actions is not None:
                     discrete_critic_output = policy.forward(forward_batch, model="discrete_critic")
                     loss_discrete_critic = discrete_critic_output["loss_discrete_critic"]
-                    optimizers["discrete_critic"].zero_grad()
+                    optimizers[name]["discrete_critic"].zero_grad()
                     loss_discrete_critic.backward()
                     discrete_critic_grad_norm = torch.nn.utils.clip_grad_norm_(
                         parameters=policy.discrete_critic.parameters(), max_norm=clip_grad_norm_value[name]
                     )
-                    optimizers["discrete_critic"].step()
+                    optimizers[name]["discrete_critic"].step()
 
                 # Update target networks (main and discrete)
                 policy.update_target_networks()
@@ -460,17 +465,17 @@ def add_actor_information_and_train(
                     left_batch_transitions=batch, right_batch_transition=batch_offline
                 )
 
-            forward_batch = prepare_batch(batch)
+            forward_batch = prepare_batch(policy, batch)
 
             critic_output = policy.forward(forward_batch, model="critic")
 
             loss_critic = critic_output["loss_critic"]
-            optimizers["critic"].zero_grad()
+            optimizers[name]["critic"].zero_grad()
             loss_critic.backward()
             critic_grad_norm = torch.nn.utils.clip_grad_norm_(
                 parameters=policy.critic_ensemble.parameters(), max_norm=clip_grad_norm_value[name]
             ).item()
-            optimizers["critic"].step()
+            optimizers[name]["critic"].step()
 
             # Initialize training info dictionary
             training_infos = critic_output["training_infos"]
@@ -481,12 +486,12 @@ def add_actor_information_and_train(
             if policy.config.num_discrete_actions is not None:
                 discrete_critic_output = policy.forward(forward_batch, model="discrete_critic")
                 loss_discrete_critic = discrete_critic_output["loss_discrete_critic"]
-                optimizers["discrete_critic"].zero_grad()
+                optimizers[name]["discrete_critic"].zero_grad()
                 loss_discrete_critic.backward()
                 discrete_critic_grad_norm = torch.nn.utils.clip_grad_norm_(
                     parameters=policy.discrete_critic.parameters(), max_norm=clip_grad_norm_value[name]
                 ).item()
-                optimizers["discrete_critic"].step()
+                optimizers[name]["discrete_critic"].step()
 
                 # Add discrete critic info to training info
                 training_infos["loss_discrete_critic"] = loss_discrete_critic.item()
@@ -498,12 +503,12 @@ def add_actor_information_and_train(
                     # Actor optimization
                     actor_output = policy.forward(forward_batch, model="actor")
                     loss_actor = actor_output["loss_actor"]
-                    optimizers["actor"].zero_grad()
+                    optimizers[name]["actor"].zero_grad()
                     loss_actor.backward()
                     actor_grad_norm = torch.nn.utils.clip_grad_norm_(
                         parameters=policy.actor.parameters(), max_norm=clip_grad_norm_value[name]
                     ).item()
-                    optimizers["actor"].step()
+                    optimizers[name]["actor"].step()
 
                     # Add actor info to training info
                     training_infos["loss_actor"] = loss_actor.item()
@@ -512,12 +517,12 @@ def add_actor_information_and_train(
                     # Temperature optimization
                     temperature_output = policy.forward(forward_batch, model="temperature")
                     loss_temperature = temperature_output["loss_temperature"]
-                    optimizers["temperature"].zero_grad()
+                    optimizers[name]["temperature"].zero_grad()
                     loss_temperature.backward()
                     temp_grad_norm = torch.nn.utils.clip_grad_norm_(
                         parameters=[policy.log_alpha], max_norm=clip_grad_norm_value[name]
                     ).item()
-                    optimizers["temperature"].step()
+                    optimizers[name]["temperature"].step()
 
                     # Add temperature info to training info
                     training_infos["loss_temperature"] = loss_temperature.item()
@@ -527,26 +532,41 @@ def add_actor_information_and_train(
                     # Update temperature
                     policy.update_temperature()
 
-            if noise_enable[name] and optimization_step[name] % noise_update_freq[name]:
+            if noise_enable[name] and optimization_step[name] % noise_update_freq[name] == 0:
                 for _ in range(noise_update_steps[name]):
                     # Structured noise optimization
                     batch = next(noise_iterator)
-                    forward_batch = prepare_batch(batch)
+                    forward_batch = prepare_batch(policy, batch)
 
                     noise_output = policy.forward(forward_batch, model="noise")
-
-                    loss_noise = noise_output["noise"]
-                    optimizers["noise"].zero_grad()
+                    loss_noise = noise_output["loss_noise"]
+                    optimizers[name]["noise"].zero_grad()
                     loss_noise.backward()
-                    optimizers["noise"].step()
+                    noise_grad_norm = torch.nn.utils.clip_grad_norm_(
+                        parameters=policy.discrete_critic.parameters(), max_norm=clip_grad_norm_value[name]
+                    ).item()
+                    optimizers[name]["noise"].step()
 
-            # Push policy to actors if needed
-            if time.time() - last_time_policy_pushed > policy_parameters_push_frequency[name]:
-                push_actor_policy_to_queue(parameters_queue=parameters_queue, policy=policy, name=name)
-                last_time_policy_pushed = time.time()
+                    training_infos["loss_noise"] = loss_noise.item()
+                    training_infos["noise_grad_norm"] = noise_grad_norm
 
             # Update target networks (main and discrete)
             policy.update_target_networks()
+
+            # Save checkpoint at specified intervals
+            if saving_checkpoint and (optimization_step[name] % save_freq == 0 or optimization_step[name] == online_steps[name]):
+                save_training_checkpoint(
+                    primitive_id=name,
+                    cfg=cfg,
+                    optimization_step=optimization_step[name],
+                    online_steps=online_steps[name],
+                    interaction_message=last_messages[name],
+                    policy=policy,
+                    optimizers=optimizers[name],
+                    replay_buffer=replay_buffers[name],
+                    offline_replay_buffer=offline_replay_buffers[name],
+                    fps=fps,
+                )
 
             # Log training metrics at specified intervals
             if optimization_step[name] % log_freq == 0:
@@ -558,7 +578,20 @@ def add_actor_information_and_train(
                 # Log training metrics
                 if wandb_logger:
                     training_infos = {f"{name}/{key}": value for key, value in training_infos.items()}
-                    wandb_logger.log_dict(d=training_infos, mode="train", custom_step_key="Optimization step")
+                    wandb_logger.log_dict(d=training_infos, mode="train", custom_step_key=f"{name}/Optimization step")
+
+            optimization_step[name] += 1
+            if optimization_step[name] % log_freq == 0:
+                logging.info(f"[LEARNER] Number of optimization steps for {name}: {optimization_step[name]}")
+
+        # Skip frequency in the beginning
+        if all([step == 0 for step in optimization_step.values()]):
+            continue
+
+        # Push policy to actors if needed
+        if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:
+            push_all_actor_policies_to_queue(parameters_queue=parameters_queue, policies=policies)
+            last_time_policy_pushed = time.time()
 
         # Calculate and log optimization frequency
         time_for_one_optimization_step = time.time() - time_for_one_optimization_step
@@ -570,30 +603,11 @@ def add_actor_information_and_train(
         if wandb_logger:
             wandb_logger.log_dict(
                 {
-                    f"name/Optimization frequency loop [Hz]": frequency_for_one_optimization_step,
-                    f"name/Optimization step": optimization_step[name],
+                    f"Optimization frequency loop [Hz]": frequency_for_one_optimization_step,
+                    f"Global optimization step": sum(optimization_step.values()),
                 },
                 mode="train",
-                custom_step_key="Optimization step",
-            )
-
-        optimization_step += 1
-        if optimization_step % log_freq == 0:
-            logging.info(f"[LEARNER] Number of optimization steps for {name}: {optimization_step[name]}")
-
-        # Save checkpoint at specified intervals
-        if saving_checkpoint and (optimization_step % save_freq == 0 or optimization_step == online_steps[name]):
-            save_training_checkpoint(
-                cfg=cfg,
-                optimization_step=optimization_step,
-                online_steps=online_steps,
-                interaction_message=interaction_message,
-                policy=policy,
-                optimizers=optimizers,
-                replay_buffer=replay_buffer,
-                offline_replay_buffer=offline_replay_buffer,
-                dataset_repo_id=dataset_repo_id,
-                fps=fps,
+                custom_step_key="Global optimization step",
             )
 
 
@@ -634,7 +648,7 @@ def start_learner_server(
     service = learner_service.LearnerService(
         shutdown_event=shutdown_event,
         parameters_queue=parameters_queue,
-        seconds_between_pushes=cfg.policy.actor_learner_config.policy_parameters_push_frequency[name],
+        seconds_between_pushes=cfg.env.get_policy_configs()[0].actor_learner_config.policy_parameters_push_frequency,
         transition_queue=transition_queue,
         interaction_message_queue=interaction_message_queue,
     )
@@ -652,8 +666,8 @@ def start_learner_server(
         server,
     )
 
-    host = cfg.policy.actor_learner_config.learner_host
-    port = cfg.policy.actor_learner_config.learner_port
+    host = cfg.env.get_policy_configs()[0].actor_learner_config.learner_host
+    port = cfg.env.get_policy_configs()[0].actor_learner_config.learner_port
 
     server.add_insecure_port(f"{host}:{port}")
     server.start()
@@ -666,6 +680,7 @@ def start_learner_server(
 
 
 def save_training_checkpoint(
+    primitive_id: str,
     cfg: TrainPipelineConfig,
     optimization_step: int,
     online_steps: int,
@@ -674,7 +689,6 @@ def save_training_checkpoint(
     optimizers: dict[str, Optimizer],
     replay_buffer: ReplayBuffer,
     offline_replay_buffer: ReplayBuffer | None = None,
-    dataset_repo_id: str | None = None,
     fps: int = 30,
 ) -> None:
     """
@@ -705,7 +719,7 @@ def save_training_checkpoint(
     interaction_step = interaction_message["Interaction step"] if interaction_message is not None else 0
 
     # Create checkpoint directory
-    checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, online_steps, optimization_step)
+    checkpoint_dir = get_step_checkpoint_dir(Path(cfg.output_dir) / primitive_id, online_steps, optimization_step)
 
     # Save checkpoint
     save_checkpoint(
@@ -728,23 +742,23 @@ def save_training_checkpoint(
 
     # TODO : temporary save replay buffer here, remove later when on the robot
     # We want to control this with the keyboard inputs
-    dataset_dir = os.path.join(cfg.output_dir, "dataset")
+    dataset_dir = os.path.join(cfg.output_dir, primitive_id, "dataset")
     if os.path.exists(dataset_dir) and os.path.isdir(dataset_dir):
         shutil.rmtree(dataset_dir)
 
     # Save dataset
     # NOTE: Handle the case where the dataset repo id is not specified in the config
     # eg. RL training without demonstrations data
-    repo_id_buffer_save = cfg.env.task if dataset_repo_id is None else dataset_repo_id
+    repo_id_buffer_save = cfg.dataset.repo_id + f"-{primitive_id}"
     replay_buffer.to_lerobot_dataset(repo_id=repo_id_buffer_save, fps=fps, root=dataset_dir)
 
     if offline_replay_buffer is not None:
-        dataset_offline_dir = os.path.join(cfg.output_dir, "dataset_offline")
+        dataset_offline_dir = os.path.join(cfg.output_dir, primitive_id, "dataset-offline")
         if os.path.exists(dataset_offline_dir) and os.path.isdir(dataset_offline_dir):
             shutil.rmtree(dataset_offline_dir)
 
         offline_replay_buffer.to_lerobot_dataset(
-            cfg.dataset.repo_id,
+            cfg.dataset.repo_id + f"-{primitive_id}",
             fps=fps,
             root=dataset_offline_dir,
         )
@@ -752,7 +766,7 @@ def save_training_checkpoint(
     logging.info("Resume training")
 
 
-def make_optimizers_and_scheduler(cfg: TrainPipelineConfig, policy: nn.Module):
+def make_optimizers_and_scheduler(policies: dict[str, SACPolicy]):
     """
     Creates and returns optimizers for the actor, critic, and temperature components of a reinforcement learning policy.
 
@@ -769,7 +783,7 @@ def make_optimizers_and_scheduler(cfg: TrainPipelineConfig, policy: nn.Module):
 
     Args:
         cfg: Configuration object containing hyperparameters.
-        policy (nn.Module): The policy model containing the actor, critic, and temperature components.
+        policies: dict[str, nn.Module] (nn.Module): The policy model containing the actor, critic, and temperature components.
 
     Returns:
         Tuple[Dict[str, torch.optim.Optimizer], Optional[torch.optim.lr_scheduler._LRScheduler]]:
@@ -778,29 +792,42 @@ def make_optimizers_and_scheduler(cfg: TrainPipelineConfig, policy: nn.Module):
         - `lr_scheduler`: Currently set to `None` but can be extended to support learning rate scheduling.
 
     """
-    optimizer_actor = torch.optim.Adam(
-        params=[
-            p
-            for n, p in policy.actor.named_parameters()
-            if not policy.config.shared_encoder or not n.startswith("encoder")
-        ],
-        lr=cfg.policy.actor_lr,
-    )
-    optimizer_critic = torch.optim.Adam(params=policy.critic_ensemble.parameters(), lr=cfg.policy.critic_lr)
+    optimizers = {}
+    lr_scheduler = {}
+    for name, policy in policies.items():
 
-    if cfg.policy.num_discrete_actions is not None:
-        optimizer_discrete_critic = torch.optim.Adam(
-            params=policy.discrete_critic.parameters(), lr=cfg.policy.critic_lr
+        optimizer_actor = torch.optim.Adam(
+            params=[
+                p
+                for n, p in policy.actor.named_parameters()
+                if not policy.config.shared_encoder or not n.startswith("encoder")
+            ],
+            lr=policy.config.actor_lr,
         )
-    optimizer_temperature = torch.optim.Adam(params=[policy.log_alpha], lr=cfg.policy.critic_lr)
-    lr_scheduler = None
-    optimizers = {
-        "actor": optimizer_actor,
-        "critic": optimizer_critic,
-        "temperature": optimizer_temperature,
-    }
-    if cfg.policy.num_discrete_actions is not None:
-        optimizers["discrete_critic"] = optimizer_discrete_critic
+        optimizer_critic = torch.optim.Adam(params=policy.critic_ensemble.parameters(), lr=policy.config.critic_lr)
+
+        if policy.config.num_discrete_actions is not None:
+            optimizer_discrete_critic = torch.optim.Adam(
+                params=policy.discrete_critic.parameters(), lr=policy.config.critic_lr
+            )
+        optimizer_temperature = torch.optim.Adam(params=[policy.log_alpha], lr=policy.config.critic_lr)
+
+        if policy.config.noise_config.enable:
+            optimizer_noise = torch.optim.Adam(
+                params=policy.noise_net.parameters(), lr=policy.config.noise_lr
+            )
+
+        lr_scheduler[name] = None
+        optimizers[name] = {
+            "actor": optimizer_actor,
+            "critic": optimizer_critic,
+            "temperature": optimizer_temperature,
+        }
+        if policy.config.num_discrete_actions is not None:
+            optimizers[name]["discrete_critic"] = optimizer_discrete_critic
+        if policy.config.noise_config.enable:
+            optimizers[name]["noise"] = optimizer_noise
+
     return optimizers, lr_scheduler
 
 
@@ -907,22 +934,24 @@ def load_training_state(
         return None, None
 
 
-def log_training_info(cfg: TrainPipelineConfig, policy: nn.Module) -> None:
+def log_training_info(cfg: TrainPipelineConfig, policies: dict[str, nn.Module]) -> None:
     """
     Log information about the training process.
 
     Args:
         cfg (TrainPipelineConfig): Training configuration
-        policy (nn.Module): Policy model
+        policy (dict): Policy model
     """
-    num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
-    num_total_params = sum(p.numel() for p in policy.parameters())
+    logging.info(colored("[LEARNER] Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
+    logging.info(f"[LEARNER] {cfg.env.task=}")
+    for name, policy in policies.items():
+        num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+        num_total_params = sum(p.numel() for p in policy.parameters())
 
-    logging.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
-    logging.info(f"{cfg.env.task=}")
-    logging.info(f"{cfg.policy.online_steps=}")
-    logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
-    logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
+        logging.info(f"--- {name} policy ---")
+        logging.info(f"{policy.config.online_steps=}")
+        logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
+        logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
 
 def initialize_replay_buffer(cfg: TrainPipelineConfig, policies, device: str, storage_device: str) -> dict[str, ReplayBuffer]:
@@ -940,18 +969,18 @@ def initialize_replay_buffer(cfg: TrainPipelineConfig, policies, device: str, st
     if not cfg.resume:
         return {
             name: ReplayBuffer(
-                capacity=cfg.policy.online_buffer_capacity,
+                capacity=policy.config.online_buffer_capacity,
                 device=device,
-                state_keys=cfg.policy.input_features.keys(),
+                state_keys=policy.config.input_features.keys(),
                 storage_device=storage_device,
                 optimize_memory=True,
-            ) for name in policies
+            ) for name, policy in policies.items()
         }
 
     logging.info("Resume training load the online dataset")
 
     replay_buffers = {}
-    for name in policies:
+    for name, policy in policies.items():
         dataset_path = os.path.join(cfg.output_dir, f"dataset-{name}")
 
         # NOTE: In RL is possible to not have a dataset.
@@ -964,9 +993,9 @@ def initialize_replay_buffer(cfg: TrainPipelineConfig, policies, device: str, st
         )
         replay_buffers[name] = ReplayBuffer.from_lerobot_dataset(
             lerobot_dataset=dataset,
-            capacity=cfg.policy.online_buffer_capacity,
+            capacity=policy.config.online_buffer_capacity,
             device=device,
-            state_keys=cfg.policy.input_features.keys(),
+            state_keys=policy.config.input_features.keys(),
             optimize_memory=True,
         )
 
@@ -975,15 +1004,16 @@ def initialize_replay_buffer(cfg: TrainPipelineConfig, policies, device: str, st
 
 def initialize_offline_replay_buffer(
     cfg: TrainPipelineConfig,
-    policies,
+    policies: dict[str, SACPolicy],
     device: str,
     storage_device: str,
-) -> ReplayBuffer:
+) -> dict[str, ReplayBuffer]:
     """
     Initialize an offline replay buffer from a dataset.
 
     Args:
         cfg (TrainPipelineConfig): Training configuration
+        policies (dict):
         device (str): Device to store tensors on
         storage_device (str): Device for storage optimization
 
@@ -991,9 +1021,12 @@ def initialize_offline_replay_buffer(
         ReplayBuffer: Initialized offline replay buffer
     """
     offline_replay_buffers = {}
-    for name in policies:
-        ds_cfg = DatasetConfig(
-            root=Path(cfg.dataset_root) / name,
+    for name, policy in policies.items():
+
+        # Temporarily overwrite the top-level fields of the config to use utilities
+        cfg.policy = policy.config
+        cfg.dataset = DatasetConfig(
+            root=str(Path(cfg.env.dataset_root) / name),
             repo_id=cfg.env.repo_id + f"-{name}"
         )
 
@@ -1002,20 +1035,20 @@ def initialize_offline_replay_buffer(
             offline_dataset = make_dataset(cfg)
         else:
             logging.info("load offline dataset")
-            dataset_offline_path = os.path.join(cfg.output_dir, f"dataset-offline-{name}")
+            dataset_offline_dir = os.path.join(cfg.output_dir, name, "dataset-offline")
             offline_dataset = LeRobotDataset(
-                repo_id=ds_cfg.repo_id,
-                root=dataset_offline_path
+                repo_id=cfg.dataset.repo_id,
+                root=dataset_offline_dir
             )
 
         logging.info("Convert to a offline replay buffer")
         offline_replay_buffers[name] = ReplayBuffer.from_lerobot_dataset(
             offline_dataset,
             device=device,
-            state_keys=policies[name].input_features.keys(),
+            state_keys=policy.config.input_features.keys(),
             storage_device=storage_device,
             optimize_memory=True,
-            capacity=policies[name].offline_buffer_capacity,
+            capacity=policy.config.offline_buffer_capacity,
         )
     return offline_replay_buffers
 
@@ -1055,7 +1088,7 @@ def get_observation_features(
 
 
 def use_threads(cfg: TrainPipelineConfig) -> bool:
-    return cfg.policy.concurrency.learner == "threads"
+    return cfg.env.get_policy_configs()[0].concurrency.actor == "threads"
 
 
 def check_nan_in_transition(
@@ -1104,46 +1137,51 @@ def check_nan_in_transition(
     return nan_detected
 
 
-def push_actor_policy_to_queue(parameters_queue: Queue, policy: nn.Module):
-    logging.debug("[LEARNER] Pushing actor policy to the queue")
-    state_dict = move_state_dict_to_device(policy.actor.state_dict(), device="cpu")
-    state_bytes = state_to_bytes(state_dict)
-    parameters_queue.put(state_bytes)
+def push_all_actor_policies_to_queue(parameters_queue: Queue, policies: dict[str, nn.Module]):
+    logging.debug("[LEARNER] Pushing all actor policies to the queue")
+
+    for primitive_id, policy in policies.items():
+        state_dict = move_state_dict_to_device(policy.state_dict(), device="cpu")
+        state_dict["primitive_id"] = primitive_id
+        state_bytes = state_to_bytes(state_dict)
+        parameters_queue.put(state_bytes)
 
 
 def process_interaction_message(
-    message, interaction_step_shift: int, wandb_logger: WandBLogger | None = None
+    message, interaction_step_shift: dict[str, int], wandb_logger: WandBLogger | None = None
 ):
     """Process a single interaction message with consistent handling."""
     message = bytes_to_python_object(message)
-    # Shift interaction step for consistency with checkpointed state
-    message["Interaction step"] += interaction_step_shift
 
-    if "Primitive" in message:
-        message = {f"{message['Primitive']}/key": value for key, value in message}
-        del message["Primitive"]
+    primitive_id = message['Primitive']
+
+    # Shift interaction step for consistency with checkpointed state
+    message["Interaction step"] += interaction_step_shift[primitive_id]
+
+    # prepend primitive id
+    del message['Primitive']
+    message = {f"{primitive_id}/{key}": value for key, value in message.items()}
 
     # Log if logger available
     if wandb_logger:
-        wandb_logger.log_dict(d=message, mode="train", custom_step_key="Interaction step")
+        wandb_logger.log_dict(d=message, mode="train", custom_step_key=f"{primitive_id}/Interaction step")
 
-    return message
+    return primitive_id, message
 
 
 def process_transitions(
     transition_queue: Queue,
-    replay_buffer: ReplayBuffer,
-    offline_replay_buffer: ReplayBuffer,
+    replay_buffers: dict[str, ReplayBuffer],
+    offline_replay_buffers: dict[str, ReplayBuffer],
     device: str,
-    dataset_repo_id: str | None,
     shutdown_event: any,
 ):
     """Process all available transitions from the queue.
 
     Args:
         transition_queue: Queue for receiving transitions from the actor
-        replay_buffer: Replay buffer to add transitions to
-        offline_replay_buffer: Offline replay buffer to add transitions to
+        replay_buffers: Replay buffer to add transitions to
+        offline_replay_buffers: Offline replay buffer to add transitions to
         device: Device to move transitions to
         dataset_repo_id: Repository ID for dataset
         shutdown_event: Event to signal shutdown
@@ -1164,13 +1202,14 @@ def process_transitions(
                 logging.warning("[LEARNER] NaN detected in transition, skipping")
                 continue
 
-            replay_buffer.add(**transition)
+            # build a one‐off dict without "id"
+            payload = {k: v for k, v in transition.items() if k != "id"}
+            primitive_id = transition["id"]
+            replay_buffers[primitive_id].add(**payload)
 
             # Add to offline buffer if it's an intervention
-            if dataset_repo_id is not None and transition.get("complementary_info", {}).get(
-                "is_intervention"
-            ):
-                offline_replay_buffer.add(**transition)
+            if transition.get("complementary_info", {}).get("is_intervention"):
+                offline_replay_buffers[primitive_id].add(**payload)
 
 
 def process_interaction_messages(
@@ -1178,6 +1217,7 @@ def process_interaction_messages(
     interaction_step_shift: int,
     wandb_logger: WandBLogger | None,
     shutdown_event: any,
+    last_messages: Optional[dict] = None
 ) -> dict | None:
     """Process all available interaction messages from the queue.
 
@@ -1190,16 +1230,19 @@ def process_interaction_messages(
     Returns:
         dict | None: The last interaction message processed, or None if none were processed
     """
-    last_message = None
+    if last_messages is not None:
+        last_messages = {}
+
     while not interaction_message_queue.empty() and not shutdown_event.is_set():
         message = interaction_message_queue.get()
-        last_message = process_interaction_message(
+        primitive_id, last_message = process_interaction_message(
             message=message,
             interaction_step_shift=interaction_step_shift,
             wandb_logger=wandb_logger,
         )
+        last_messages[primitive_id] = last_message
 
-    return last_message
+    return last_messages
 
 
 if __name__ == "__main__":

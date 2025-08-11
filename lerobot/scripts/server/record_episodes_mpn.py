@@ -83,8 +83,9 @@ def init_datasets(cfg: MPNetConfig) -> Tuple[Dict[str, LeRobotDataset], int]:
 @parser.wrap()
 def record_dataset(cfg: RecordConfig):
     mp_net = cfg.env
-    step_counter = mp_net.get_step_counter()
+    policies = mp_net.make_policies()
     robot = make_robot_from_config(mp_net.robot)
+    step_counter = mp_net.get_step_counter()
 
     # Go through each primitive and setup their datasets, policies and transition functions
     datasets, episode = init_datasets(mp_net)
@@ -94,7 +95,7 @@ def record_dataset(cfg: RecordConfig):
     while episode < mp_net.num_episodes:
         log_say(f"Recording episode {episode}", play_sounds=True)
         current_primitive = mp_net.primitives[mp_net.start_primitive]
-        policy = mp_net.policies.get(current_primitive.id, None)
+        policy = policies.get(current_primitive.id, None)
         sum_reward = 0.0
 
         # full reset at the beginning of each sequence
@@ -108,7 +109,7 @@ def record_dataset(cfg: RecordConfig):
 
             # Sample action
             if policy is not None:
-                action = mp_net.policies[current_primitive.id].select_action(obs, add_structured_noise=False)
+                action = policy.select_action(obs, add_structured_noise=False)
             else:
                 action = env.action_space.sample()
 
@@ -145,15 +146,8 @@ def record_dataset(cfg: RecordConfig):
                     break
 
             # Check stop triggered by transition function
-            for primitive_name, stop_condition in current_primitive.transitions.items():
-                if stop_condition(obs):
-                    current_primitive = mp_net.primitives[primitive_name]
-
-            # Check stop triggered by spacemouse
-            if terminated or truncated:
-                assert len(current_primitive.transitions) == 1, \
-                    "Spacemouse transition is ambiguous, only one transition per primitive at the moment."
-                current_primitive = mp_net.primitives[list(current_primitive.transitions)[0]]
+            done = (terminated or truncated)  # and info.get("success", False)
+            current_primitive = mp_net.check_transitions(current_primitive, obs, done)
 
             # If primitive changed, close old env and make new env
             if prev_primitive != current_primitive:
@@ -162,6 +156,7 @@ def record_dataset(cfg: RecordConfig):
                     logging.info(
                         f"Finished {episode} episode for {prev_primitive.id} primitive (Demo), "
                         f"episode reward: {sum_reward}, "
+                        f"successful? {['no', 'yes'][int(info.get('success', False))]}, "
                         f"local step: {step_counter[prev_primitive.id]}, "
                         f"global step: {step_counter.global_step}"
                     )

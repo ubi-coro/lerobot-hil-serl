@@ -31,12 +31,12 @@ config = URArmConfig(
     mock=False,
     use_gripper=True,
     speed_limits=[15.0, 15.0, 15.0, 0.40, 0.40, 1.0],
-    wrench_limits=[30.0, 30.0, 30.0, 15.0, 15.0, 5.0],
+    wrench_limits=[30.0, 30.0, 30.0, 15.0, 15.0, 10.0],
     enable_contact_aware_force_scaling=[True, True, False, False, False, True],
-    contact_desired_wrench=[3.0, 3.0, 0, 0, 0, 0.4],
-    contact_limit_scale_min=[0.09, 0.09, 0, 0, 0, 0.06],
-    debug=False,
-    debug_axis=1
+    contact_desired_wrench=[3.0, 3.0, 0, 0, 0, 0.5],
+    contact_limit_scale_min=[0.09, 0.09, 0, 0, 0, 0.04],
+    debug=True,
+    debug_axis=5
 )
 
 # Instantiate and start the controller (in its own process)
@@ -49,7 +49,7 @@ action_scale = np.array([1 / 10] * 3 + [1.0] * 3)
 # setup tff command
 if USE_ROT:
     cmd = TaskFrameCommand(
-        T_WF=[0.04659, -0.33303, 0.170, 0.0, float(np.pi), 0.0],
+        T_WF=[0.01954, -0.25457, 0.138, 0.0, float(np.pi), 0.0],
         target=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
         mode=3 * [AxisMode.IMPEDANCE_VEL],
         kp=np.array([2500, 2500, 2500, 100, 100, 100]),
@@ -57,7 +57,7 @@ if USE_ROT:
     )
 else:
     cmd = TaskFrameCommand(
-        T_WF=[0.04659, -0.33303, 0.170, 0.0, float(np.pi), 0.0],
+        T_WF=[0.01954, -0.25457, 0.138, 0.0, float(np.pi), 0.0],
         target=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
         mode=2 * [AxisMode.PURE_VEL] + 1 * [AxisMode.IMPEDANCE_VEL] + 2 * [AxisMode.POS] + 1 * [AxisMode.PURE_VEL],
         kp=np.array([2500, 2500, 2500, 100, 100, 100]),

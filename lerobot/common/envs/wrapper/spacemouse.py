@@ -1,4 +1,5 @@
 import multiprocessing
+import time
 from typing import Dict, Sequence, Union, Tuple, Optional
 
 import gymnasium as gym
@@ -9,28 +10,25 @@ from lerobot.common.robot_devices.motors import pyspacemouse
 
 
 class SpaceMouseExpert:
-    """
-    This class provides an interface to the SpaceMouse.
-    It continuously reads the SpaceMouse state and provides
-    a "get_action" method to get the latest action and button state.
-    """
-
     def __init__(self, device: Optional[str] = None):
         pyspacemouse.open(device=device)
+
+        self.stop_event = multiprocessing.Event()
 
         # Manager to handle shared state between processes
         self.manager = multiprocessing.Manager()
         self.latest_data = self.manager.dict()
-        self.latest_data["action"] = [0.0] * 6  # Using lists for compatibility
+        self.latest_data["action"] = [0.0] * 6
         self.latest_data["buttons"] = [0, 0, 0, 0]
 
-        # Start a process to continuously read the SpaceMouse state
-        self.process = multiprocessing.Process(target=self._read_spacemouse)
+        self.process = multiprocessing.Process(
+            target=self._read_spacemouse, name="SpaceMouseReader"
+        )
         self.process.daemon = True
         self.process.start()
 
     def _read_spacemouse(self):
-        while True:
+        while not self.stop_event.is_set():
             state = pyspacemouse.read_all()
             action = [0.0] * 6
             buttons = [0, 0, 0, 0]
@@ -50,19 +48,42 @@ class SpaceMouseExpert:
                 ]
                 buttons = state[0].buttons
 
-            # Update the shared state
-            self.latest_data["action"] = action
-            self.latest_data["buttons"] = buttons
+            try:
+                # If the manager/pipe is gone during shutdown, just exit quietly
+                self.latest_data["action"] = action
+                self.latest_data["buttons"] = buttons
+            except (BrokenPipeError, EOFError, ConnectionResetError, OSError):
+                break
+
+            # be nice to a CPU core :)
+            time.sleep(0.002)
 
     def get_action(self) -> Tuple[np.ndarray, list]:
-        """Returns the latest action and button state of the SpaceMouse."""
-        action = self.latest_data["action"]
-        buttons = self.latest_data["buttons"]
+        action = self.latest_data.get("action", [0.0] * 6)
+        buttons = self.latest_data.get("buttons", [0, 0, 0, 0])
         return np.array(action), buttons
 
     def close(self):
-        # pyspacemouse.close()
-        self.process.terminate()
+        # Request the reader to stop
+        self.stop_event.set()
+        # Closing the HID usually unblocks read_all() if it’s waiting
+        try:
+            pyspacemouse.close()
+        except Exception:
+            pass
+
+        # Give the process a moment to exit cleanly
+        self.process.join(timeout=0.5)
+        if self.process.is_alive():
+            # Fall back to hard kill if needed
+            self.process.terminate()
+            self.process.join(timeout=0.2)
+
+        # Now it’s safe to tear down the manager/IPC
+        try:
+            self.manager.shutdown()
+        except Exception:
+            pass
 
 
 class SpaceMouseInterventionWrapper(gym.ActionWrapper):
