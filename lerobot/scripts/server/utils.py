@@ -76,9 +76,9 @@ def get_last_item_from_queue(queue: Queue):
 
 
 class Transition(TypedDict):
+    id: str
     state: dict[str, torch.Tensor]
     action: torch.Tensor
-    q_value: float
     reward: float
     next_state: dict[str, torch.Tensor]
     done: bool

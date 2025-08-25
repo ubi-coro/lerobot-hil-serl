@@ -28,6 +28,7 @@ from lerobot.common.utils.hub import HubMixin
 from lerobot.configs import parser
 from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig
 from lerobot.configs.policies import PreTrainedConfig
+from lerobot.scripts.server import mp_nets
 
 TRAIN_CONFIG_NAME = "train_config.json"
 
@@ -35,7 +36,7 @@ TRAIN_CONFIG_NAME = "train_config.json"
 @dataclass
 class TrainPipelineConfig(HubMixin):
     dataset: DatasetConfig | None = None  # NOTE: In RL, we don't need a dataset
-    env: envs.EnvConfig | None = None
+    env: envs.EnvConfig | mp_nets.MPNetConfig | None = None
     policy: PreTrainedConfig | None = None
     # Set `dir` to where you would like to save all of the run outputs. If you run another training session # with the same value for `dir` its contents will be overwritten unless you set `resume` to true.
     output_dir: Path | None = None
@@ -52,8 +53,8 @@ class TrainPipelineConfig(HubMixin):
     num_workers: int = 4
     batch_size: int = 8
     steps: int = 100_000
-    eval_freq: int = 20_000
-    log_freq: int = 200
+    eval_freq: int = 300_000
+    log_freq: int = 50
     save_checkpoint: bool = True
     # Checkpoint is saved every `save_freq` training iterations and after the last training step.
     save_freq: int = 20_000
@@ -93,6 +94,8 @@ class TrainPipelineConfig(HubMixin):
         if not self.job_name:
             if self.env is None:
                 self.job_name = f"{self.policy.type}"
+            elif self.policy is None:
+                self.job_name = f"{self.env.type}"
             else:
                 self.job_name = f"{self.env.type}_{self.policy.type}"
 
@@ -109,11 +112,12 @@ class TrainPipelineConfig(HubMixin):
         if self.dataset is not None and isinstance(self.dataset.repo_id, list):
             raise NotImplementedError("LeRobotMultiDataset is not currently implemented.")
 
-        if not self.use_policy_training_preset and (self.optimizer is None or self.scheduler is None):
-            raise ValueError("Optimizer and Scheduler must be set when the policy presets are not used.")
-        elif self.use_policy_training_preset and not self.resume:
-            self.optimizer = self.policy.get_optimizer_preset()
-            self.scheduler = self.policy.get_scheduler_preset()
+        if self.policy is not None:
+            if not self.use_policy_training_preset and (self.optimizer is None or self.scheduler is None):
+                raise ValueError("Optimizer and Scheduler must be set when the policy presets are not used.")
+            elif self.use_policy_training_preset and not self.resume:
+                self.optimizer = self.policy.get_optimizer_preset()
+                self.scheduler = self.policy.get_scheduler_preset()
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:

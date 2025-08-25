@@ -53,9 +53,9 @@ class WandBConfig:
 
 @dataclass
 class EvalConfig:
-    n_episodes: int = 50
+    n_episodes: int = 2
     # `batch_size` specifies the number of environments to use in a gym.vector.VectorEnv.
-    batch_size: int = 50
+    batch_size: int = 2
     # `use_async_envs` specifies whether to use asynchronous environments (multiprocessing).
     use_async_envs: bool = False
 

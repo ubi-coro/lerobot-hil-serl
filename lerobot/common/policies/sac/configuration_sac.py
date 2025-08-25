@@ -28,8 +28,8 @@ class DataGuidedNoiseConfig:
     initial_eps: float = 0.8
     tau: float = 10_000
     predict_residual: bool = False
-    update_freq: int = 1000
-    update_steps: int = 250
+    update_freq: int = 100
+    update_steps: int = 50
 
 @dataclass
 class ConcurrencyConfig:
@@ -60,8 +60,8 @@ class ActorNetworkConfig:
 @dataclass
 class PolicyConfig:
     use_tanh_squash: bool = True
-    log_std_min: float = 1e-5
-    log_std_max: float = 10.0
+    std_min: float = 1e-5
+    std_max: float = 0.5
     init_final: float = 0.05
 
 

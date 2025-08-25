@@ -73,7 +73,10 @@ class InsertionPrimitive(MPConfig):
             target_entropy=-1.5,
             use_backup_entropy=False,
             freeze_vision_encoder=False,
-            noise_config=DataGuidedNoiseConfig(enable=True),
+            noise_config=DataGuidedNoiseConfig(
+                enable=True,
+                predict_residual=True
+            ),
             dataset_stats={
                 "observation.image.main": {
                     "mean": [0.485, 0.456, 0.406],
@@ -104,7 +107,7 @@ class InsertionPrimitive(MPConfig):
         crop_params_dict={"observation.image.main": (190, 260, 140, 190)},
         crop_resize_size=(128, 128),
         spacemouse_devices={"main": "SpaceMouse Compact"},
-        spacemouse_action_scale={"main": [0.02, -0.02, 0, 0, 0, -0.75]},
+        spacemouse_action_scale={"main": [-0.02, 0.02, 0, 0, 0, -0.75]},
         spacemouse_intercept_with_button=True
     )
 
@@ -222,7 +225,7 @@ class UR3_HAN_Insertion(MPNetConfig):
     repo_id: str = "jannick-st/ur3-han-insertion-offline-demos"
     dataset_root: str = "/home/jannick/data/jannick-st/ur3-han-insertion/offline-demos"
     task: str = ""
-    num_episodes: int = 10
+    num_episodes: int = 20
     episode: int = 0
     device: str = "cuda"
     storage_device: str = "cuda"
@@ -230,8 +233,8 @@ class UR3_HAN_Insertion(MPNetConfig):
     seed: int = 42
 
     # Insertion parameters
-    xy_offset_std_mm: float = 2.0
-    c_offset_std_rad: float = 0.25
+    xy_offset_std_mm: float = 3.0
+    c_offset_std_rad: float = 0.2
     use_xy_position: bool = False
     use_torque: bool = True
     use_vision: bool = True
@@ -271,7 +274,7 @@ class UR3_HAN_Insertion(MPNetConfig):
         pos={
             "main": [0.0] * 6  # origin in task frame
         },
-        noise_dist="normal",
+        noise_dist="uniform",
         noise_std={
             "main": [0] * 6  # set in __post_init__
         },

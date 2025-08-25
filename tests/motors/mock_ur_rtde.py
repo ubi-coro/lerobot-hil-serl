@@ -83,7 +83,7 @@ class RTDEControlInterface:
     can later return matching pose/velocity/force.
     """
 
-    def __init__(self, hostname: str = None):
+    def __init__(self, hostname: str = None, *args):
         self.hostname = hostname or 'default'
         self._state = _get_or_create_state(self.hostname)
         # Keep a last‐wrench buffer if in forceMode

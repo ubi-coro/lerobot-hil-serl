@@ -109,7 +109,7 @@ def record_dataset(cfg: RecordConfig):
 
             # Sample action
             if policy is not None:
-                action = policy.select_action(obs, add_structured_noise=False)
+                action = policy.select_action(obs, deterministic=True)
             else:
                 action = env.action_space.sample()
 

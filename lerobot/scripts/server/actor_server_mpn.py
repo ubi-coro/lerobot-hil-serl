@@ -33,7 +33,7 @@ from lerobot.common.utils.random_utils import set_seed
 from lerobot.common.utils.utils import (
     TimerManager,
     get_safe_torch_device,
-    init_logging,
+    init_logging, log_say, say,
 )
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
@@ -211,6 +211,7 @@ def act_with_policy(
     eval_mode = False
     episode_cnt = 0
 
+    preloaded_envs = {}
     if mp_net.preload_envs:
         preloaded_envs = {primitive_id: p.make(mp_net, robot) for primitive_id, p in mp_net.primitives.items()}
 
@@ -254,14 +255,18 @@ def act_with_policy(
                     label="Policy inference time",
                     log=False,
                 ) as timer:  # noqa: F841
-                    action, q_value = policies[current_primitive.id].select_action(batch=obs, step=step)
+                    action, inference_infos = policies[current_primitive.id].select_action(
+                        batch=obs,
+                        step=step,
+                        deterministic=eval_mode
+                    )
                 policy_fps = 1.0 / (list_policy_time[-1] + 1e-9)
 
                 log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=step)
 
             else:
                 action = online_env.action_space.sample()
-                q_value = 0.0
+                inference_infos = {}
 
             # Block interventions during eval mode
             if intervention_wrapper is not None:
@@ -285,12 +290,13 @@ def act_with_policy(
                     # Increment intervention steps counter
                     episode_intervention_steps += 1
 
+                info.update(inference_infos)
+
                 list_transition_to_send_to_learner.append(
                     Transition(
                         id=current_primitive.id,
                         state=obs,
                         action=action,
-                        q_value=q_value,
                         reward=reward,
                         next_state=next_obs,
                         done=terminated or truncated,
@@ -324,17 +330,15 @@ def act_with_policy(
                     list_policy_time.clear()
 
                     # Check complementary info
-                    complementary_info = {}
+                    complementary_info = {"Episodic reward": sum_reward_episode, **inference_infos}
                     if "success" in info:
                         complementary_info["Success"] = int(info["success"])
                     if "first_success_step" in info:
-                        complementary_info["Cycle time"] = int(info["first_success_step"]) * cfg.env.fps
+                        complementary_info["Cycle Time [s]"] = int(info["first_success_step"]) / cfg.env.fps
                     else:
-                        complementary_info["Cycle time"] = episode_total_steps * cfg.env.fps
+                        complementary_info["Cycle Time [s]"] = episode_total_steps / cfg.env.fps
 
                     if not eval_mode:
-                        complementary_info = {"Train/" + key: value for key, value in complementary_info.items()}
-
                         # Calculate intervention rate
                         intervention_rate = 0.0
                         if episode_total_steps > 0:
@@ -342,20 +346,18 @@ def act_with_policy(
 
                         msg = {
                             "Primitive": prev_primitive.id,
-                            "Train/Episodic reward": sum_reward_episode,
                             "Interaction step": step,
                             "Episode intervention": int(episode_intervention),
-                            "Intervention rate": intervention_rate,
+                            "Intervention rate [%]": intervention_rate,
                             **complementary_info,
                             **stats,
                         }
 
                     else:
-                        complementary_info = {"Eval/" + key: value for key, value in complementary_info.items()}
+                        complementary_info = {"Eval " + key: value for key, value in complementary_info.items()}
 
                         msg = {
                             "Primitive": prev_primitive.id,
-                            "Eval/Episodic reward": sum_reward_episode,
                             "Interaction step": step,
                             **complementary_info,
                             **stats,
@@ -365,17 +367,17 @@ def act_with_policy(
                     interactions_queue.put(python_object_to_bytes(msg))
 
                     logging.info(
-                        f"[ACTOR] Finished {episode_cnt} episode for {prev_primitive.id} primitive ({['Train', 'Eval'][int(eval_mode)]}), "
+                        f"[ACTOR] --- Finished {episode_cnt} episode for {prev_primitive.id} primitive ({['Train', 'Eval'][int(eval_mode)]}), "
                         f"episode reward: {sum_reward_episode}, "
                         f"local step: {step}, "
                         f"global step: {step_counter.global_step}"
                     )
                 else:
                     logging.info(
-                        f"[ACTOR] Finished {episode_cnt} episode for {prev_primitive.id} primitive ({['Train', 'Eval'][int(eval_mode)]})"
+                        f"[ACTOR] --- Finished {episode_cnt} episode for {prev_primitive.id} primitive ({['Train', 'Eval'][int(eval_mode)]})"
                     )
 
-                logging.info(f"[ACTOR] Now transition to {current_primitive.id} primitive")
+                logging.info(f"[ACTOR] --- Now transition to {current_primitive.id} primitive")
 
                 if not mp_net.preload_envs:
                     online_env.close()
@@ -390,6 +392,7 @@ def act_with_policy(
                 episode_total_steps = 0
 
                 online_env = preloaded_envs.get(current_primitive.id, current_primitive.make(mp_net, robot))
+                intervention_wrapper = find_wrapper(online_env, {BaseLeaderControlWrapper, SpaceMouseInterventionWrapper})
                 obs, info = online_env.reset()
 
             if cfg.env.fps is not None:
@@ -401,11 +404,15 @@ def act_with_policy(
 
         # every 'eval_freq' episodes, run 'n_episodes' of evaluation (frozen policy parameters and no interventions)
         # transitions are still sent and trained on
-        eval_mode = (episode_cnt % (cfg.eval_freq + cfg.eval.n_episodes) <= cfg.eval.n_episodes
-                     and episode_cnt > cfg.eval_freq + cfg.eval.n_episodes)
+        total_episodes_per_eval_cycle = cfg.eval_freq + cfg.eval.n_episodes
+        eval_mode = (episode_cnt % total_episodes_per_eval_cycle < cfg.eval.n_episodes and
+                     episode_cnt >= total_episodes_per_eval_cycle)
         if eval_mode:
-            logging.info(f"[ACTOR] Running evaluation episode {episode_cnt % (cfg.eval_freq + cfg.eval.n_episodes)}"
-                         f"/{cfg.eval.n_episodes}, interventions are disabled")
+            eval_episode = episode_cnt % total_episodes_per_eval_cycle + 1
+
+            say(f"Run evaluation {eval_episode} of {cfg.eval.n_episodes}", blocking=False)
+            logging.info(f"[ACTOR] Running evaluation episode {eval_episode}/{cfg.eval.n_episodes}, "
+                         f"interventions are disabled!")
         else:
             update_all_policy_parameters(
                 policies=policies,

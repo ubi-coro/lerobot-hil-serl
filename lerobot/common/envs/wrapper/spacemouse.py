@@ -143,9 +143,12 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
             self.scales[name] = scale
 
     def action(self, policy_action: torch.Tensor) -> Tuple:
-
         is_intervention = False
         intervention_action = policy_action.clone()
+
+        if self.block_interventions:
+            return policy_action, is_intervention, None
+
         idx_start = 0
         for name in self.robot_names:
             expert = self.experts[name]
@@ -197,7 +200,7 @@ class SpaceMouseInterventionWrapper(gym.ActionWrapper):
     def step(self, action):
         policy_action, is_intervention, intervention_action = self.action(action)
 
-        if is_intervention and not self.block_interventions:
+        if is_intervention:
             new_action = intervention_action
         else:
             new_action = policy_action

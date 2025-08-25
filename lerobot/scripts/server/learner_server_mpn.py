@@ -17,6 +17,7 @@
 import logging
 import os
 import pathlib
+import queue
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -173,7 +174,7 @@ def start_learner_threads(
     # Create multiprocessing queues
     transition_queue = Queue(maxsize=10)
     interaction_message_queue = Queue(maxsize=10)
-    parameters_queue = Queue(maxsize=10)
+    parameters_queue = Queue(maxsize=1)
 
     concurrency_entity = None
 
@@ -369,57 +370,95 @@ def add_actor_information_and_train(
         return forward_batch
 
     # NOTE: THIS IS THE MAIN LOOP OF THE LEARNER
-    while True:
-        # Exit the training loop if shutdown is requested
-        if shutdown_event is not None and shutdown_event.is_set():
-            logging.info("[LEARNER] Shutdown signal received. Exiting...")
-            break
+    try:
+        while True:
+            # Exit the training loop if shutdown is requested
+            if shutdown_event is not None and shutdown_event.is_set():
+                logging.info("[LEARNER] Shutdown signal received. Exiting...")
+                break
 
-        time_for_one_optimization_step = time.time()
-        for name, policy in policies.items():
+            time_for_one_optimization_step = time.time()
+            for name, policy in policies.items():
 
-            # Process all available transitions to the replay buffer, send by the actor server
-            process_transitions(
-                transition_queue=transition_queue,
-                replay_buffers=replay_buffers,
-                offline_replay_buffers=offline_replay_buffers,
-                device=device,
-                shutdown_event=shutdown_event,
-            )
-
-            # Process all available interaction messages sent by the actor server
-            process_interaction_messages(
-                interaction_message_queue=interaction_message_queue,
-                interaction_step_shift=interaction_step_shift,
-                wandb_logger=wandb_logger,
-                shutdown_event=shutdown_event,
-                last_messages=last_messages
-            )
-
-            # Wait until the replay buffer has enough samples to start training
-            if len(replay_buffers[name]) < online_step_before_learning[name]:
-                continue
-
-            if optimization_step[name] >= online_steps[name]:
-                continue
-
-            if online_iterator is None:
-                online_iterator = replay_buffers[name].get_iterator(
-                    batch_size=batch_size, async_prefetch=async_prefetch[name], queue_size=2
+                # Process all available transitions to the replay buffer, send by the actor server
+                process_transitions(
+                    transition_queue=transition_queue,
+                    replay_buffers=replay_buffers,
+                    offline_replay_buffers=offline_replay_buffers,
+                    device=device,
+                    shutdown_event=shutdown_event,
                 )
 
-            if has_offline_ds and offline_iterator is None:
-                offline_iterator = offline_replay_buffers[name].get_iterator(
-                    batch_size=batch_size, async_prefetch=async_prefetch[name], queue_size=2
+                # Process all available interaction messages sent by the actor server
+                process_interaction_messages(
+                    interaction_message_queue=interaction_message_queue,
+                    interaction_step_shift=interaction_step_shift,
+                    wandb_logger=wandb_logger,
+                    shutdown_event=shutdown_event,
+                    last_messages=last_messages
                 )
 
-            if noise_enable[name] and optimization_step[name] % noise_update_freq[name] == 0:
-                noise_iterator = offline_replay_buffers[name].get_iterator(
-                    batch_size=2 * batch_size, async_prefetch=async_prefetch[name], queue_size=2
-                )
+                # Wait until the replay buffer has enough samples to start training
+                if len(replay_buffers[name]) < online_step_before_learning[name]:
+                    continue
 
-            for _ in range(utd_ratio[name] - 1):
-                # Sample from the iterators
+                if optimization_step[name] >= online_steps[name]:
+                    continue
+
+                if online_iterator is None:
+                    online_iterator = replay_buffers[name].get_iterator(
+                        batch_size=batch_size, async_prefetch=async_prefetch[name], queue_size=2
+                    )
+
+                if has_offline_ds and offline_iterator is None:
+                    offline_iterator = offline_replay_buffers[name].get_iterator(
+                        batch_size=batch_size, async_prefetch=async_prefetch[name], queue_size=2
+                    )
+
+                if noise_enable[name] and optimization_step[name] % noise_update_freq[name] == 0:
+                    noise_iterator = offline_replay_buffers[name].get_iterator(
+                        batch_size=2 * batch_size, async_prefetch=async_prefetch[name], queue_size=2
+                    )
+
+                for _ in range(utd_ratio[name] - 1):
+                    # Sample from the iterators
+                    batch = next(online_iterator)
+
+                    if has_offline_ds:
+                        batch_offline = next(offline_iterator)
+                        batch = concatenate_batch_transitions(
+                            left_batch_transitions=batch, right_batch_transition=batch_offline
+                        )
+
+                    forward_batch = prepare_batch(policy, batch)
+
+                    # Use the forward method for critic loss
+                    critic_output = policy.forward(forward_batch, model="critic")
+
+                    # Main critic optimization
+                    loss_critic = critic_output["loss_critic"]
+                    optimizers[name]["critic"].zero_grad()
+                    loss_critic.backward()
+                    critic_grad_norm = torch.nn.utils.clip_grad_norm_(
+                        parameters=policy.critic_ensemble.parameters(), max_norm=clip_grad_norm_value[name]
+                    )
+                    optimizers[name]["critic"].step()
+
+                    # Discrete critic optimization (if available)
+                    if policy.config.num_discrete_actions is not None:
+                        discrete_critic_output = policy.forward(forward_batch, model="discrete_critic")
+                        loss_discrete_critic = discrete_critic_output["loss_discrete_critic"]
+                        optimizers[name]["discrete_critic"].zero_grad()
+                        loss_discrete_critic.backward()
+                        discrete_critic_grad_norm = torch.nn.utils.clip_grad_norm_(
+                            parameters=policy.discrete_critic.parameters(), max_norm=clip_grad_norm_value[name]
+                        )
+                        optimizers[name]["discrete_critic"].step()
+
+                    # Update target networks (main and discrete)
+                    policy.update_target_networks()
+
+                # Sample for the last update in the UTD ratio
                 batch = next(online_iterator)
 
                 if has_offline_ds:
@@ -430,17 +469,20 @@ def add_actor_information_and_train(
 
                 forward_batch = prepare_batch(policy, batch)
 
-                # Use the forward method for critic loss
                 critic_output = policy.forward(forward_batch, model="critic")
 
-                # Main critic optimization
                 loss_critic = critic_output["loss_critic"]
                 optimizers[name]["critic"].zero_grad()
                 loss_critic.backward()
                 critic_grad_norm = torch.nn.utils.clip_grad_norm_(
                     parameters=policy.critic_ensemble.parameters(), max_norm=clip_grad_norm_value[name]
-                )
+                ).item()
                 optimizers[name]["critic"].step()
+
+                # Initialize training info dictionary
+                training_infos = critic_output["training_infos"]
+                training_infos["loss_critic"] = loss_critic.item()
+                training_infos["critic_grad_norm"] = critic_grad_norm
 
                 # Discrete critic optimization (if available)
                 if policy.config.num_discrete_actions is not None:
@@ -450,165 +492,142 @@ def add_actor_information_and_train(
                     loss_discrete_critic.backward()
                     discrete_critic_grad_norm = torch.nn.utils.clip_grad_norm_(
                         parameters=policy.discrete_critic.parameters(), max_norm=clip_grad_norm_value[name]
-                    )
+                    ).item()
                     optimizers[name]["discrete_critic"].step()
+
+                    # Add discrete critic info to training info
+                    training_infos["loss_discrete_critic"] = loss_discrete_critic.item()
+                    training_infos["discrete_critic_grad_norm"] = discrete_critic_grad_norm
+
+                # Actor and temperature optimization (at specified frequency)
+                if optimization_step[name] % policy_update_freq[name] == 0:
+                    for _ in range(policy_update_freq[name]):
+                        # Actor optimization
+                        actor_output = policy.forward(forward_batch, model="actor")
+                        loss_actor = actor_output["loss_actor"]
+                        optimizers[name]["actor"].zero_grad()
+                        loss_actor.backward()
+                        actor_grad_norm = torch.nn.utils.clip_grad_norm_(
+                            parameters=policy.actor.parameters(), max_norm=clip_grad_norm_value[name]
+                        ).item()
+                        optimizers[name]["actor"].step()
+
+                        # Add actor info to training info
+                        training_infos["loss_actor"] = loss_actor.item()
+                        training_infos["actor_grad_norm"] = actor_grad_norm
+
+                        # Temperature optimization
+                        temperature_output = policy.forward(forward_batch, model="temperature")
+                        loss_temperature = temperature_output["loss_temperature"]
+                        optimizers[name]["temperature"].zero_grad()
+                        loss_temperature.backward()
+                        temp_grad_norm = torch.nn.utils.clip_grad_norm_(
+                            parameters=[policy.log_alpha], max_norm=clip_grad_norm_value[name]
+                        ).item()
+                        optimizers[name]["temperature"].step()
+
+                        # Add temperature info to training info
+                        training_infos["loss_temperature"] = loss_temperature.item()
+                        training_infos["temperature_grad_norm"] = temp_grad_norm
+                        training_infos["temperature"] = policy.temperature
+
+                        # Update temperature
+                        policy.update_temperature()
+
+                if noise_enable[name] and optimization_step[name] % noise_update_freq[name] == 0:
+                    for noise_update_step in range(noise_update_steps[name]):
+                        # Structured noise optimization
+                        batch = next(noise_iterator)
+                        forward_batch = prepare_batch(policy, batch)
+
+                        noise_output = policy.forward(forward_batch, model="noise")
+                        loss_noise = noise_output["loss_noise"]
+                        optimizers[name]["noise"].zero_grad()
+                        loss_noise.backward()
+                        noise_grad_norm = torch.nn.utils.clip_grad_norm_(
+                            parameters=policy.noise_net.parameters(), max_norm=clip_grad_norm_value[name]
+                        ).item()
+                        optimizers[name]["noise"].step()
+
+                        noise_infos = {
+                            "loss_noise": loss_noise.item(),
+                            "dgn_improvement_ratio": noise_output["dgn_improvement_ratio"],
+                            "noise_grad_norm": noise_grad_norm
+                        }
+
+                        if noise_update_step % log_freq == 0:
+                            noise_infos["Noise optimization step"] = optimization_step[name]
+
+                            # Log training metrics
+                            if wandb_logger:
+                                noise_infos = {f"{name}/{key}": value for key, value in noise_infos.items()}
+                                wandb_logger.log_dict(d=noise_infos, mode="train", custom_step_key=f"{name}/Noise optimization step")
 
                 # Update target networks (main and discrete)
                 policy.update_target_networks()
 
-            # Sample for the last update in the UTD ratio
-            batch = next(online_iterator)
+                # Save checkpoint at specified intervals
+                if saving_checkpoint and (optimization_step[name] % save_freq == 0 or optimization_step[name] == online_steps[name]):
+                    save_training_checkpoint(
+                        primitive_id=name,
+                        cfg=cfg,
+                        optimization_step=optimization_step[name],
+                        online_steps=online_steps[name],
+                        interaction_message=last_messages[name],
+                        policy=policy,
+                        optimizers=optimizers[name],
+                        replay_buffer=replay_buffers[name],
+                        offline_replay_buffer=offline_replay_buffers[name],
+                        fps=fps,
+                    )
 
-            if has_offline_ds:
-                batch_offline = next(offline_iterator)
-                batch = concatenate_batch_transitions(
-                    left_batch_transitions=batch, right_batch_transition=batch_offline
+                optimization_step[name] += 1
+
+                # Log training metrics at specified intervals or when having trained the noise net
+                if optimization_step[name] % log_freq == 0:
+                    logging.info(f"[LEARNER] Number of optimization steps for {name}: {optimization_step[name]}")
+
+                    # Log training metrics
+                    if wandb_logger:
+                        training_infos["replay_buffer_size"] = len(replay_buffers[name])
+                        if has_offline_ds:
+                            training_infos["offline_replay_buffer_size"] = len(offline_replay_buffers[name])
+                        training_infos["Optimization step"] = optimization_step[name]
+                        training_infos = {f"{name}/{key}": value for key, value in training_infos.items()}
+
+                        wandb_logger.log_dict(d=training_infos, mode="train", custom_step_key=f"{name}/Optimization step")
+
+
+            # Skip frequency in the beginning
+            if all([step == 0 for step in optimization_step.values()]):
+                continue
+
+            # Push policy to actors if needed
+            if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:
+                push_all_actor_policies_to_queue(parameters_queue=parameters_queue, policies=policies)
+                last_time_policy_pushed = time.time()
+
+            # Calculate and log optimization frequency
+            time_for_one_optimization_step = time.time() - time_for_one_optimization_step
+            frequency_for_one_optimization_step = 1 / (time_for_one_optimization_step + 1e-9)
+
+            logging.info(f"[LEARNER] Optimization frequency loop [Hz]: {frequency_for_one_optimization_step}")
+
+            # Log optimization frequency
+            if wandb_logger:
+                wandb_logger.log_dict(
+                    {
+                        f"Optimization frequency loop [Hz]": frequency_for_one_optimization_step,
+                        f"Global optimization step": sum(optimization_step.values()),
+                    },
+                    mode="train",
+                    custom_step_key="Global optimization step",
                 )
 
-            forward_batch = prepare_batch(policy, batch)
-
-            critic_output = policy.forward(forward_batch, model="critic")
-
-            loss_critic = critic_output["loss_critic"]
-            optimizers[name]["critic"].zero_grad()
-            loss_critic.backward()
-            critic_grad_norm = torch.nn.utils.clip_grad_norm_(
-                parameters=policy.critic_ensemble.parameters(), max_norm=clip_grad_norm_value[name]
-            ).item()
-            optimizers[name]["critic"].step()
-
-            # Initialize training info dictionary
-            training_infos = critic_output["training_infos"]
-            training_infos["loss_critic"] = loss_critic.item()
-            training_infos["critic_grad_norm"] = critic_grad_norm
-
-            # Discrete critic optimization (if available)
-            if policy.config.num_discrete_actions is not None:
-                discrete_critic_output = policy.forward(forward_batch, model="discrete_critic")
-                loss_discrete_critic = discrete_critic_output["loss_discrete_critic"]
-                optimizers[name]["discrete_critic"].zero_grad()
-                loss_discrete_critic.backward()
-                discrete_critic_grad_norm = torch.nn.utils.clip_grad_norm_(
-                    parameters=policy.discrete_critic.parameters(), max_norm=clip_grad_norm_value[name]
-                ).item()
-                optimizers[name]["discrete_critic"].step()
-
-                # Add discrete critic info to training info
-                training_infos["loss_discrete_critic"] = loss_discrete_critic.item()
-                training_infos["discrete_critic_grad_norm"] = discrete_critic_grad_norm
-
-            # Actor and temperature optimization (at specified frequency)
-            if optimization_step[name] % policy_update_freq[name] == 0:
-                for _ in range(policy_update_freq[name]):
-                    # Actor optimization
-                    actor_output = policy.forward(forward_batch, model="actor")
-                    loss_actor = actor_output["loss_actor"]
-                    optimizers[name]["actor"].zero_grad()
-                    loss_actor.backward()
-                    actor_grad_norm = torch.nn.utils.clip_grad_norm_(
-                        parameters=policy.actor.parameters(), max_norm=clip_grad_norm_value[name]
-                    ).item()
-                    optimizers[name]["actor"].step()
-
-                    # Add actor info to training info
-                    training_infos["loss_actor"] = loss_actor.item()
-                    training_infos["actor_grad_norm"] = actor_grad_norm
-
-                    # Temperature optimization
-                    temperature_output = policy.forward(forward_batch, model="temperature")
-                    loss_temperature = temperature_output["loss_temperature"]
-                    optimizers[name]["temperature"].zero_grad()
-                    loss_temperature.backward()
-                    temp_grad_norm = torch.nn.utils.clip_grad_norm_(
-                        parameters=[policy.log_alpha], max_norm=clip_grad_norm_value[name]
-                    ).item()
-                    optimizers[name]["temperature"].step()
-
-                    # Add temperature info to training info
-                    training_infos["loss_temperature"] = loss_temperature.item()
-                    training_infos["temperature_grad_norm"] = temp_grad_norm
-                    training_infos["temperature"] = policy.temperature
-
-                    # Update temperature
-                    policy.update_temperature()
-
-            if noise_enable[name] and optimization_step[name] % noise_update_freq[name] == 0:
-                for _ in range(noise_update_steps[name]):
-                    # Structured noise optimization
-                    batch = next(noise_iterator)
-                    forward_batch = prepare_batch(policy, batch)
-
-                    noise_output = policy.forward(forward_batch, model="noise")
-                    loss_noise = noise_output["loss_noise"]
-                    optimizers[name]["noise"].zero_grad()
-                    loss_noise.backward()
-                    noise_grad_norm = torch.nn.utils.clip_grad_norm_(
-                        parameters=policy.discrete_critic.parameters(), max_norm=clip_grad_norm_value[name]
-                    ).item()
-                    optimizers[name]["noise"].step()
-
-                    training_infos["loss_noise"] = loss_noise.item()
-                    training_infos["noise_grad_norm"] = noise_grad_norm
-
-            # Update target networks (main and discrete)
-            policy.update_target_networks()
-
-            # Save checkpoint at specified intervals
-            if saving_checkpoint and (optimization_step[name] % save_freq == 0 or optimization_step[name] == online_steps[name]):
-                save_training_checkpoint(
-                    primitive_id=name,
-                    cfg=cfg,
-                    optimization_step=optimization_step[name],
-                    online_steps=online_steps[name],
-                    interaction_message=last_messages[name],
-                    policy=policy,
-                    optimizers=optimizers[name],
-                    replay_buffer=replay_buffers[name],
-                    offline_replay_buffer=offline_replay_buffers[name],
-                    fps=fps,
-                )
-
-            # Log training metrics at specified intervals
-            if optimization_step[name] % log_freq == 0:
-                training_infos["replay_buffer_size"] = len(replay_buffers[name])
-                if has_offline_ds:
-                    training_infos["offline_replay_buffer_size"] = len(offline_replay_buffers[name])
-                training_infos["Optimization step"] = optimization_step[name]
-
-                # Log training metrics
-                if wandb_logger:
-                    training_infos = {f"{name}/{key}": value for key, value in training_infos.items()}
-                    wandb_logger.log_dict(d=training_infos, mode="train", custom_step_key=f"{name}/Optimization step")
-
-            optimization_step[name] += 1
-            if optimization_step[name] % log_freq == 0:
-                logging.info(f"[LEARNER] Number of optimization steps for {name}: {optimization_step[name]}")
-
-        # Skip frequency in the beginning
-        if all([step == 0 for step in optimization_step.values()]):
-            continue
-
-        # Push policy to actors if needed
-        if time.time() - last_time_policy_pushed > policy_parameters_push_frequency:
-            push_all_actor_policies_to_queue(parameters_queue=parameters_queue, policies=policies)
-            last_time_policy_pushed = time.time()
-
-        # Calculate and log optimization frequency
-        time_for_one_optimization_step = time.time() - time_for_one_optimization_step
-        frequency_for_one_optimization_step = 1 / (time_for_one_optimization_step + 1e-9)
-
-        logging.info(f"[LEARNER] Optimization frequency loop [Hz]: {frequency_for_one_optimization_step}")
-
-        # Log optimization frequency
-        if wandb_logger:
-            wandb_logger.log_dict(
-                {
-                    f"Optimization frequency loop [Hz]": frequency_for_one_optimization_step,
-                    f"Global optimization step": sum(optimization_step.values()),
-                },
-                mode="train",
-                custom_step_key="Global optimization step",
-            )
+    except Exception as e:
+        import traceback
+        logging.error(f"[LEARNER CRASH] Step {optimization_step[name]} failed: {e}")
+        traceback.print_exc()
 
 
 def start_learner_server(
@@ -716,7 +735,7 @@ def save_training_checkpoint(
     """
     logging.info(f"Checkpoint policy after step {optimization_step}")
     _num_digits = max(6, len(str(online_steps)))
-    interaction_step = interaction_message["Interaction step"] if interaction_message is not None else 0
+    interaction_step = interaction_message[f"{primitive_id}/Interaction step"] if interaction_message is not None else 0
 
     # Create checkpoint directory
     checkpoint_dir = get_step_checkpoint_dir(Path(cfg.output_dir) / primitive_id, online_steps, optimization_step)
@@ -910,28 +929,38 @@ def load_training_state(
     if not cfg.resume:
         return None, None
 
-    # Construct path to the last checkpoint directory
-    checkpoint_dir = os.path.join(cfg.output_dir, CHECKPOINTS_DIR, LAST_CHECKPOINT_LINK)
-
-    logging.info(f"Loading training state from {checkpoint_dir}")
+    steps: dict[str, int] = {}
+    interaction_steps: dict[str, int] = {}
 
     try:
-        # Use the utility function from train_utils which loads the optimizer state
-        step, optimizers, _ = utils_load_training_state(Path(checkpoint_dir), optimizers, None)
+        for primitive_id in optimizers:
 
-        # Load interaction step separately from training_state.pt
-        training_state_path = os.path.join(checkpoint_dir, TRAINING_STATE_DIR, "training_state.pt")
-        interaction_step = 0
-        if os.path.exists(training_state_path):
-            training_state = torch.load(training_state_path, weights_only=False)  # nosec B614: Safe usage of torch.load
-            interaction_step = training_state.get("interaction_step", 0)
+            # Construct path to the last checkpoint directory
+            checkpoint_dir = os.path.join(cfg.output_dir, primitive_id, CHECKPOINTS_DIR, LAST_CHECKPOINT_LINK)
 
-        logging.info(f"Resuming from step {step}, interaction step {interaction_step}")
-        return step, interaction_step
+            logging.info(f"Loading {primitive_id} training state from {checkpoint_dir}")
+
+
+            # Use the utility function from train_utils which loads the optimizer state
+            step, optimizers, _ = utils_load_training_state(Path(checkpoint_dir), optimizers, None)
+
+            # Load interaction step separately from training_state.pt
+            training_state_path = os.path.join(checkpoint_dir, TRAINING_STATE_DIR, "training_state.pt")
+            interaction_step = 0
+            if os.path.exists(training_state_path):
+                training_state = torch.load(training_state_path, weights_only=False)  # nosec B614: Safe usage of torch.load
+                interaction_step = training_state.get("interaction_step", 0)
+
+            logging.info(f"Resuming {primitive_id} from step {step}, interaction step {interaction_step}")
+            steps[primitive_id] = step
+            interaction_steps[primitive_id] = interaction_step
 
     except Exception as e:
         logging.error(f"Failed to load training state: {e}")
         return None, None
+
+    return steps, interaction_steps
+
 
 
 def log_training_info(cfg: TrainPipelineConfig, policies: dict[str, nn.Module]) -> None:
@@ -1140,11 +1169,29 @@ def check_nan_in_transition(
 def push_all_actor_policies_to_queue(parameters_queue: Queue, policies: dict[str, nn.Module]):
     logging.debug("[LEARNER] Pushing all actor policies to the queue")
 
+    # ensure we never block: keep only the latest payload per push cycle
+    def _drain_one(q: Queue):
+        try:
+            _ = q.get_nowait()
+        except Exception:
+            pass
+
     for primitive_id, policy in policies.items():
-        state_dict = move_state_dict_to_device(policy.state_dict(), device="cpu")
-        state_dict["primitive_id"] = primitive_id
-        state_bytes = state_to_bytes(state_dict)
-        parameters_queue.put(state_bytes)
+        try:
+            # make room if the queue is full
+            if parameters_queue.full():
+                _drain_one(parameters_queue)
+
+            state_dict = move_state_dict_to_device(policy.state_dict(), device="cpu")
+            state_dict["primitive_id"] = primitive_id
+            state_bytes = state_to_bytes(state_dict)
+
+            # non-blocking put; if still full, skip this push
+            parameters_queue.put(state_bytes, block=False)
+        except queue.Full:
+            logging.warning("[LEARNER] parameters_queue full; skipping push for %s", primitive_id)
+        except Exception as e:
+            logging.error("[LEARNER] Failed to enqueue params for %s: %s", primitive_id, e)
 
 
 def process_interaction_message(
@@ -1187,9 +1234,16 @@ def process_transitions(
         shutdown_event: Event to signal shutdown
     """
     while not transition_queue.empty() and not shutdown_event.is_set():
-        transition_list = transition_queue.get()
-        transition_list = bytes_to_transitions(buffer=transition_list)
+        try:
+            transition_list = transition_queue.get(timeout=5.0)
+        except queue.Empty:
+            print("[LEARNER] No transition received for 5s.")
+            return
+        except Exception as e:
+            print(f"[LEARNER] Failed to receive transition: {e}")
+            return
 
+        transition_list = bytes_to_transitions(buffer=transition_list)
         for transition in transition_list:
             transition = move_transition_to_device(transition=transition, device=device)
 
@@ -1214,7 +1268,7 @@ def process_transitions(
 
 def process_interaction_messages(
     interaction_message_queue: Queue,
-    interaction_step_shift: int,
+    interaction_step_shift: dict[str, int],
     wandb_logger: WandBLogger | None,
     shutdown_event: any,
     last_messages: Optional[dict] = None
@@ -1230,11 +1284,19 @@ def process_interaction_messages(
     Returns:
         dict | None: The last interaction message processed, or None if none were processed
     """
-    if last_messages is not None:
+    if last_messages is None:
         last_messages = {}
 
     while not interaction_message_queue.empty() and not shutdown_event.is_set():
-        message = interaction_message_queue.get()
+        try:
+            message = interaction_message_queue.get(timeout=5.0)
+        except queue.Empty:
+            print("[LEARNER] No interaction messages received for 5s.")
+            return last_messages
+        except Exception as e:
+            print(f"[LEARNER] Failed to receive interaction message: {e}")
+            return last_messages
+
         primitive_id, last_message = process_interaction_message(
             message=message,
             interaction_step_shift=interaction_step_shift,

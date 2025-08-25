@@ -29,7 +29,6 @@ from lerobot.scripts.server.utils import Transition
 class BatchTransition(TypedDict):
     state: dict[str, torch.Tensor]
     action: torch.Tensor
-    q_value: torch.Tensor
     reward: torch.Tensor
     next_state: dict[str, torch.Tensor]
     done: torch.Tensor
@@ -145,7 +144,6 @@ class ReplayBuffer:
             for key, shape in state_shapes.items()
         }
         self.actions = torch.empty((self.capacity, *action_shape), device=self.storage_device)
-        self.q_values = torch.empty((self.capacity,), device=self.storage_device)
         self.rewards = torch.empty((self.capacity,), device=self.storage_device)
 
         if not self.optimize_memory:
@@ -191,7 +189,6 @@ class ReplayBuffer:
         self,
         state: dict[str, torch.Tensor],
         action: torch.Tensor,
-        q_value: float,
         reward: float,
         next_state: dict[str, torch.Tensor],
         done: bool,
@@ -212,7 +209,6 @@ class ReplayBuffer:
                 self.next_states[key][self.position].copy_(next_state[key].squeeze(dim=0))
 
         self.actions[self.position].copy_(action.squeeze(dim=0))
-        self.q_values[self.position] = q_value
         self.rewards[self.position] = reward
         self.dones[self.position] = done
         self.truncateds[self.position] = truncated
@@ -285,7 +281,6 @@ class ReplayBuffer:
 
         # Sample other tensors
         batch_actions = self.actions[idx].to(self.device)
-        batch_q_values = self.q_values[idx].to(self.device)
         batch_rewards = self.rewards[idx].to(self.device)
         batch_dones = self.dones[idx].to(self.device).float()
         batch_truncateds = self.truncateds[idx].to(self.device).float()
@@ -300,7 +295,6 @@ class ReplayBuffer:
         return BatchTransition(
             state=batch_state,
             action=batch_actions,
-            q_value=batch_q_values,
             reward=batch_rewards,
             next_state=batch_next_state,
             done=batch_dones,
@@ -494,7 +488,6 @@ class ReplayBuffer:
             replay_buffer.add(
                 state=data["state"],
                 action=action,
-                q_value=0.0,
                 reward=data["reward"],
                 next_state=data["next_state"],
                 done=data["done"],
@@ -531,9 +524,8 @@ class ReplayBuffer:
         act_info = guess_feature_info(t=sample_action, name="action")
         features["action"] = act_info
 
-        # Add "reward", "done" and the current "q_value"
+        # Add "reward", "done"
         features["next.reward"] = {"dtype": "float32", "shape": (1,)}
-        features["q_value"] = {"dtype": "float32", "shape": (1,)}
         features["next.done"] = {"dtype": "bool", "shape": (1,)}
 
         # Add state keys
@@ -581,7 +573,6 @@ class ReplayBuffer:
 
             # Fill action, reward, done
             frame_dict["action"] = self.actions[actual_idx].cpu()
-            frame_dict["q_value"] = torch.tensor([self.q_values[actual_idx]], dtype=torch.float32).cpu()
             frame_dict["next.reward"] = torch.tensor([self.rewards[actual_idx]], dtype=torch.float32).cpu()
             frame_dict["next.done"] = torch.tensor([self.dones[actual_idx]], dtype=torch.bool).cpu()
 
@@ -772,59 +763,74 @@ def guess_feature_info(t, name: str):
 
 
 def concatenate_batch_transitions(
-    left_batch_transitions: BatchTransition, right_batch_transition: BatchTransition
+    left_batch_transitions: BatchTransition,
+    right_batch_transition: BatchTransition,
 ) -> BatchTransition:
-    """NOTE: Be careful it change the left_batch_transitions in place"""
-    # Concatenate state fields
+    """
+    Concatenate two BatchTransition objects **in-place** and add / extend a
+    Boolean 'offline' column that marks whether each row originated from the
+    offline buffer (True) or from the online replay (False).
+    """
+    # ------------------------------------------
+    # Utility helpers
+    # ------------------------------------------
+    def _cat(a, b):
+        return torch.cat([a, b], dim=0)
+
+    # Infer a device we can use for freshly-created tensors
+    _device = left_batch_transitions["action"].device
+
+    # ------------------------------------------
+    # 1.  States, actions, rewards …
+    # ------------------------------------------
     left_batch_transitions["state"] = {
-        key: torch.cat(
-            [left_batch_transitions["state"][key], right_batch_transition["state"][key]],
-            dim=0,
-        )
-        for key in left_batch_transitions["state"]
+        k: _cat(left_batch_transitions["state"][k],
+                right_batch_transition["state"][k])
+        for k in left_batch_transitions["state"]
     }
 
-    # Concatenate basic fields
-    left_batch_transitions["action"] = torch.cat(
-        [left_batch_transitions["action"], right_batch_transition["action"]], dim=0
-    )
-    left_batch_transitions["reward"] = torch.cat(
-        [left_batch_transitions["reward"], right_batch_transition["reward"]], dim=0
-    )
+    left_batch_transitions["action"]  = _cat(left_batch_transitions["action"],  right_batch_transition["action"])
+    left_batch_transitions["reward"]  = _cat(left_batch_transitions["reward"],  right_batch_transition["reward"])
 
-    # Concatenate next_state fields
     left_batch_transitions["next_state"] = {
-        key: torch.cat(
-            [left_batch_transitions["next_state"][key], right_batch_transition["next_state"][key]],
-            dim=0,
-        )
-        for key in left_batch_transitions["next_state"]
+        k: _cat(left_batch_transitions["next_state"][k], right_batch_transition["next_state"][k])
+        for k in left_batch_transitions["next_state"]
     }
 
-    # Concatenate done and truncated fields
-    left_batch_transitions["done"] = torch.cat(
-        [left_batch_transitions["done"], right_batch_transition["done"]], dim=0
-    )
-    left_batch_transitions["truncated"] = torch.cat(
-        [left_batch_transitions["truncated"], right_batch_transition["truncated"]],
-        dim=0,
-    )
+    left_batch_transitions["done"] = _cat(left_batch_transitions["done"], right_batch_transition["done"])
+    left_batch_transitions["truncated"] = _cat(left_batch_transitions["truncated"], right_batch_transition["truncated"])
 
-    # Handle complementary_info
-    left_info = left_batch_transitions.get("complementary_info")
-    right_info = right_batch_transition.get("complementary_info")
-
-    # Only process if right_info exists
+    # ------------------------------------------
+    # 2.  Complementary info (if any)
+    # ------------------------------------------
+    left_info, right_info = (
+        left_batch_transitions.get("complementary_info"),
+        right_batch_transition.get("complementary_info"),
+    )
     if right_info is not None:
-        # Initialize left complementary_info if needed
         if left_info is None:
             left_batch_transitions["complementary_info"] = right_info
         else:
-            # Concatenate each field
-            for key in right_info:
-                if key in left_info:
-                    left_info[key] = torch.cat([left_info[key], right_info[key]], dim=0)
-                else:
-                    left_info[key] = right_info[key]
+            for k in right_info:
+                left_info[k] = _cat(left_info[k], right_info[k]) if k in left_info else right_info[k]
+
+    # ------------------------------------------
+    # 3.  NEW: offline / online flag
+    # ------------------------------------------
+    n_left  = left_batch_transitions["action"].shape[0]        # after cat → includes previous flag length
+    n_right = right_batch_transition["action"].shape[0]
+
+    # Build flag tensors.  False = online (left), True = offline (right)
+    left_flags  = torch.zeros(n_left - n_right, dtype=torch.bool, device=_device)  # old online data
+    right_flags = torch.ones(n_right,          dtype=torch.bool, device=_device)   # newly-added offline data
+
+    if "offline" in left_batch_transitions:
+        # left_flags already stored from earlier calls → just append the new right_flags
+        left_batch_transitions["offline"] = _cat(
+            left_batch_transitions["offline"], right_flags)
+    else:
+        # first time the flag is created
+        left_batch_transitions["offline"] = _cat(left_flags, right_flags)
 
     return left_batch_transitions
+
