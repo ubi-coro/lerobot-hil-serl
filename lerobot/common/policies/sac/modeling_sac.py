@@ -83,7 +83,7 @@ class SACPolicy(
                 p
                 for n, p in self.noise_net.named_parameters()
                 if not n.startswith("encoder") or not self.shared_encoder
-            ],
+            ]
         return optim_params
 
     def reset(self):
@@ -91,7 +91,7 @@ class SACPolicy(
         pass
 
     @torch.no_grad()
-    def select_action(self, batch: dict[str, Tensor], step: int = 0, deterministic: bool = True) -> tuple[Tensor, dict]:
+    def select_action(self, batch: dict[str, Tensor], step: int = 0, deterministic: bool = False, use_dgn: bool = True) -> tuple[Tensor, dict]:
         """Select action for inference/evaluation"""
         observation_features = None
         if self.shared_encoder:
@@ -100,9 +100,9 @@ class SACPolicy(
 
         sample_action, _, mean_action = self.actor(batch, observation_features)
 
-        if deterministic:
-            #action = mean_action
-            action = sample_action  # in line with hil-serl argmax, only remove DGN
+        if deterministic or use_dgn:
+            action = mean_action
+            # action = sample_action  # would bn in line with hil-serl argmax
         else:
             action = sample_action
 
@@ -114,7 +114,7 @@ class SACPolicy(
             action = torch.cat([action, discrete_action], dim=-1)
 
         inference_infos = {}
-        if self.config.noise_config.enable and not deterministic:
+        if self.config.noise_config.enable and use_dgn and not deterministic:
             action, _, noise_scale = self.add_structured_noise(action, batch, observation_features)
             inference_infos["Noise Scale"] = noise_scale
 
@@ -440,21 +440,29 @@ class SACPolicy(
         observation_features: Optional[Tensor] = None,
     ) -> tuple[Tensor, float]:
         with torch.no_grad():
-            mean_action, _ = self.select_action(observations, step=0, deterministic=False)
+            mean_actions, _ = self.select_action(observations, step=0, deterministic=True)
 
-        actions_final, noise_dist, _ = self.add_structured_noise(mean_action, observations, observation_features, step=0)
+        noised_actions, noise_dist, _ = self.add_structured_noise(mean_actions, observations, observation_features, step=0)
+
+        # noise_dist is in normalized action-space
+        noised_actions = self.normalize_targets({"action": noised_actions})["action"]
+        actions = self.normalize_targets({"action": actions})["action"]
+        mean_actions = self.normalize_targets({"action": mean_actions})["action"]
+
+        # score residuals
+        residual_actions = actions - mean_actions
+        noise_loss = -noise_dist.log_prob(residual_actions).mean()
 
         # compute improvement
-        dist_to_mean = torch.norm(actions - mean_action, dim=1)
-        dist_to_sampled = torch.norm(actions - actions_final, dim=1)
+        dist_to_mean = torch.norm(actions - mean_actions, dim=1)
+        dist_to_sampled = torch.norm(actions - noised_actions, dim=1)
         dgn_improvement_ratio = (dist_to_sampled < dist_to_mean).float().mean().item()
 
-        noise_loss = -noise_dist.log_prob(actions).mean()
         return noise_loss, dgn_improvement_ratio
 
-    def add_structured_noise(self, actions: Tensor, observations: dict[str, Tensor] , observation_features: Tensor | None = None, step: int = 0):
-        batch_size = actions.shape[0]
-        action_dim = actions.shape[1]
+    def add_structured_noise(self, mean_actions: Tensor, observations: dict[str, Tensor] , observation_features: Tensor | None = None, step: int = 0):
+        batch_size = mean_actions.shape[0]
+        action_dim = mean_actions.shape[1]
 
         noise_params = self.noise_net.mean_layer(
             self.noise_net.network(
@@ -468,13 +476,13 @@ class SACPolicy(
 
         if self.config.noise_config.predict_residual:
             cov_cholemsky = noise_params[..., action_dim:]
-            mean = noise_params[..., :action_dim]
+            residual_means = noise_params[..., :action_dim]
         else:
             cov_cholemsky = noise_params
-            mean = torch.zeros_like(actions)
+            residual_means = torch.zeros_like(mean_actions)
 
         # Create lower triangular matrix
-        L = torch.zeros((batch_size, action_dim, action_dim), device=actions.device)
+        L = torch.zeros((batch_size, action_dim, action_dim), device=mean_actions.device)
 
         tril_indices = torch.tril_indices(row=action_dim, col=action_dim, offset=0)
         L[:, tril_indices[0], tril_indices[1]] = cov_cholemsky
@@ -489,15 +497,15 @@ class SACPolicy(
         cov = torch.bmm(L, L.transpose(1, 2))
 
         # sample from multivariate normal
-        noise_dist = torch.distributions.MultivariateNormal(mean, covariance_matrix=cov)
+        noise_dist = torch.distributions.MultivariateNormal(residual_means, covariance_matrix=cov)
         noise = noise_dist.rsample()
 
         # downscale noise
-        eps = self.config.noise_config.initial_eps * np.exp(-step /  self.config.noise_config.tau)
+        eps = self.config.noise_config.initial_eps * np.exp(-step / self.config.noise_config.tau)
         noise = eps * noise
 
         # add actions and clamp accordingly
-        action_normalized = self.normalize_targets({"action": actions})["action"]
+        action_normalized = self.normalize_targets({"action": mean_actions})["action"]
         action_normalized = action_normalized + noise
         action_normalized = torch.clamp(action_normalized, -1, 1)
 
