@@ -1,6 +1,5 @@
-import copy
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Sequence, Callable
+from typing import Optional, Dict, Callable
 
 import draccus
 import numpy as np
@@ -12,20 +11,21 @@ from lerobot.common.envs.wrapper.hilserl import (
     ImageCropResizeWrapper,
     TorchActionWrapper,
     BatchCompatibleWrapper,
-    TimeLimitWrapper
+    TimeLimitWrapper, FrameStackStateWrapper
 )
 from lerobot.common.envs.wrapper.reward import AxisDistanceRewardWrapper
 from lerobot.common.envs.wrapper.spacemouse import SpaceMouseInterventionWrapper
-from lerobot.common.envs.wrapper.tff import StaticTaskFrameActionWrapper
+from lerobot.common.envs.wrapper.tff import StaticTaskFrameActionWrapper, StaticTaskFrameResetWrapper
 from lerobot.common.policies.reward_model.configuration_classifier import RewardClassifierConfig
 from lerobot.common.policies.sac.configuration_sac import SACConfig, DataGuidedNoiseConfig
-from lerobot.common.robot_devices.cameras.configs import IntelRealSenseCameraConfig
+from lerobot.common.robot_devices.cameras.configs import IntelRealSenseCameraConfig, OpenCVCameraConfig
 from lerobot.common.robot_devices.motors.configs import URArmConfig
-from lerobot.common.robot_devices.motors.rtde_tff_controller import TaskFrameCommand, AxisMode
+from lerobot.common.robot_devices.motors.rtde_tff_controller import TaskFrameCommand, AxisMode, RTDETFFController
 from lerobot.common.robot_devices.robots.configs import URConfig
 from lerobot.common.robot_devices.robots.ur import UR
 from lerobot.common.robot_devices.robots.utils import make_robot_from_config
 from lerobot.configs.types import FeatureType, PolicyFeature
+from lerobot.experiments.han_insertion.wrapper import TrapezoidResetWrapper
 from lerobot.scripts.server.mp_nets import (
     MPNetConfig,
     MPConfig,
@@ -34,15 +34,17 @@ from lerobot.scripts.server.mp_nets import (
     AMPObsWrapper, PolicyConfig
 )
 
+NUM_FRAME_STACKS = 2
+
 
 @dataclass
 class InsertionPrimitive(MPConfig):
     # MP parameters
     is_terminal: bool = False
     tff: Dict[str, TaskFrameCommand] = field(default_factory=lambda: {
-            "main": TaskFrameCommand(
-                T_WF=[0.04659, -0.33303, 0.120, 0.0, float(np.pi), 0.0],
-                target=[0.0, 0.0, 7.0, 0.0, -0.0, 0.0],
+            "main": TaskFrameCommand(  # z_succ: 0.10340
+                T_WF=[0.03383, -0.25478, 0.138, 0.0, float(np.pi), 0.0],
+                target=[0.0, 0.0, 5.0, 0.0, -0.0, 0.0],
                 mode=2 * [AxisMode.PURE_VEL] + [AxisMode.FORCE] + 2 * [AxisMode.POS] + [AxisMode.PURE_VEL],
                 kp=[2500, 2500, 2500, 100, 100, 100],
                 kd=[960, 960, 320, 6, 6, 6]
@@ -50,36 +52,46 @@ class InsertionPrimitive(MPConfig):
         })
 
     # Reward parameters
+    sparse_reward: bool = False
     reward_axis_targets: Optional[Dict[str, float]] = field(default_factory=lambda: {
-        "main": 0.015  # -> max_depth += 5%: 0.01575
+        "main": 0.032  # -> max_depth += 5%: 0.01575
     })
     reward_axis: int = 2  # z
     reward_scale: float = 1.0
     reward_clip: Optional[tuple[float, float]] = None
-    reward_terminate_on_success: bool = False
+    reward_terminate_on_success: bool = True
 
     policy: PolicyConfig = PolicyConfig(
         indices= {"main": [1, 1, 0, 0, 0, 1]},
         config=SACConfig(
-            online_steps=10000000,
-            online_step_before_learning=60,
-            online_buffer_capacity=25000,
+            online_steps=int(10e7),
+            async_prefetch=True,
+            use_amp=False,
+            training_starts=300,
+            random_steps=0,
+            online_buffer_capacity=30000,
             offline_buffer_capacity=10000,
             camera_number=1,
-            utd_ratio=2,
-            storage_device="cuda",
+            cta_ratio=3,
             shared_encoder=True,
-            num_critics=3,
+            num_critics=2,
             target_entropy=-1.5,
+            critic_target_update_weight=0.003,
             use_backup_entropy=False,
-            freeze_vision_encoder=False,
-            noise_config=DataGuidedNoiseConfig(enable=False),
+            freeze_vision_encoder=True,
+            noise_config=DataGuidedNoiseConfig(
+                enable=False,
+                predict_residual=True,
+                tau=8000,
+                update_freq=30,
+                update_steps=10
+            ),
             dataset_stats={
                 "observation.image.main": {
                     "mean": [0.485, 0.456, 0.406],
                     "std": [0.229, 0.224, 0.225],
                 },
-                # [f_x, f_y, f_z, a_0, a_1, a_2, (t_0, t_1, t_2,) (p_x, p_y,) p_z]
+                # [v_x-c, f_x-z, (f_a-c,) (*a), (p_x, p_y,) p_z]
                 # f_xy: 2 * contact_desired_wrench -> [3.0, 3.0, 0, 0, 0, 0.4],
                 # f_z: 2 * tff["main].target[2]
                 # a: spacemouse_action_scale
@@ -87,8 +99,16 @@ class InsertionPrimitive(MPConfig):
                 # t_z: 2 * contact_desired_wrench -> [3.0, 3.0, 0, 0, 0, 0.4]
                 # p workspace
                 "observation.state": {
-                    "min": [-6.0, -6.0, -13.0, -0.02, -0.02, -0.75, -2.0, -2.0, -0.8, -0.005],
-                    "max": [6.0,  6.0,  3.0,   0.02,   0.02,  0.75,  2.0,  2.0,  0.8,  0.01575]
+                    "min": [-0.03, -0.03, -0.03, -0.5, -0.5, -0.5,  # v_x-c
+                            -6.0, -6.0, -8.0, # f_x-z
+                            -2.0, -2.0, -0.8, # f_a-c
+                            -0.005,  # p_z
+                            ] * NUM_FRAME_STACKS,
+                    "max": [0.03, 0.03, 0.03, 0.5, 0.5, 0.5,
+                            6.0, 6.0, 3.0,
+                            2.0, 2.0, 0.8,
+                            1.1 * 0.032,
+                            ] * NUM_FRAME_STACKS
                 },
                 "action": {
                     "min": [-0.02, -0.02, -0.75],
@@ -100,18 +120,21 @@ class InsertionPrimitive(MPConfig):
     )
 
     wrapper: WrapperConfig = WrapperConfig(
-        control_time_s=7.0,
-        crop_params_dict={"observation.image.main": (150, 260, 150, 170)},
+        stack_frames=NUM_FRAME_STACKS if NUM_FRAME_STACKS > 1 else None,
+        control_time_s=9.0,
+        crop_params_dict={
+            "observation.image.main": (170, 260, 150, 180),
+        },
         crop_resize_size=(128, 128),
         spacemouse_devices={"main": "SpaceMouse Compact"},
-        spacemouse_action_scale={"main": [-0.02, 0.02, 0, 0, 0, -0.75]},
+        spacemouse_action_scale={"main": [0.02, -0.02, 0, 0, 0, -0.75]},
         spacemouse_intercept_with_button=True
     )
 
     features: dict[str, PolicyFeature] = field(default_factory=lambda: {
         "action": PolicyFeature(type=FeatureType.ACTION, shape=(0,)),
         "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(0,)),
-        "observation.image.main": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128))
+        "observation.image.main": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)),
     })
     features_map: dict[str, str] = field(default_factory=lambda: {
         "action": ACTION,
@@ -162,7 +185,8 @@ class InsertionPrimitive(MPConfig):
                 scale=self.reward_scale,
                 clip=self.reward_clip,
                 terminate_on_success=self.reward_terminate_on_success,
-                normalization_range=[0.0, self.reward_axis_targets["main"]]
+                normalization_range=[0.0, self.reward_axis_targets["main"]],
+                sparse=self.sparse_reward
             )
 
         env = ConvertToLeRobotObservation(env, device=mp_net.device)
@@ -181,6 +205,9 @@ class InsertionPrimitive(MPConfig):
             device=mp_net.device
         )
 
+        if self.wrapper.stack_frames is not None:
+            env = FrameStackStateWrapper(env, n=self.wrapper.stack_frames)
+
         env = BatchCompatibleWrapper(env=env)
         env = TorchActionWrapper(env, device=mp_net.device)
 
@@ -194,15 +221,16 @@ class InsertionPrimitive(MPConfig):
     def start_insertion(self, obs):
         state = obs["observation.state"].cpu().numpy()
         curr_z = state[0, -1]
-        curr_force = abs(state[0, 2])
+        curr_force = abs(state[0, -5])
         max_z = self.reward_axis_targets["main"]
         max_force = self.tff["main"].target[2]
         return (curr_force > max_force) or (curr_z > max_z)
 
 
-@MPNetConfig.register_subclass("ur3_han_insertion_3d_printed")
+
+
 @dataclass
-class UR3_HAN_Insertion_3d_Printed(MPNetConfig):
+class HAN_Insertion(MPNetConfig):
     start_primitive: str = "press"
     primitives: dict[str, MPConfig] = field(default_factory=lambda: {
         "press": MPConfig(
@@ -214,26 +242,30 @@ class UR3_HAN_Insertion_3d_Printed(MPNetConfig):
         ),
         "terminal": MPConfig(is_terminal=True),
     })
+    preload_envs: bool = True
 
     display_cameras: bool = False
     fps: int = 10
     resume: bool = False
-    repo_id: str = "jannick-st/ur3-han-insertion-3d-printed-offline-demos"
-    dataset_root: str = "/home/jannick/data/jannick-st/ur3-han-insertion-3d-printed/offline-demos"
+    root: str = "/home/jannick/data/paper/hil-amp/reward_dense_cam_toWindow_terminate_early_init_large_demos_itv_0"
     task: str = ""
-    num_episodes: int = 10
+    num_episodes: int = 20
     episode: int = 0
     device: str = "cuda"
-    storage_device: str = "cuda"
+    storage_device: str = "cpu"
     push_to_hub: bool = False
     seed: int = 42
 
     # Insertion parameters
-    xy_offset_std_mm: float = 1.5
-    c_offset_std_rad: float = 0.3
+    x_offset_mean_mm: float = 15.0
+    x_offset_std_mm: float = 5.0
+    y_offset_std_mm: float = 5.0
+    c_offset_max_std_rad: float = 0.4
+    c_offset_min_std_rad: float = 0.4
     use_xy_position: bool = False
     use_torque: bool = True
     use_vision: bool = True
+    use_prev_action: bool = False
 
     robot: URConfig = URConfig(
         follower_arms={
@@ -247,12 +279,13 @@ class UR3_HAN_Insertion_3d_Printed(MPNetConfig):
                 get_max_k=10,
                 use_gripper=False,
                 speed_limits=[15.0, 15.0, 15.0, 0.40, 0.40, 1.0],
-                wrench_limits=[30.0, 30.0, 30.0, 15.0, 15.0, 5.0],
+                wrench_limits=[30.0, 30.0, 30.0, 15.0, 15.0, 10.0],
                 enable_contact_aware_force_scaling=[True, True, False, False, False, True],
-                contact_desired_wrench=[3.0, 3.0, 0, 0, 0, 0.4],
-                contact_limit_scale_min=[0.09, 0.09, 0, 0, 0, 0.06],
+                contact_desired_wrench=[4.0, 4.0, 0, 0, 0, 0.5],
+                contact_limit_scale_min=[0.09, 0.09, 0, 0, 0, 0.04],
                 debug=False,
-                debug_axis=0
+                debug_axis=0,
+                mock=False
             )
         },
         cameras={
@@ -265,13 +298,16 @@ class UR3_HAN_Insertion_3d_Printed(MPNetConfig):
         }
     )
 
+    # reset is unique for this experiment, because we initialize from a
+    # parametric "uniform-trapezoid" distribution to avoid catastrophic
+    # initialization states
     reset: ResetConfig = ResetConfig(
         pos={
             "main": [0.0] * 6  # origin in task frame
         },
-        noise_dist="normal",
+        noise_dist="uniform",
         noise_std={
-            "main": [0] * 6  # set in __post_init__
+            "main": [0] * 6  # calculated in __post_init__
         },
         safe_reset=True
     )
@@ -279,24 +315,32 @@ class UR3_HAN_Insertion_3d_Printed(MPNetConfig):
     def __post_init__(self):
         # build initial pos ranges and pose limits from reset pose and offsets
         reset_pos = np.array(self.reset.pos["main"])
+
         max_pose = reset_pos.copy()
         min_pose = reset_pos.copy()
 
         if self.reset.noise_dist == "normal":
-            xy_limit = 3 * self.xy_offset_std_mm / 1000.0
-            c_limit = 3 * self.c_offset_std_rad
+            x_limit = 3 * self.x_offset_std_mm / 1000.0
+            y_limit = 3 * self.y_offset_std_mm / 1000.0
+            c_limit = 3 * self.c_offset_max_std_rad
         else:  # self.wrapper.noise_dist = "uniform"
-            xy_limit = np.sqrt(12) / 2000 * self.xy_offset_std_mm
-            c_limit = np.sqrt(12) / 2 * self.c_offset_std_rad
+            x_limit = np.sqrt(12) / 2000 * self.x_offset_std_mm
+            y_limit = np.sqrt(12) / 2000 * self.y_offset_std_mm
+            c_limit = np.sqrt(12) / 2 * self.c_offset_max_std_rad
 
         # x, y axes
-        max_pose[:2] += xy_limit
-        min_pose[:2] -= xy_limit
+        max_pose[0] += x_limit
+        min_pose[0] -= x_limit
+        max_pose[1] += y_limit
+        min_pose[1] -= y_limit
+
+        min_pose[0] = min([min_pose[0] + self.x_offset_mean_mm / 1000.0, 0.0])
+        max_pose[0] += self.x_offset_mean_mm / 1000.0
 
         # z axis
         z_range = self.primitives["insert"].reward_axis_targets["main"] - reset_pos[2]
         max_pose[2] = self.primitives["insert"].reward_axis_targets["main"] + z_range * 0.05
-        min_pose[2] = reset_pos[2] - z_range * 0.05
+        min_pose[2] = reset_pos[2] - z_range * 0.1
 
         # a, b axes
         max_pose[3:5] += 1e-3
@@ -307,9 +351,9 @@ class UR3_HAN_Insertion_3d_Printed(MPNetConfig):
         min_pose[5] -= c_limit
 
         # build noise level from pose limits
-        self.reset.noise_std["main"][0] = self.xy_offset_std_mm / 1000.0
-        self.reset.noise_std["main"][1] = self.xy_offset_std_mm / 1000.0
-        self.reset.noise_std["main"][-1] = self.c_offset_std_rad
+        self.reset.noise_std["main"][0] = self.x_offset_std_mm / 1000.0
+        self.reset.noise_std["main"][1] = self.y_offset_std_mm / 1000.0
+        self.reset.noise_std["main"][-1] = self.c_offset_max_std_rad
 
         # store max poses as list
         for primitive in self.primitives.values():
@@ -324,17 +368,18 @@ class UR3_HAN_Insertion_3d_Printed(MPNetConfig):
         action_dim = sum(p.policy.indices["main"])
         p.features["action"].shape = (action_dim,)
 
-        state_dim = 4 + action_dim
+        state_dim = 10
+        if self.use_prev_action:
+            state_dim += action_dim
         if self.use_xy_position:
             state_dim += 2
         if self.use_torque:
             state_dim += 3
+        state_dim *= NUM_FRAME_STACKS
         p.features["observation.state"].shape = (state_dim,)
 
         # handle vision
         if not self.use_vision:
-            self.repo_id += "-no-vision"
-            self.dataset_root += "-no-vision"
             self.robot.cameras = {}
             p.wrapper.crop_params_dict = None
             del p.features["observation.image.main"]
@@ -353,9 +398,19 @@ class UR3_HAN_Insertion_3d_Printed(MPNetConfig):
             "terminal_false": lambda obs:False
         }
 
+    @property
+    def reset_wrapper(self):
+        wrapper_cls = TrapezoidResetWrapper
+        wrapper_kwargs = {
+            "c_offset_min_std_rad": self.c_offset_min_std_rad,
+            "c_offset_max_std_rad": self.c_offset_max_std_rad,
+            "x_offset_mean_mm": self.x_offset_mean_mm
+        }
+        return wrapper_cls, wrapper_kwargs
+
 
 if __name__ == "__main__":
-    cfg = UR3_HAN_Insertion_3d_Printed()
+    cfg = HAN_Insertion()
     cfg.robot.follower_arms["main"].verbose = True
     cfg.__post_init__()
 

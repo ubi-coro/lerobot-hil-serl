@@ -180,6 +180,18 @@ class ReplayBuffer:
                 else:
                     raise ValueError(f"Unsupported type {type(value)} for complementary_info[{key}]")
 
+        if self.storage_device == "cpu":
+            for k in self.states: self.states[k] = self.states[k].pin_memory()
+            if not self.optimize_memory:
+                for k in self.next_states: self.next_states[k] = self.next_states[k].pin_memory()
+            self.actions = self.actions.pin_memory()
+            self.rewards = self.rewards.pin_memory()
+            self.dones = self.dones.pin_memory()
+            self.truncateds = self.truncateds.pin_memory()
+            if self.has_complementary_info:
+                for k in self.complementary_info:
+                    self.complementary_info[k] = self.complementary_info[k].pin_memory()
+
         self.initialized = True
 
     def __len__(self):
@@ -247,15 +259,15 @@ class ReplayBuffer:
 
         # First pass: load all state tensors to target device
         for key in self.states:
-            batch_state[key] = self.states[key][idx].to(self.device)
+            batch_state[key] = self.states[key][idx].to(self.device, non_blocking=True)
 
             if not self.optimize_memory:
                 # Standard approach - load next_states directly
-                batch_next_state[key] = self.next_states[key][idx].to(self.device)
+                batch_next_state[key] = self.next_states[key][idx].to(self.device, non_blocking=True)
             else:
                 # Memory-optimized approach - get next_state from the next index
                 next_idx = (idx + 1) % self.capacity
-                batch_next_state[key] = self.states[key][next_idx].to(self.device)
+                batch_next_state[key] = self.states[key][next_idx].to(self.device, non_blocking=True)
 
         # Apply image augmentation in a batched way if needed
         if self.use_drq and image_keys:
@@ -280,17 +292,17 @@ class ReplayBuffer:
                 batch_state[key] = augmented_images[i * batch_size: (i + 1) * batch_size]
 
         # Sample other tensors
-        batch_actions = self.actions[idx].to(self.device)
-        batch_rewards = self.rewards[idx].to(self.device)
-        batch_dones = self.dones[idx].to(self.device).float()
-        batch_truncateds = self.truncateds[idx].to(self.device).float()
+        batch_actions = self.actions[idx].to(self.device, non_blocking=True)
+        batch_rewards = self.rewards[idx].to(self.device, non_blocking=True)
+        batch_dones = self.dones[idx].to(self.device, non_blocking=True).float()
+        batch_truncateds = self.truncateds[idx].to(self.device, non_blocking=True).float()
 
         # Sample complementary_info if available
         batch_complementary_info = None
         if self.has_complementary_info:
             batch_complementary_info = {}
             for key in self.complementary_info_keys:
-                batch_complementary_info[key] = self.complementary_info[key][idx].to(self.device)
+                batch_complementary_info[key] = self.complementary_info[key][idx].to(self.device, non_blocking=True)
 
         return BatchTransition(
             state=batch_state,

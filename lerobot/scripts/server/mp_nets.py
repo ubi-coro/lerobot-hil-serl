@@ -1,4 +1,6 @@
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal, Sequence, Callable, Optional, Dict, Tuple, Any
 
 import draccus
@@ -28,38 +30,47 @@ from lerobot.configs.types import PolicyFeature, FeatureType
 class AMPObsWrapper(gymnasium.Wrapper):
     def __init__(self,
                  env,
+                 use_prev_action: bool = False,
                  use_xy_position: bool = False,
                  use_torque: bool = False,
                  device: str = "cuda"):
         super().__init__(env)
         self.device = device
         self.prev_action = np.zeros(env.action_space.shape, dtype=np.float32)
+        self.use_prev_action = use_prev_action
         self.use_xy_position = use_xy_position
         self.use_torque = use_torque
 
-        num_actions = 4 + env.action_space.shape[0]
+        state_dim = 10
+        if self.use_prev_action:
+            state_dim += env.action_space.shape[0]
         if self.use_xy_position:
-            num_actions += 2
+            state_dim += 2
         if self.use_torque:
-            num_actions += 3
+            state_dim += 3
 
         self.observation_space = spaces.Dict({
             "observation.state": spaces.Box(
-                low=np.full(num_actions, -np.inf),
-                high=np.full(num_actions, np.inf),
-                shape=(num_actions, ),
-                dtype=np.uint8),
+                low=np.full(state_dim, -1),
+                high=np.full(state_dim, 1),
+                shape=(state_dim, ),
+                dtype=np.float32),
             **{key: value for key, value in env.observation_space.items() if "image" in key}
         })
 
     def _obs(self, obs):
-        # [f_x, f_y, f_z, a_0, a_1, a_2, (t_0, t_1, t_2,) (p_x, p_y,) p_z]
+        # [v_x-c, f_x-z, (f_a-c,) (*a), (p_x, p_y,) p_z]
 
         new_state = [
+            obs["observation.main_eef_speed"][0],
+            obs["observation.main_eef_speed"][1],
+            obs["observation.main_eef_speed"][2],
+            obs["observation.main_eef_speed"][3],
+            obs["observation.main_eef_speed"][4],
+            obs["observation.main_eef_speed"][5],
             obs["observation.main_eef_wrench"][0],
             obs["observation.main_eef_wrench"][1],
             obs["observation.main_eef_wrench"][2],
-            *self.prev_action
         ]
 
         if self.use_torque:
@@ -69,17 +80,24 @@ class AMPObsWrapper(gymnasium.Wrapper):
                 obs["observation.main_eef_wrench"][5]
             ])
 
+        if self.use_prev_action:
+            new_state.extend(self.prev_action)
+
         if self.use_xy_position:
             new_state.extend([
                 obs["observation.main_eef_pos"][0],
                 obs["observation.main_eef_pos"][1],
             ])
+
         new_state.append(obs["observation.main_eef_pos"][2])
 
-        return {
+        new_obs = {
             "observation.state": torch.tensor(new_state).to(device=self.device),
             **{key: value for key, value in obs.items() if "image" in key}
         }
+        obs_info = {"observation.main_eef_pos": obs["observation.main_eef_pos"]}
+
+        return new_obs, obs_info
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
@@ -89,15 +107,16 @@ class AMPObsWrapper(gymnasium.Wrapper):
         else:
             self.prev_action = action
 
-        new_state = self._obs(obs)
-
-        return new_state, reward, terminated, truncated, info
+        new_obs, obs_info = self._obs(obs)
+        info.update(obs_info)
+        return new_obs, reward, terminated, truncated, info
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         self.prev_action[:] = 0.0
-        obs = self._obs(obs)
-        return obs, info
+        new_obs, obs_info = self._obs(obs)
+        info.update(obs_info)
+        return new_obs, info
 
 @dataclass
 class PolicyConfig:
@@ -109,6 +128,9 @@ class PolicyConfig:
 
 @dataclass
 class WrapperConfig:
+    # frame stacking
+    stack_frames: Optional[int] = 2
+
     # Time-limit
     control_time_s: Optional[float] = None
 
@@ -287,20 +309,21 @@ class MPNetConfig(draccus.ChoiceRegistry):
     start_primitive: str
     primitives: dict[str, MPConfig]
     reset: ResetConfig = ResetConfig()
-    preload_envs: bool = False
+    root: str = None
 
-    robot: URConfig = URConfig()
-    display_cameras: bool = False
     fps: int = 10
     resume: bool = False
+    preload_envs: bool = False
     repo_id: Optional[str] = None
-    dataset_root: Optional[str] = None
+    robot: URConfig = URConfig()
+    display_cameras: bool = False
+
     task: str = ""
     num_episodes: int = 10
     episode: int = 0
     device: str = "cuda"
     storage_device: str = "cpu"
-    push_to_hub: bool = True
+    push_to_hub: bool = False
     seed: int = 42
 
     @property
@@ -311,12 +334,19 @@ class MPNetConfig(draccus.ChoiceRegistry):
     def condition_registry(self) -> dict[str, Callable | RewardClassifierConfig]:
         return {}
 
+    @property
+    def reset_wrapper(self):
+        return None, {}
+
     def __post_init__(self):
         assert self.start_primitive in self.primitives
 
         # give each primitive unique id to make indexing with primitives cleaner
         for _id, p in self.primitives.items():
             setattr(p, "id", _id)
+
+        # repo_id is set automatically
+        self.repo_id = "/".join(Path(self.root).parts[-2:])
 
     def check_transitions(
         self,
@@ -338,12 +368,22 @@ class MPNetConfig(draccus.ChoiceRegistry):
         return current_primitive
 
 
-    def make_policies(self):
+    def make_policies(self, resume: bool = False, path: Optional[str] = None):
+        from learner_server_mpn import CHECKPOINTS_DIR, LAST_CHECKPOINT_LINK
+
         policies = {}
-        for _id, p in self.primitives.items():
+        for name, p in self.primitives.items():
             if p.is_adaptive:
-                policies[_id] = make_policy(cfg=p.policy.config, env_cfg=p)
-                policies[_id] = policies[_id].eval()
+                if resume:
+                    p.policy.config.pretrained_path = os.path.join(
+                        path,
+                        name,
+                        CHECKPOINTS_DIR,
+                        LAST_CHECKPOINT_LINK,
+                        "pretrained_model"
+                    )
+                policies[name] = make_policy(cfg=p.policy.config, env_cfg=p)
+                policies[name] = policies[name].eval()
         return policies
 
 
@@ -360,8 +400,15 @@ class MPNetConfig(draccus.ChoiceRegistry):
 
 
 def reset_mp_net(env, cfg: MPNetConfig):
-    reset_env = StaticTaskFrameResetWrapper(
-        env,
+    wrapper_cls, wrapper_kwargs = cfg.reset_wrapper
+
+    if wrapper_cls is None:
+        reset_wrapper_cls = StaticTaskFrameResetWrapper
+    else:
+        reset_wrapper_cls = wrapper_cls
+
+    reset_env = reset_wrapper_cls(
+        env=env,
         static_tffs=cfg.primitives[cfg.start_primitive].tff,
         reset_pos=cfg.reset.pos,
         reset_kp=cfg.reset.kp,
@@ -370,7 +417,8 @@ def reset_mp_net(env, cfg: MPNetConfig):
         noise_dist=cfg.reset.noise_dist,
         safe_reset=cfg.reset.safe_reset,
         threshold=cfg.reset.threshold,
-        timeout=cfg.reset.timeout
+        timeout=cfg.reset.timeout,
+        **wrapper_kwargs
     )
 
     obs, info = reset_env.reset()

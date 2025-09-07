@@ -1,12 +1,16 @@
 import logging
 import time
-from typing import Annotated, Dict, Sequence, Tuple
+from collections import deque
+from typing import Annotated, Dict, Sequence, Tuple, Any
 
 import gymnasium as gym
 import numpy as np
 import torch
 import torchvision.transforms.functional as F  # noqa: N812
+from gymnasium import spaces
+from gymnasium.core import ObsType, WrapperObsType
 from scipy.spatial.transform import Rotation as R
+from torch import Tensor
 
 from lerobot.common.robot_devices.control_utils import (
     busy_wait,
@@ -418,3 +422,128 @@ class StabilizingActionMaskingWrapper(gym.ActionWrapper):
             full_action[ax] = action[ax]
 
         return self.env.step((full_action, telop))
+
+
+class FrameStackStateWrapper(gym.ObservationWrapper):
+    """
+    Stack last `n` frames for all observation keys whose name contains 'state' (case-insensitive),
+    flatten them to 1-D, and return as torch.Tensors on the same device/dtype as the source values.
+
+    - Nested Dict observations supported.
+    - Non-'state' keys are passed through unchanged.
+    - On reset, buffers are prefilled with the first observation (no zeros).
+    """
+
+    def __init__(self, env, n: int = 4):
+        super().__init__(env)
+        assert n >= 1
+        self.n = n
+        # per fully-qualified key: deque[Tensor], device, dtype, flat_dim
+        self._buffers: Dict[Tuple[str, ...], deque] = {}
+        self._meta: Dict[Tuple[str, ...], Dict[str, Any]] = {}
+
+        # Build observation space: make state-like Boxes flat with length n * prod
+        self.observation_space = self._build_obs_space(env.observation_space)
+
+    # ---------- space helpers ----------
+    def _build_obs_space(self, space):
+        if isinstance(space, spaces.Dict):
+            out = {}
+            for k, v in space.spaces.items():
+                if "state" in k.lower():
+                    if isinstance(v, spaces.Box):
+                        # Flatten & replicate bounds n times
+                        low = np.ravel(v.low)
+                        high = np.ravel(v.high)
+                        low = np.tile(low, self.n)
+                        high = np.tile(high, self.n)
+                        out[k] = spaces.Box(low=low, high=high, dtype=v.dtype)
+                    elif isinstance(v, spaces.Dict):
+                        out[k] = self._build_obs_space(v)
+                    else:
+                        out[k] = v  # leave as-is if it's not a Box (rare)
+                else:
+                    out[k] = self._build_obs_space(v) if isinstance(v, spaces.Dict) else v
+            return spaces.Dict(out)
+        return space
+
+    # ---------- device/dtype-safe conversion ----------
+    @staticmethod
+    def _as_tensor_like(x, ref: Tensor | None) -> Tensor:
+        """
+        Convert x (np.ndarray or Tensor) to a Tensor matching device/dtype of ref if provided;
+        otherwise keep device of x if it's already a tensor, else default to CPU float32.
+        """
+        if isinstance(x, Tensor):
+            return x  # already a tensor; keep its device/dtype
+        t = torch.from_numpy(np.asarray(x))
+        if ref is not None:
+            return t.to(device=ref.device, dtype=ref.dtype, copy=False)
+        return t  # CPU default
+
+    @staticmethod
+    def _flatten1d(t: Tensor) -> Tensor:
+        return t.reshape(-1)
+
+    # ---------- lifecycle ----------
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        self._init_buffers(obs)
+        return self.observation(obs), info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return self.observation(obs), reward, terminated, truncated, info
+
+    # ---------- core ----------
+    def observation(self, obs):
+        return self._process(obs, prefix=())
+
+    def _process(self, node, prefix):
+        out = {}
+        for k, v in node.items():
+            kp = prefix + (k,)
+            if isinstance(v, dict):
+                out[k] = self._process(v, kp)
+                continue
+
+            if "state" in k.lower():
+                # per-key meta (device/dtype) decided at reset from first obs
+                meta = self._meta[kp]
+                buf = self._buffers[kp]
+
+                # ensure tensor on same device/dtype as initial
+                t = self._as_tensor_like(v, meta["ref"])
+                t = self._flatten1d(t)
+                buf.append(t)  # append keeps only last n
+
+                # concatenate in time order (oldest -> newest)
+                stacked = torch.cat(list(buf), dim=0)
+                out[k] = stacked
+            else:
+                out[k] = v  # unchanged (can be np or tensor; you control upstream)
+        return out
+
+    def _init_buffers(self, obs):
+        self._buffers.clear()
+        self._meta.clear()
+
+        def _walk(d, prefix=()):
+            for k, v in d.items():
+                kp = prefix + (k,)
+                if isinstance(v, dict):
+                    _walk(v, kp)
+                    continue
+
+                if "state" in k.lower():
+                    # decide device/dtype from the very first value (if tensor)
+                    ref = v if isinstance(v, Tensor) else None
+                    t0 = self._as_tensor_like(v, ref)
+                    t0 = self._flatten1d(t0)
+                    buf = deque(maxlen=self.n)
+                    for _ in range(self.n):
+                        buf.append(t0.clone())  # clone so future in-place ops won’t alias
+                    self._buffers[kp] = buf
+                    self._meta[kp] = {"ref": t0}  # remember device/dtype
+        _walk(obs)
+

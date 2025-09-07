@@ -1,3 +1,4 @@
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -56,7 +57,7 @@ class UR3_NIST_Insertion_XYC_Small(UREnvConfig):
                 robot_ip="172.22.22.2",
                 soft_real_time=True,
                 use_gripper=False,
-                wrench_limits=[0.40, 0.40, 0.40, 4.0, 4.0, 4.0],
+                speed_limits=[0.40, 0.40, 0.40, 4.0, 4.0, 4.0],
                 payload_mass=0.925,
                 payload_cog=[0.0, 0.0, 0.058]
             )
@@ -217,7 +218,7 @@ class UR3_NIST_Insertion_XYC_Small(UREnvConfig):
             )
 
         if self.depth_to_tighten_c_bounds is not None:
-            env = TightenCBoundsWrapper(
+            env = TightenXYCBoundsWrapper(
                 env,
                 static_tffs=self.wrapper.static_tffs,
                 threshold=self.depth_to_tighten_c_bounds,
@@ -360,11 +361,11 @@ class SAC_NIST_Insertion_XYC(SACConfig):
     # run the actor on cpu for maximum throughput
 
     online_steps: int = 10000000
-    online_step_before_learning: int = 60
+    training_starts: int = 60
     online_buffer_capacity: int = 25000
     offline_buffer_capacity: int = 10000
     camera_number: int = 1  # also affects fps linearly, resolution affects quadratically
-    utd_ratio: int = 2  # affects fps linearly, hil-serl default is 2
+    cta_ratio: int = 2  # affects fps linearly, hil-serl default is 2
     storage_device: str = "cuda"  # destabilizes fps, sometimes cuts 10 fps
     shared_encoder: bool = True  # does not affect fps much
     num_critics: int = 3  # affects fps sub-linearly, hil-serl default is 2
@@ -448,80 +449,6 @@ class DAgger_NIST_Insertion_XYC(MLPConfig):
 # -----------------
 # Wrapper
 # -----------------
-class AMPObsWrapper(gymnasium.Wrapper):
-    def __init__(self,
-                 env,
-                 use_xy_position: bool = False,
-                 use_torque: bool = False,
-                 device: str = "cuda"):
-        super().__init__(env)
-        self.device = device
-        self.prev_action = np.zeros(env.action_space.shape, dtype=np.float32)
-        self.use_xy_position = use_xy_position
-        self.use_torque = use_torque
-
-        num_actions = 4 + env.action_space.shape[0]
-        if self.use_xy_position:
-            num_actions += 2
-        if self.use_torque:
-            num_actions += 3
-
-        self.observation_space = spaces.Dict({
-            "observation.state": spaces.Box(
-                low=np.full(num_actions, -np.inf),
-                high=np.full(num_actions, np.inf),
-                shape=(num_actions, ),
-                dtype=np.uint8),
-            **{key: value for key, value in env.observation_space.items() if "image" in key}
-        })
-
-    def _obs(self, obs):
-        new_state = [
-            obs["observation.main_eef_wrench"][0],
-            obs["observation.main_eef_wrench"][1],
-            obs["observation.main_eef_wrench"][2]
-        ]
-
-        if self.use_torque:
-            new_state.extend([
-                obs["observation.main_eef_wrench"][3],
-                obs["observation.main_eef_wrench"][4],
-                obs["observation.main_eef_wrench"][5]
-            ])
-
-        if self.use_xy_position:
-            new_state.extend([
-                obs["observation.main_eef_pos"][0],
-                obs["observation.main_eef_pos"][1],
-            ])
-
-        new_state.extend([
-            obs["observation.main_eef_pos"][2],
-            *self.prev_action
-        ])
-
-        return {
-            "observation.state": torch.tensor(new_state).to(device=self.device),
-            **{key: value for key, value in obs.items() if "image" in key}
-        }
-
-    def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
-
-        if info["is_intervention"]:
-            self.prev_action = info["action_intervention"]
-        else:
-            self.prev_action = action
-
-        new_state = self._obs(obs)
-
-        return new_state, reward, terminated, truncated, info
-
-    def reset(self, **kwargs):
-        obs, info = self.env.reset(**kwargs)
-        self.prev_action[:] = 0.0
-        obs = self._obs(obs)
-        return obs, info
 
 
 class AwaitForceResetWrapper(gymnasium.Wrapper):
@@ -552,7 +479,7 @@ class AwaitForceResetWrapper(gymnasium.Wrapper):
         return obs, info
 
 
-class TightenCBoundsWrapper(gymnasium.Wrapper):
+class TightenXYCBoundsWrapper(gymnasium.Wrapper):
     def __init__(
         self,
         env,
@@ -576,7 +503,7 @@ class TightenCBoundsWrapper(gymnasium.Wrapper):
 
         pose = obs["observation.main_eef_pos"].detach().cpu().numpy()
         if not self._tightened and pose[2] > self.threshold:
-
+            logging.info("Tighten bounds")
             new_min_pose_rpy = self._initial_min_pose_rpy.copy()
             new_max_pose_rpy = self._initial_max_pose_rpy.copy()
 

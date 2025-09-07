@@ -70,13 +70,31 @@ class WandBLogger:
         os.environ["WANDB_SILENT"] = "True"
         import wandb
 
-        wandb_run_id = (
-            cfg.wandb.run_id
-            if cfg.wandb.run_id
-            else get_wandb_run_id_from_filesystem(self.log_dir)
-            if cfg.resume
-            else None
-        )
+        # Try to load run_id safely
+        fs_run_id = None
+        if cfg.resume and not getattr(cfg.wandb, "run_id", None):
+            try:
+                fs_run_id = get_wandb_run_id_from_filesystem(self.log_dir)
+            except Exception as e:
+                logging.warning(
+                    "Failed to read W&B run_id from filesystem: %s. "
+                    "Starting new run instead.", e
+                )
+
+        wandb_run_id = cfg.wandb.run_id or fs_run_id
+
+        # Decide resume behavior
+        if cfg.resume and wandb_run_id:
+            resume_arg = "allow"  # resume *that exact* run
+        elif cfg.resume and not wandb_run_id:
+            logging.warning(
+                "cfg.resume=True but no valid run_id was found. "
+                "Using resume='allow' (resume if found, otherwise new run)."
+            )
+            resume_arg = "allow"
+        else:
+            resume_arg = None
+
         wandb.init(
             id=wandb_run_id,
             project=self.cfg.project,
@@ -86,11 +104,9 @@ class WandBLogger:
             tags=cfg_to_group(cfg, return_list=True),
             dir=self.log_dir,
             config=cfg.to_dict(),
-            # TODO(rcadene): try set to True
             save_code=False,
-            # TODO(rcadene): split train and eval, and run async eval with job_type="eval"
             job_type="train_eval",
-            resume="must" if cfg.resume else None,
+            resume=resume_arg,
             mode=self.cfg.mode if self.cfg.mode in ["online", "offline", "disabled"] else "online",
         )
         run_id = wandb.run.id

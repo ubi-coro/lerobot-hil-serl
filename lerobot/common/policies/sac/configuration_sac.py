@@ -103,7 +103,7 @@ class SACConfig(PreTrainedConfig):
         online_buffer_capacity: Capacity of the online replay buffer.
         offline_buffer_capacity: Capacity of the offline replay buffer.
         async_prefetch: Whether to use asynchronous prefetching for the buffers.
-        online_step_before_learning: Number of steps before learning starts.
+        training_starts: Number of steps before learning starts.
         policy_update_freq: Frequency of policy updates.
         discount: Discount factor for the SAC algorithm.
         temperature_init: Initial temperature value.
@@ -113,7 +113,7 @@ class SACConfig(PreTrainedConfig):
         actor_lr: Learning rate for the actor network.
         temperature_lr: Learning rate for the temperature parameter.
         critic_target_update_weight: Weight for the critic target update.
-        utd_ratio: Update-to-data ratio for the UTD algorithm.
+        cta_ratio: Update-to-data ratio for the UTD algorithm.
         state_encoder_hidden_dim: Hidden dimension size for the state encoder.
         latent_dim: Dimension of the latent space.
         target_entropy: Target entropy for the SAC algorithm.
@@ -172,10 +172,12 @@ class SACConfig(PreTrainedConfig):
     online_buffer_capacity: int = 50000
     offline_buffer_capacity: int = 50000
     async_prefetch: bool = False
-    online_step_before_learning: int = 100
+    training_starts: int = 100
+    random_steps: int = 0
     policy_update_freq: int = 1
 
     # SAC algorithm parameters
+    use_bc_dagger: bool = False
     discount: float = 0.99
     temperature_init: float = 1.0
     num_critics: int = 2
@@ -185,7 +187,7 @@ class SACConfig(PreTrainedConfig):
     temperature_lr: float = 3e-4
     noise_lr: float = 3e-4
     critic_target_update_weight: float = 0.005
-    utd_ratio: int = 1  # If you want enable utd_ratio, you need to set it to >1
+    cta_ratio: int = 1  # If you want enable utd_ratio, you need to set it to >1
     state_encoder_hidden_dim: int = 256
     latent_dim: int = 256
     target_entropy: float | None = None
@@ -251,7 +253,7 @@ class SACConfig(PreTrainedConfig):
 @PreTrainedConfig.register_subclass("sac_push_cube")
 @dataclass
 class SACPushCubeConfig(SACConfig):
-    utd_ratio: float = 5
+    cta_ratio: float = 5
 
     dataset_stats: dict[str, dict[str, list[float]]] | None = field(
         default_factory=lambda: {

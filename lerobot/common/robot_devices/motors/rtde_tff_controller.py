@@ -148,6 +148,7 @@ class RTDETFFController(mp.Process):
         example = dict()
         for key in config.receive_keys:
             example[key] = np.array(getattr(rtde_r, 'get' + key)())
+        example["SetTCPForce"] = np.array([0.0] * 6)
         example['timestamp'] = time.time()
         self.robot_out_rb = SharedMemoryRingBuffer.create_from_examples(
             shm_manager=config.shm_manager,
@@ -271,6 +272,7 @@ class RTDETFFController(mp.Process):
         dt = 1.0 / frequency
         rtde_c = RTDEControlInterface(robot_ip, frequency)
         rtde_r = RTDEReceiveInterface(robot_ip)
+        wrench_W = [0.0] * 6
 
         try:
             if self.config.verbose:
@@ -380,9 +382,6 @@ class RTDETFFController(mp.Process):
                         if new_min_pose_rpy is not None:
                             self.min_pose_rpy = new_min_pose_rpy.copy()
 
-                        if self.config.verbose:
-                            print("[RTDETFFController] Received SET, updated task‐frame state.")
-
                     else:
                         # Unknown command → treat as STOP
                         keep_running = False
@@ -402,6 +401,7 @@ class RTDETFFController(mp.Process):
                 for key in self.config.receive_keys:
                     if key not in current_state:
                         current_state[key] = np.array(getattr(rtde_r, 'get' + key)())
+                current_state["SetTCPForce"] = np.array(wrench_W)
                 current_state['timestamp'] = time.time()
 
                 # push new state into the ring buffer
@@ -527,10 +527,24 @@ class RTDETFFController(mp.Process):
             # end of while keep_running
         finally:
             # 6) cleanup: exit force‐mode, disconnect RTDE
-            if self.force_on:
-                rtde_c.forceModeStop()
-            rtde_c.disconnect()
-            rtde_r.disconnect()
+            try:
+                if self.force_on:
+                    rtde_c.forceModeStop()
+            except Exception:
+                pass
+            try:
+                rtde_c.stopScript()
+            except Exception:
+                pass
+            try:
+                rtde_c.disconnect()
+            except Exception:
+                pass
+            try:
+                rtde_r.disconnect()
+            except Exception:
+                pass
+
             self.ready_event.set()
             if self.config.verbose:
                 print(f"[RTDETFFController] Disconnected from robot {robot_ip}")

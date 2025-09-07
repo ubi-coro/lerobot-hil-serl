@@ -153,9 +153,9 @@ class RealReachPoseEnvConfig(HILSerlRobotEnvConfig):
 @PreTrainedConfig.register_subclass("sac_real_reach_pose")
 @dataclass
 class SACRealReachPoseConfig(SACConfig):
-    online_step_before_learning: int = 300
+    training_starts: int = 300
     camera_number: int = 0
-    utd_ratio: int = 3
+    cta_ratio: int = 3
     storage_device: str = "cpu"
     shared_encoder: bool = False
     num_critics: int = 4

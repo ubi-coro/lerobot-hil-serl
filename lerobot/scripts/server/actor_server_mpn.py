@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-
+import datetime
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,6 +17,7 @@ import logging
 import os
 import time
 from functools import lru_cache
+from multiprocessing import Process
 from queue import Empty
 from statistics import mean, quantiles
 
@@ -70,6 +71,9 @@ def actor_cli(cfg: TrainPipelineConfig):
         import torch.multiprocessing as mp
 
         mp.set_start_method("spawn")
+
+    now = datetime.datetime.now()
+    cfg.output_dir = os.path.join(cfg.env.root, "run", f"actor-{now:%Y-%m-%d}-{now:%H-%M-%S}")
 
     # Create logs directory to ensure it exists
     log_dir = os.path.join(cfg.output_dir, "logs")
@@ -141,6 +145,7 @@ def actor_cli(cfg: TrainPipelineConfig):
         parameters_queue=parameters_queue,
         transitions_queue=transitions_queue,
         interactions_queue=interactions_queue,
+        receive_policy_process=receive_policy_process
     )
     logging.info("[ACTOR] Policy process joined")
 
@@ -175,6 +180,7 @@ def act_with_policy(
     parameters_queue: Queue,
     transitions_queue: Queue,
     interactions_queue: Queue,
+    receive_policy_process: Process
 ):
     """
     Executes policy interaction within the environment.
@@ -248,7 +254,7 @@ def act_with_policy(
                 return
 
             # Sample action
-            if current_primitive.is_adaptive and step >= policies[current_primitive.id].config.online_step_before_learning:
+            if current_primitive.is_adaptive and step >= policies[current_primitive.id].config.random_steps:
                 # Time policy inference and check if it meets FPS requirement
                 with TimerManager(
                     elapsed_time_list=list_policy_time,
@@ -257,7 +263,6 @@ def act_with_policy(
                 ) as timer:  # noqa: F841
                     action, inference_infos = policies[current_primitive.id].select_action(
                         batch=obs,
-                        step=step,
                         deterministic=eval_mode
                     )
                 policy_fps = 1.0 / (list_policy_time[-1] + 1e-9)
@@ -299,7 +304,7 @@ def act_with_policy(
                         action=action,
                         reward=reward,
                         next_state=next_obs,
-                        done=terminated or truncated,
+                        done=terminated,  # important: not or truncated,
                         truncated=truncated,  # TODO: (azouitine) Handle truncation properly
                         complementary_info=info,
                     )
@@ -368,6 +373,7 @@ def act_with_policy(
 
                     logging.info(
                         f"[ACTOR] --- Finished {episode_cnt} episode for {prev_primitive.id} primitive ({['Train', 'Eval'][int(eval_mode)]}), "
+                        f"successful? {['no', 'yes'][int(info.get('success', False))]}, "
                         f"episode reward: {sum_reward_episode}, "
                         f"local step: {step}, "
                         f"global step: {step_counter.global_step}"
@@ -417,7 +423,8 @@ def act_with_policy(
             update_all_policy_parameters(
                 policies=policies,
                 parameters_queue=parameters_queue,
-                device=device
+                device=device,
+                receive_policy_process=receive_policy_process
             )
 
 
@@ -696,11 +703,14 @@ def interactions_stream(
 #################################################
 
 
-def update_all_policy_parameters(policies, parameters_queue: Queue, device):
+def update_all_policy_parameters(policies, parameters_queue: Queue, device, receive_policy_process):
     """
     Empty the queue of (primitive_id, state_bytes) and
     load the latest state_dict into each matching policy.
     """
+    if not check_receiver_alive(receive_policy_process):
+        raise RuntimeError("receive_policy worker is dead; aborting actor to avoid stale params.")
+
     if not parameters_queue.empty():
         logging.info("[ACTOR] Load new parameters from Learner.")
         bytes_state_dict = get_last_item_from_queue(parameters_queue)
@@ -714,6 +724,32 @@ def update_all_policy_parameters(policies, parameters_queue: Queue, device):
 #################################################
 #  Utilities functions #
 #################################################
+
+def check_receiver_alive(receive_policy_process) -> bool:
+    """Return True if the receive_policy worker is alive (or not provided).
+    Logs a useful message when it has died; for processes, includes exitcode."""
+    if receive_policy_process is None:
+        return True
+    try:
+        alive = receive_policy_process.is_alive()
+    except Exception:
+        # If for some reason worker doesn't have is_alive (unlikely), assume alive
+        return True
+
+    if alive:
+        return True
+
+    # Dead – report why if we can
+    exitcode = getattr(receive_policy_process, "exitcode", None)  # only on multiprocessing.Process
+    if exitcode is None:
+        # Likely a Thread; no exitcode available
+        logging.error("[ACTOR] receive_policy worker (thread) is not alive anymore.")
+    else:
+        if exitcode == 0:
+            logging.warning("[ACTOR] receive_policy process exited cleanly (exitcode=0).")
+        else:
+            logging.error(f"[ACTOR] receive_policy process died (exitcode={exitcode}).")
+    return False
 
 
 def push_transitions_to_transport_queue(transitions: list, transitions_queue):

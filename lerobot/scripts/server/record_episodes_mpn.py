@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,7 +55,7 @@ def init_datasets(cfg: MPNetConfig) -> Tuple[Dict[str, LeRobotDataset], int]:
                 }
 
         # Create dataset
-        dataset_root = Path(cfg.dataset_root) / name
+        dataset_root = os.path.join(cfg.root, "offline-demos", name)
         repo_id = cfg.repo_id + f"-{name}"
         if cfg.resume:
             datasets[primitive.id] = LeRobotDataset(repo_id, root=dataset_root)
@@ -137,7 +138,7 @@ def record_dataset(cfg: RecordConfig):
                 # Add frame to dataset
                 frame = {**obs, **recorded_action}
                 frame["next.reward"] = np.array([reward], dtype=np.float32)
-                frame["next.done"] = np.array([terminated or truncated], dtype=bool)
+                frame["next.done"] = np.array([terminated], dtype=bool)
                 frame["task"] = mp_net.task
                 datasets[current_primitive.id].add_frame(frame)
 
@@ -166,7 +167,6 @@ def record_dataset(cfg: RecordConfig):
                     )
 
                 logging.info(f"Now transition to  {current_primitive.id} primitive")
-                env.close()
 
                 if current_primitive.is_terminal:
                     episode += 1
@@ -175,6 +175,7 @@ def record_dataset(cfg: RecordConfig):
                 sum_reward = 0.0
 
                 env = current_primitive.make(mp_net, robot=robot)
+                obs, info = env.reset()
 
             # Maintain consistent timing
             if mp_net.fps:

@@ -122,7 +122,9 @@ class AxisDistanceRewardWrapper(gym.Wrapper):
         scale: float = 1.0,
         clip: Optional[tuple[float, float]] = None,
         terminate_on_success: bool = True,
-        normalization_range: Optional[Sequence[float]] = None
+        normalization_range: Optional[Sequence[float]] = None,
+        sparse: bool = False,
+        sparse_reward_bias: float = -0.05
     ):
         super().__init__(env)
         self.targets = targets
@@ -131,6 +133,8 @@ class AxisDistanceRewardWrapper(gym.Wrapper):
         self.clip = clip
         self.terminate_on_success = terminate_on_success
         self.normalization_range = normalization_range
+        self.sparse = sparse
+        self.sparse_reward_bias = sparse_reward_bias
 
         # Only consider controllers/robots that exist in the wrapped env.
         self.robot_names = list(env.unwrapped.robot.controllers.keys())
@@ -154,14 +158,21 @@ class AxisDistanceRewardWrapper(gym.Wrapper):
             pose = ctrl.get_robot_state()["ActualTCPPose"]
             actual = pose[self.axis]
             target = self.targets[name]
+            success = actual > target
 
-            reward = -(target - actual)
+            if self.sparse:
+                if success:
+                    reward = 1.0
+                else:
+                    reward = self.sparse_reward_bias
+            else:
+                reward = -(target - actual)
 
-            if self.normalization_range is not None:
-                reward = reward / (self.normalization_range[1] - self.normalization_range[0]) + self.normalization_range[0]
+                if self.normalization_range is not None:
+                    reward = reward / (self.normalization_range[1] - self.normalization_range[0]) + self.normalization_range[0]
 
             rewards[name] = reward
-            successes[name] = actual > target
+            successes[name] = success
 
         extra_reward = sum(rewards.values()) * self.scale
         success = all(list(successes.values()))

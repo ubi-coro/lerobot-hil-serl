@@ -1,38 +1,12 @@
-import time
+from lerobot.common.robot_devices.robots.utils import make_robot_from_config
+from lerobot.experiments import UR3_HAN_Insertion
+from lerobot.scripts.server.mp_nets import reset_mp_net
 
-from lerobot.experiments.nist_insertion import UR3_NIST_Insertion_XYC_Small
+mp_net = UR3_HAN_Insertion()
+current_primitive = mp_net.primitives[mp_net.start_primitive]
+robot = make_robot_from_config(mp_net.robot)
 
-config = UR3_NIST_Insertion_XYC_Small()
-env = config.make()
-
-num_episodes = 0
-while num_episodes < config.num_episodes:
-    print("Perform reset")
-    env.reset()
-    print("Start episode")
-
-    done = False
-    sum_of_rewards = 0.0
-    while not done:
-        t_start = time.perf_counter()
-
-        action = env.action_space.sample() * 0
-
-        obs, reward, terminated, truncated, info = env.step(action)
-
-        sum_of_rewards += reward
-        done = terminated | truncated
-
-        #print(obs["observation.main_eef_wrench"])
-        #print(obs["observation.main_eef_pos"][2])
-        #print(len(obs["state"]))
-
-        t_loop = time.perf_counter()- t_start
-        time.sleep(max([0, 1 / config.fps - t_loop]))
-
-    print(f"Finished episode, got {sum_of_rewards}")
-    time.sleep(1.0)
-
-
-
+# full reset at the beginning of each sequence
+env = current_primitive.make(mp_net, robot=robot)
+obs, info = reset_mp_net(env, mp_net)
 

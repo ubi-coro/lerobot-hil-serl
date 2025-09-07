@@ -233,9 +233,9 @@ class SACRealReachPoseSparseConfig(SACConfig):
     # freeze and share the encoder
     # if possible, use "cuda" as the storage device
 
-    online_step_before_learning: int = 20
+    training_starts: int = 20
     camera_number: int = 1  # also affects fps linearly, resolution affects quadratically
-    utd_ratio: int = 6  # affects fps linearly
+    cta_ratio: int = 6  # affects fps linearly
     storage_device: str = "cuda"  # destabilizes fps, sometimes cuts 10 fps
     shared_encoder: bool = True  # does not affect fps much
     num_critics: int = 4  # affects fps sub-linearly

@@ -121,11 +121,11 @@ class SACRealGraspCubeConfig(SACConfig):
     # if possible, use "cuda" as the storage device, decrease buffer sizes accordingly
     # run the actor on cpu for maximum throughput
 
-    online_step_before_learning: int = 50
+    training_starts: int = 50
     online_buffer_capacity: int = 10000
     offline_buffer_capacity: int = 10000
     camera_number: int = 2  # also affects fps linearly, resolution affects quadratically
-    utd_ratio: int = 2  # affects fps linearly, hil-serl default is 2
+    cta_ratio: int = 2  # affects fps linearly, hil-serl default is 2
     storage_device: str = "cuda"  # destabilizes fps, sometimes cuts 10 fps
     shared_encoder: bool = True  # does not affect fps much
     num_critics: int = 2  # affects fps sub-linearly, hil-serl default is 2

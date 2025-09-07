@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as R
 
-from lerobot.common.robot_devices.motors.rtde_tff_controller import TaskFrameCommand, AxisMode
+from lerobot.common.robot_devices.motors.rtde_tff_controller import TaskFrameCommand, AxisMode, RTDETFFController
 from lerobot.common.robot_devices.utils import busy_wait
 
 
@@ -121,6 +121,7 @@ class StaticTaskFrameActionWrapper(gym.Wrapper):
 
 
 class StaticTaskFrameResetWrapper(gym.Wrapper):
+
     def __init__(
         self,
         env: gym.Env,
@@ -209,7 +210,7 @@ class StaticTaskFrameResetWrapper(gym.Wrapper):
     def reset(self, **kwargs):
         for name in self.robot_names:
             base_cmd = copy(self.reset_tffs[name])
-            ctrl = self.env.unwrapped.robot.controllers[name]
+            ctrl: RTDETFFController = self.env.unwrapped.robot.controllers[name]
 
             if self.safe_reset:
                 ctrl.send_cmd(base_cmd)
@@ -237,6 +238,10 @@ class StaticTaskFrameResetWrapper(gym.Wrapper):
             elif not self.safe_reset:
                 ctrl.send_cmd(base_cmd)
                 self.wait_until_reached(name, base_cmd.target)
+
+            time.sleep(0.03)
+            ctrl.zero_ft()
+            time.sleep(0.03)
 
         return self.env.reset(**kwargs)
 
