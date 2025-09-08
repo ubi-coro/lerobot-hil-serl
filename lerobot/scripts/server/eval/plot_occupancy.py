@@ -1,8 +1,11 @@
-import os
-import numpy as np
+import math
+import pickle
+from pathlib import Path
 
-from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+import numpy as np
 from matplotlib import pyplot as plt
+from matplotlib.path import Path as PltPath
+from matplotlib.patches import PathPatch, Circle
 from tqdm import tqdm
 
 try:
@@ -25,19 +28,20 @@ plt.rcParams.update({
     "text.usetex": True,
     "axes.linewidth": 0.7,
     "axes.grid": True,
-    "grid.alpha": 0.12,
+    "grid.alpha": 0.4,
     "grid.linewidth": 0.33,
     "text.latex.preamble": r"\usepackage{bm}"
 })
 
-SPARSE_ROOT = "/home/jannick/data/paper/hil-amp/rlpd_reward_sparse_cam_toWindow_terminate_early_init_large_demos_itv_2/run/learner-2025-09-05-09-45-48/insert/dataset"
-DENSE_ROOT  = "/home/jannick/data/paper/hil-amp/rlpd_reward_dense_cam_toWindow_terminate_early_init_large_no_priors_1/run/learner-2025-09-04-11-01-19/insert/dataset/"
+SPARSE_ROOT = "/home/jstranghoener/Documents/Paper & Projects/HIL-AMP/paper/data/dataset_dense"
+DENSE_ROOT  = "/home/jstranghoener/Documents/Paper & Projects/HIL-AMP/paper/data/dataset_sparse"
 
 SPARSE_REPO_ID = "hil_amp_main/rlpd_reward_sparse_cam_toWindow_terminate_early_init_large_demos_itv_2"
 DENSE_REPO_ID  = "hil_amp_main/rlpd_reward_dense_cam_toWindow_terminate_early_init_large_no_priors_1"
 
 SUB_SAMPLING = 1
-MAX_LEN = 1000
+MAX_LEN = 10000000
+ROT_DEG = 1.0
 POSE_KEY = 'complementary_info.observation.main_eef_pos'
 
 connector_img   = plt.imread("connector.png")
@@ -84,6 +88,16 @@ def load_sparse(dataset: LeRobotDataset, max_len, sub=1):
 
     return xs, ys
 
+def rotate_points(x: np.ndarray, y: np.ndarray, deg: float):
+    """Return x', y' rotated by *deg* degrees counter-clockwise."""
+    if abs(deg) < 1e-9:                                # fast-exit
+        return x, y
+    rad = math.radians(deg)
+    cos_t, sin_t = math.cos(rad), math.sin(rad)
+    x_r =  cos_t * x - sin_t * y
+    y_r =  sin_t * x + cos_t * y
+    return x_r, y_r
+
 def density_grid(x, y, bins=200, xy_range=None, smooth_sigma=1.2):
     """Return normalized 2D density H, xedges, yedges."""
     if xy_range is None:
@@ -129,12 +143,35 @@ def quantile_levels(H, qs=(0.70, 0.85, 0.95, 0.99)):
         levels = np.linspace(0.3, 0.95, 4)
     return levels
 
-# --- load datasets ------------------------------------------------------------
-sparse_dataset = LeRobotDataset(repo_id=SPARSE_REPO_ID, root=SPARSE_ROOT)
-dense_dataset  = LeRobotDataset(repo_id=DENSE_REPO_ID,  root=DENSE_ROOT)
 
-sx, sy = load_sparse(sparse_dataset, MAX_LEN, SUB_SAMPLING)
-dx, dy = load_dense(dense_dataset,  MAX_LEN, SUB_SAMPLING)
+# --- load datasets ------------------------------------------------------------
+dataset_path = Path("preprocessed") / "occupancies.pkl"
+if dataset_path.exists():
+    with open(dataset_path, "rb") as fn:
+        data = pickle.load(fn)
+
+    sx, sy = data["sx"], data["sy"]
+    dx, dy = data["dx"], data["dy"]
+else:
+    sparse_dataset = LeRobotDataset(repo_id=SPARSE_REPO_ID, root=SPARSE_ROOT)
+    dense_dataset  = LeRobotDataset(repo_id=DENSE_REPO_ID,  root=DENSE_ROOT)
+
+    sx, sy = load_sparse(sparse_dataset, MAX_LEN, SUB_SAMPLING)
+    dx, dy = load_dense(dense_dataset,  MAX_LEN, SUB_SAMPLING)
+
+    data = {
+        "sx": sx, "sy": sy,
+        "dx": dx, "dy": dy
+    }
+    with open(dataset_path, "wb") as fn:
+        pickle.dump(data, fn, protocol=pickle.HIGHEST_PROTOCOL)
+
+sy += 30.0
+dy += 30.0
+
+# rotate points
+sx, sy = rotate_points(sx, sy, ROT_DEG)
+dx, dy = rotate_points(dx, dy, ROT_DEG)
 
 # Use a shared range so contours are comparable
 x_min = min(sx.min(), dx.min()); x_max = max(sx.max(), dx.max())
@@ -154,10 +191,12 @@ levels_sparse = np.linspace(0.03, 1.0 + eps, 8)
 levels_dense  = np.linspace(0.03, 1.0 + eps, 8)
 
 # --- plot ---------------------------------------------------------------------
-plt.figure(figsize=(6.2, 4.4), dpi=200)
+plt.figure(figsize=(3.54, 3.54))
 ax = plt.gca()
+ax.grid(True, linewidth=0.5, alpha=0.8)
+for spine in ax.spines.values(): spine.set_linewidth(0.7)
 
-ax.set_xlim(left=xy_range[0][0] - 0.1 * xy_diffs[0], right=xy_range[0][1] + 0.2 * xy_diffs[0])
+ax.set_xlim(left=xy_range[0][0] - 0.1 * xy_diffs[0], right=xy_range[0][1] + 0.3 * xy_diffs[0])
 ax.set_ylim(bottom=xy_range[1][0] - 0.1 * xy_diffs[1], top=xy_range[1][1] + 0.1 * xy_diffs[1])
 
 # --- background connector on right -------------------------------------------
@@ -167,10 +206,19 @@ y0, y1 = ax.get_ylim()
 xr, yr = (x1 - x0), (y1 - y0)
 
 # tweakable parameters
-conn_width_frac   = 0.26   # fraction of x-range the connector should span
-conn_right_margin = 0.03   # fraction of x-range as right margin
-conn_y_center_frac = 0.55  # vertical center of image as fraction of y-range
-conn_alpha = 0.20
+
+# center
+conn_width_frac   = 0.29   # fraction of x-range the connector should span
+conn_right_margin = 0.26   # fraction of x-range as right margin
+conn_y_center_frac = 0.39  # vertical center of image as fraction of y-range
+conn_alpha = 0.5
+
+# top
+conn_width_frac   = 0.27   # fraction of x-range the connector should span
+conn_right_margin = 0.195   # fraction of x-range as right margin
+conn_y_center_frac = 0.56  # vertical center of image as fraction of y-range
+conn_alpha = 0.6
+
 
 conn_w = conn_width_frac * xr
 conn_aspect = connector_img.shape[0] / connector_img.shape[1]  # (px height / px width)
@@ -191,17 +239,53 @@ ax.imshow(
     clip_on=True,
 )
 
-# Filled contours (semi transparent). Choose two readable colormaps.
+
+# --- line work for the hole. In axes units. ---
+center = [
+    (-25, 24),
+    (-6.3, 24),
+    (-6.3, -5),
+    (5.9, -5),
+    (5.9, 16),
+    (11, 16),
+    (11, 24),
+]
+
+line_data = center
+codes = [PltPath.MOVETO] + [PltPath.LINETO]*(len(line_data)-1)
+patch = PathPatch(
+    PltPath(line_data, codes),
+    transform=ax.transData,   # <<--- axes units!
+    facecolor="none",         # line only, no fill
+    edgecolor=(0, 0, 0, 0.7),  # black @ 55 % opacity
+    linewidth=2.0,              # points
+    capstyle="round",         # round line ends
+    joinstyle="round",        # round joints
+    label="Geometry"
+)
+geom_patch = ax.add_patch(patch)
+
+circle = Circle(
+    (0.6, 6.5), 0.4,
+    transform=ax.transData,    # data coordinates
+    facecolor="black",          # hollow
+    linestyle='',
+    alpha=0.85,
+)
+ax.add_patch(circle)
+
+
+# --- Filled contours (semi transparent). Choose two readable colormaps. ---
 Xc = 0.5 * (xedges[1:] + xedges[:-1])
 Yc = 0.5 * (yedges[1:] + yedges[:-1])
 
 # trim the colormaps so the lightest shades are not near-white
 from matplotlib import cm, colors
-blues = colors.ListedColormap(cm.Blues(np.linspace(0.18, 1.00, 256)))
-oranges = colors.ListedColormap(cm.Oranges(np.linspace(0.20, 1.00, 256)))
+blues = colors.ListedColormap(cm.Blues(np.linspace(0.36, 1.00, 256)))
+oranges = colors.ListedColormap(cm.Oranges(np.linspace(0.40, 1.00, 256)))
 
 cs2 = ax.contourf(
-    Xc, Yc, H_dense,
+    Xc, Yc, H_dense * 1.3,
     levels = levels_dense,
     cmap = oranges,
     vmin=0.0, vmax=0.6,
@@ -210,7 +294,7 @@ cs2 = ax.contourf(
 )
 
 cs1 = ax.contourf(
-    Xc, Yc, H_sparse,
+    Xc, Yc, H_sparse * 1.3,
     levels=levels_sparse,  # include top bin so center isn't white
     cmap = blues,
     vmin=0.0, vmax=0.6,
@@ -219,21 +303,23 @@ cs1 = ax.contourf(
 )
 
 # Cosmetics
-ax.set_xlabel("$\mathbf{X-Position [mm]}$")
-ax.set_ylabel("$\mathbf{Z-Position [mm]}$")
+ax.set_xlabel("$\mathbf{X [mm]}$")
+ax.set_ylabel("$\mathbf{Z [mm]}$")
 ax.set_aspect("equal")  # distances comparable
-ax.grid(True, linewidth=0.3, alpha=0.3)
 
 # Legend patches
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, PathPatch
+
 legend_handles = [
-    Patch(facecolor=plt.cm.Blues(0.6),  edgecolor="navy",       label="Sparse + Priors"),
-    Patch(facecolor=plt.cm.Oranges(0.6), edgecolor="darkorange", label="Dense, No Priors"),
+    Patch(facecolor=plt.cm.Blues(0.6),  edgecolor="navy",       label="Dense $-$ Priors"),
+    Patch(facecolor=plt.cm.Oranges(0.6), edgecolor="darkorange", label="Sparse $+$ Priors"),
+    geom_patch
+
 ]
-ax.legend(handles=legend_handles, loc="lower left", frameon=True)
+ax.legend(handles=legend_handles, loc="lower left", frameon=True, title_fontsize=9)
 
 plt.tight_layout()
 # Save a vector and a bitmap version for the paper
-plt.savefig("results/state_occupancy_density.pdf")
-plt.savefig("results/state_occupancy_density.png", dpi=400)
+plt.savefig("results/occupancy.pdf", dpi=600, bbox_inches='tight', pad_inches=0, transparent=False)
+plt.savefig("results/occupancy.png", dpi=400)
 plt.show()
