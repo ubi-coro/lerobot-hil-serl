@@ -46,6 +46,7 @@ For more details on the complete HILSerl training workflow, see:
 https://github.com/michel-aractingi/lerobot-hilserl-guide
 """
 
+import datetime
 import logging
 import os
 import time
@@ -64,7 +65,7 @@ from lerobot.policies.factory import make_policy
 from lerobot.policies.sac.modeling_sac import SACPolicy
 from lerobot.processor import TransitionKey
 from lerobot.rl.process import ProcessSignalHandler
-from lerobot.rl.queue import get_last_item_from_queue
+from lerobot.rl.queue_utils import get_last_item_from_queue
 from lerobot.robots import so100_follower  # noqa: F401
 from lerobot.teleoperators import gamepad, so101_leader  # noqa: F401
 from lerobot.teleoperators.utils import TeleopEvents
@@ -109,6 +110,10 @@ def actor_cli(cfg: TrainRLServerPipelineConfig):
 
         mp.set_start_method("spawn")
         display_pid = True
+
+    if cfg.env.root is not None:
+        now = datetime.datetime.now()
+        cfg.output_dir = os.path.join(cfg.env.root, "run", f"actor-{now:%Y-%m-%d}-{now:%H-%M-%S}")
 
     # Create logs directory to ensure it exists
     log_dir = os.path.join(cfg.output_dir, "logs")
@@ -237,8 +242,7 @@ def act_with_policy(
 
     logging.info("make_env online")
 
-    online_env, teleop_device = make_robot_env(cfg=cfg.env)
-    env_processor, action_processor = make_processors(online_env, teleop_device, cfg.env, cfg.policy.device)
+    online_env, env_processor, action_processor = make_robot_env(cfg=cfg.env, device=cfg.policy.device)
 
     set_seed(cfg.seed)
     device = get_safe_torch_device(cfg.policy.device, log=True)

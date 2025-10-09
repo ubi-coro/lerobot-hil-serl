@@ -102,12 +102,10 @@ class KeyboardTeleop(Teleoperator):
         pass
 
     def _on_press(self, key):
-        if hasattr(key, "char"):
-            self.event_queue.put((key.char, True))
+        self.event_queue.put((key, True))
 
     def _on_release(self, key):
-        if hasattr(key, "char"):
-            self.event_queue.put((key.char, False))
+        self.event_queue.put((key, False))
         if key == keyboard.Key.esc:
             logging.info("ESC pressed, disconnecting.")
             self.disconnect()
@@ -168,13 +166,13 @@ class KeyboardEndEffectorTeleop(KeyboardTeleop):
             return {
                 "dtype": "float32",
                 "shape": (4,),
-                "names": {"delta_x": 0, "delta_y": 1, "delta_z": 2, "gripper": 3},
+                "names": {"x.vel": 0, "y.vel": 1, "z.vel": 2, "gripper": 3},
             }
         else:
             return {
                 "dtype": "float32",
                 "shape": (3,),
-                "names": {"delta_x": 0, "delta_y": 1, "delta_z": 2},
+                "names": {"x.vel": 0, "y.vel": 1, "z.vel": 2},
             }
 
     def get_action(self) -> dict[str, Any]:
@@ -214,12 +212,10 @@ class KeyboardEndEffectorTeleop(KeyboardTeleop):
                 # this is useful for retrieving other events like interventions for RL, episode success, etc.
                 self.misc_keys_queue.put(key)
 
-        self.current_pressed.clear()
-
         action_dict = {
-            "delta_x": delta_x,
-            "delta_y": delta_y,
-            "delta_z": delta_z,
+            "x.vel": delta_x,
+            "y.vel": delta_y,
+            "z.vel": delta_z,
         }
 
         if self.config.use_gripper:
@@ -254,6 +250,7 @@ class KeyboardEndEffectorTeleop(KeyboardTeleop):
             }
 
         # Check if any movement keys are currently pressed (indicates intervention)
+        self._drain_pressed_keys()
         movement_keys = [
             keyboard.Key.up,
             keyboard.Key.down,
@@ -274,14 +271,15 @@ class KeyboardEndEffectorTeleop(KeyboardTeleop):
         # Process any pending misc keys
         while not self.misc_keys_queue.empty():
             key = self.misc_keys_queue.get_nowait()
-            if key == "s":
-                success = True
-            elif key == "r":
-                terminate_episode = True
-                rerecord_episode = True
-            elif key == "q":
-                terminate_episode = True
-                success = False
+            if hasattr(key, "char"):
+                if key.char == "s":
+                    success = True
+                elif key.char == "r":
+                    terminate_episode = True
+                    rerecord_episode = True
+                elif key.char == "q":
+                    terminate_episode = True
+                    success = False
 
         return {
             TeleopEvents.IS_INTERVENTION: is_intervention,

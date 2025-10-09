@@ -34,6 +34,7 @@ DONE = "next.done"
 
 ROBOTS = "robots"
 TELEOPERATORS = "teleoperators"
+DEFAULT_ROBOT_NAME = "main"
 
 # files & directories
 CHECKPOINTS_DIR = "checkpoints"

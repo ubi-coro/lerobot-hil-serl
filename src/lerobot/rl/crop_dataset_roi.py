@@ -208,6 +208,11 @@ def convert_lerobot_dataset_to_cropped_lerobot_dataset(
     for frame_idx in tqdm(range(len(original_dataset))):
         frame = original_dataset[frame_idx]
 
+        if frame["episode_index"].item() != prev_episode_index:
+            # Save the episode
+            new_dataset.save_episode()
+            prev_episode_index = frame["episode_index"].item()
+
         # Create a copy of the frame to add to the new dataset
         new_frame = {}
         for key, value in frame.items():
@@ -229,11 +234,6 @@ def convert_lerobot_dataset_to_cropped_lerobot_dataset(
 
         new_frame["task"] = task
         new_dataset.add_frame(new_frame)
-
-        if frame["episode_index"].item() != prev_episode_index:
-            # Save the episode
-            new_dataset.save_episode()
-            prev_episode_index = frame["episode_index"].item()
 
     # Save the last episode
     new_dataset.save_episode()

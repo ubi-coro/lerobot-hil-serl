@@ -56,6 +56,25 @@ class SACPolicy(
         self._init_critics(continuous_action_dim)
         self._init_actor(continuous_action_dim)
         self._init_temperature()
+        
+        # Global optimization step that lives with the policy,
+        # saved in the state_dict and shipped to the actor.
+        # Use register_buffer so it's not part of optimizer params.
+        self.register_buffer("opt_step", torch.zeros(1, dtype=torch.long))
+
+    # --- step management (saved in state_dict) ---
+    def set_opt_step(self, step: int | torch.Tensor) -> None:
+        if isinstance(step, int):
+            self.opt_step.fill_(step)
+        else:
+            # ensure correct dtype/device/shape
+            self.opt_step.copy_(step.to(self.opt_step.device, dtype=self.opt_step.dtype).view(1))
+
+    def inc_opt_step(self, n: int = 1) -> None:
+        self.opt_step += n
+
+    def get_opt_step(self) -> int:
+        return int(self.opt_step.item())
 
     def get_optim_params(self) -> dict:
         optim_params = {
@@ -69,6 +88,12 @@ class SACPolicy(
         }
         if self.config.num_discrete_actions is not None:
             optim_params["discrete_critic"] = self.discrete_critic.parameters()
+        if self.config.noise_config.enable:
+            optim_params["noise"] = [
+                p
+                for n, p in self.noise_net.named_parameters()
+                if not n.startswith("encoder") or not self.shared_encoder
+            ]
         return optim_params
 
     def reset(self):
@@ -81,21 +106,43 @@ class SACPolicy(
         raise NotImplementedError("SACPolicy does not support action chunking. It returns single actions!")
 
     @torch.no_grad()
-    def select_action(self, batch: dict[str, Tensor]) -> Tensor:
+    def select_action(self, batch: dict[str, Tensor], deterministic: bool = True, use_dgn: bool = True, step: int | None = None) -> tuple[Tensor, dict]:
         """Select action for inference/evaluation"""
+        if self.config.use_bc_dagger or not self.config.noise_config.enable:
+            use_dgn = False
 
-        observations_features = None
-        if self.shared_encoder and self.actor.encoder.has_images:
-            observations_features = self.actor.encoder.get_cached_image_features(batch)
+        observation_features = None
+        if self.shared_encoder:
+            # Cache and normalize image features
+            observation_features = self.actor.encoder.get_cached_image_features(batch)
 
-        actions, _, _ = self.actor(batch, observations_features)
+        dist = self.actor(batch, observation_features)
+
+        if deterministic or use_dgn:
+            action = dist.mode()
+            # action = dist.rsample()  # would be in line with hil-serl argmax
+        else:
+            action = dist.rsample()
+
+        inference_infos = {}
+        q_value, _ = self.critic_forward(
+            observations=batch,
+            actions=action,
+            use_target=False,
+            observation_features=observation_features,
+        ).min(dim=0)
+        inference_infos["Q-Value"] = q_value.item()
 
         if self.config.num_discrete_actions is not None:
-            discrete_action_value = self.discrete_critic(batch, observations_features)
+            discrete_action_value = self.discrete_critic(batch, observation_features)
             discrete_action = torch.argmax(discrete_action_value, dim=-1, keepdim=True)
-            actions = torch.cat([actions, discrete_action], dim=-1)
+            action = torch.cat([action, discrete_action], dim=-1)
 
-        return actions
+        if use_dgn and not deterministic:
+            action, _, noise_scale = self.add_structured_noise(action, batch, observation_features, step=step)
+            inference_infos["Noise Scale"] = noise_scale
+
+        return action  #, inference_infos
 
     def critic_forward(
         self,
@@ -140,7 +187,7 @@ class SACPolicy(
         self,
         batch: dict[str, Tensor | dict[str, Tensor]],
         model: Literal["actor", "critic", "temperature", "discrete_critic"] = "critic",
-    ) -> dict[str, Tensor]:
+    ) -> dict[str, Tensor | dict]:
         """Compute the loss for the given model
 
         Args:
@@ -169,7 +216,7 @@ class SACPolicy(
             done: Tensor = batch["done"]
             next_observation_features: Tensor = batch.get("next_observation_feature")
 
-            loss_critic = self.compute_loss_critic(
+            loss_critic, training_infos = self.compute_loss_critic(
                 observations=observations,
                 actions=actions,
                 rewards=rewards,
@@ -179,7 +226,7 @@ class SACPolicy(
                 next_observation_features=next_observation_features,
             )
 
-            return {"loss_critic": loss_critic}
+            return {"loss_critic": loss_critic, "training_infos": training_infos}
 
         if model == "discrete_critic" and self.config.num_discrete_actions is not None:
             # Extract critic-specific components
@@ -199,6 +246,15 @@ class SACPolicy(
                 complementary_info=complementary_info,
             )
             return {"loss_discrete_critic": loss_discrete_critic}
+
+        if model == "bc":
+            bc_loss, training_infos = self.compute_loss_bc(
+                observations=observations,
+                actions=actions,
+                observation_features=observation_features
+            )
+            return {"loss_bc": bc_loss, "training_infos": training_infos}
+
         if model == "actor":
             return {
                 "loss_actor": self.compute_loss_actor(
@@ -214,6 +270,14 @@ class SACPolicy(
                     observation_features=observation_features,
                 )
             }
+
+        if model == "noise":
+            noise_loss, dgn_improvement_ratio = self.compute_loss_noise(
+                actions=actions,
+                observations=observations,
+                observation_features=observation_features,
+            )
+            return {"loss_noise": noise_loss, "dgn_improvement_ratio": dgn_improvement_ratio}
 
         raise ValueError(f"Unknown model type: {model}")
 
@@ -251,9 +315,10 @@ class SACPolicy(
         done,
         observation_features: Tensor | None = None,
         next_observation_features: Tensor | None = None,
-    ) -> Tensor:
+    ) -> tuple[torch.Tensor, dict[str, Tensor]]:
         with torch.no_grad():
-            next_action_preds, next_log_probs, _ = self.actor(next_observations, next_observation_features)
+            action_dist = self.actor(next_observations, next_observation_features)
+            next_action_preds = action_dist.rsample()
 
             # 2- compute q targets
             q_targets = self.critic_forward(
@@ -273,7 +338,7 @@ class SACPolicy(
             # critics subsample size
             min_q, _ = q_targets.min(dim=0)  # Get values from min operation
             if self.config.use_backup_entropy:
-                min_q = min_q - (self.temperature * next_log_probs)
+                min_q = min_q - (self.temperature * action_dist.log_prob(sample_actions))
 
             td_target = rewards + (1 - done) * self.config.discount * min_q
 
@@ -301,7 +366,18 @@ class SACPolicy(
                 reduction="none",
             ).mean(dim=1)
         ).sum()
-        return critics_loss
+
+        # log key metrics to measure overestimation, stability and uncertainty
+        training_infos = {
+            "mean_q_ensemble_disagreement": q_preds.std(dim=0)[0].mean().item(),
+            "mean_q_ensemble_var": q_preds.std(dim=1).mean().item(),
+            "max_q_ensemble_range": (q_preds.max(dim=0)[0] - q_preds.min(dim=0)[0]).mean().item(),
+            "mean_q": q_preds.mean().item(),
+            "max_q": q_preds.max().item(),
+            "min_q": q_preds.min().item()
+        }
+
+        return critics_loss, training_infos
 
     def compute_loss_discrete_critic(
         self,
@@ -366,27 +442,69 @@ class SACPolicy(
         """Compute the temperature loss"""
         # calculate temperature loss
         with torch.no_grad():
-            _, log_probs, _ = self.actor(observations, observation_features)
-        temperature_loss = (-self.log_alpha.exp() * (log_probs + self.target_entropy)).mean()
+            dist = self.actor(observations, observation_features)
+        temperature_loss = (-self.log_alpha.exp() * (dist.log_prob(dist.rsample()) + self.config.target_entropy)).mean()
         return temperature_loss
+
+    def compute_loss_bc(
+        self,
+        observations,
+        actions,
+        observation_features: Tensor | None = None,
+    ) -> tuple[torch.Tensor, dict[str, Tensor]]:
+        dist = self.actor(observations, observation_features)
+        policy_actions = dist.mode()
+
+        if self.config.policy_kwargs.use_tanh_squash:
+            actions = torch.clip(actions, -1+1e-6, 1-1e-6)
+
+        log_probs = dist.log_prob(actions)
+        mse = ((actions - policy_actions) ** 2).sum(-1).mean()
+        bc_loss = -log_probs.mean()
+
+        return bc_loss, {"mse": mse}
 
     def compute_loss_actor(
         self,
         observations,
         observation_features: Tensor | None = None,
     ) -> Tensor:
-        actions_pi, log_probs, _ = self.actor(observations, observation_features)
+        dist = self.actor(observations, observation_features)
+        policy_actions = dist.rsample()
 
         q_preds = self.critic_forward(
             observations=observations,
-            actions=actions_pi,
+            actions=policy_actions,
             use_target=False,
             observation_features=observation_features,
         )
         min_q_preds = q_preds.min(dim=0)[0]
 
-        actor_loss = ((self.temperature * log_probs) - min_q_preds).mean()
+        actor_loss = ((self.temperature * dist.log_prob(sample_actions)) - min_q_preds).mean()
         return actor_loss
+
+    def compute_loss_noise(
+        self,
+        actions,
+        observations,
+        observation_features: Tensor | None = None,
+    ) -> tuple[Tensor, float]:
+        with torch.no_grad():
+            dist = self.actor(observations, observation_features)
+            mean_actions = dist.rsample()
+
+        noised_actions, noise_dist, _ = self.add_structured_noise(mean_actions, observations, observation_features, step=0)
+
+        # score residuals
+        residual_actions = actions - mean_actions
+        noise_loss = -noise_dist.log_prob(residual_actions).mean()
+
+        # compute improvement
+        dist_to_mean = torch.norm(actions - mean_actions, dim=1)
+        dist_to_sampled = torch.norm(actions - noised_actions, dim=1)
+        dgn_improvement_ratio = (dist_to_sampled < dist_to_mean).float().mean().item()
+
+        return noise_loss, dgn_improvement_ratio
 
     def _init_encoders(self):
         """Initialize shared or separate encoders for actor and critic."""
@@ -395,6 +513,9 @@ class SACPolicy(
         self.encoder_actor = (
             self.encoder_critic if self.shared_encoder else SACObservationEncoder(self.config)
         )
+
+        if self.config.noise_config.enable:
+            self.encoder_noise = self.encoder_critic if self.shared_encoder else SACObservationEncoder(self.config)
 
     def _init_critics(self, continuous_action_dim):
         """Build critic ensemble, targets, and optional discrete critic."""
@@ -462,6 +583,28 @@ class SACPolicy(
         temp_init = self.config.temperature_init
         self.log_alpha = nn.Parameter(torch.tensor([math.log(temp_init)]))
         self.temperature = self.log_alpha.exp().item()
+
+    def _init_noise(self):
+        if not self.config.noise_config.enable:
+            return
+
+        action_dim = self.config.output_features["action"].shape[0]
+        if self.config.num_discrete_actions is not None:
+            action_dim += 1
+        output_dim = action_dim * (action_dim + 1) // 2  # num of elements in lower triangular matrix
+
+        if self.config.noise_config.predict_residual:
+            output_dim += action_dim
+
+
+        self.noise_net = Policy(
+            encoder=self.encoder_noise,
+            network=MLP(input_dim=self.encoder_actor.output_dim, **asdict(self.config.actor_network_kwargs)),
+            action_dim=output_dim,
+            encoder_is_shared=self.shared_encoder,
+            fixed_std=torch.tensor([0.0]),
+            **asdict(self.config.policy_kwargs),
+        )
 
 
 class SACObservationEncoder(nn.Module):
@@ -844,7 +987,7 @@ class Policy(nn.Module):
         self,
         observations: torch.Tensor,
         observation_features: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Distribution:
         # We detach the encoder if it is shared to avoid backprop through it
         # This is important to avoid the encoder to be updated through the policy
         obs_enc = self.encoder(observations, cache=observation_features, detach=self.encoder_is_shared)
@@ -856,21 +999,16 @@ class Policy(nn.Module):
         # Compute standard deviations
         if self.fixed_std is None:
             log_std = self.std_layer(outputs)
-            std = torch.exp(log_std)  # Match JAX "exp"
-            std = torch.clamp(std, self.std_min, self.std_max)  # Match JAX default clip
         else:
-            std = self.fixed_std.expand_as(means)
+            log_std = self.fixed_std.expand_as(means).to(means.device)
+
+        std = torch.exp(log_std)  # Match JAX "exp"
+        std = torch.clamp(std, self.std_min, self.std_max)  # Match JAX default clip
 
         # Build transformed distribution
         dist = TanhMultivariateNormalDiag(loc=means, scale_diag=std)
 
-        # Sample actions (reparameterized)
-        actions = dist.rsample()
-
-        # Compute log_probs
-        log_probs = dist.log_prob(actions)
-
-        return actions, log_probs, means
+        return dist
 
     def get_features(self, observations: torch.Tensor) -> torch.Tensor:
         """Get encoded features from observations"""

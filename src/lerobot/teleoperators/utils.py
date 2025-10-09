@@ -81,5 +81,9 @@ def make_teleoperator_from_config(config: TeleoperatorConfig) -> Teleoperator:
         from .reachy2_teleoperator import Reachy2Teleoperator
 
         return Reachy2Teleoperator(config)
+    elif config.type == "spacemouse":
+        from .spacemouse import SpaceMouse
+
+        return SpaceMouse(config)
     else:
         raise ValueError(config.type)

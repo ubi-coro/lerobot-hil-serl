@@ -17,7 +17,7 @@
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 import numpy as np
@@ -37,6 +37,7 @@ from .pipeline import (
     ProcessorStepRegistry,
     TruncatedProcessorStep,
 )
+from ..utils.constants import DEFAULT_ROBOT_NAME
 
 GRIPPER_KEY = "gripper"
 DISCRETE_PENALTY_KEY = "discrete_penalty"
@@ -103,7 +104,7 @@ class AddTeleopActionAsComplimentaryDataStep(ComplementaryDataProcessorStep):
         teleop_device: The teleoperator instance to get the action from.
     """
 
-    teleop_device: Teleoperator
+    teleoperators: dict[str, Teleoperator] = field(default_factory={})
 
     def complementary_data(self, complementary_data: dict) -> dict:
         """
@@ -117,7 +118,10 @@ class AddTeleopActionAsComplimentaryDataStep(ComplementaryDataProcessorStep):
             `teleop_action` key.
         """
         new_complementary_data = dict(complementary_data)
-        new_complementary_data[TELEOP_ACTION_KEY] = self.teleop_device.get_action()
+        new_complementary_data[TELEOP_ACTION_KEY] = {}
+        for name in self.teleoperators:
+            new_complementary_data[TELEOP_ACTION_KEY][name] = self.teleoperators[name].get_action()
+
         return new_complementary_data
 
     def transform_features(
@@ -140,11 +144,12 @@ class AddTeleopEventsAsInfoStep(InfoProcessorStep):
                        `HasTeleopEvents` protocol.
     """
 
-    teleop_device: TeleopWithEvents
+    teleoperators: dict[str, Teleoperator] = field(default_factory={})
 
     def __post_init__(self):
         """Validates that the provided teleoperator supports events after initialization."""
-        _check_teleop_with_events(self.teleop_device)
+        for t in self.teleoperators.values():
+            _check_teleop_with_events(t)
 
     def info(self, info: dict) -> dict:
         """
@@ -157,9 +162,10 @@ class AddTeleopEventsAsInfoStep(InfoProcessorStep):
             A new dictionary including the teleoperator events.
         """
         new_info = dict(info)
+        for t in self.teleoperators.values():
+            for event_name, event_value in t.get_teleop_events().items():
+                new_info[event_name] = new_info.get(event_name, False) | event_value
 
-        teleop_events = self.teleop_device.get_teleop_events()
-        new_info.update(teleop_events)
         return new_info
 
     def transform_features(
@@ -314,74 +320,65 @@ class TimeLimitProcessorStep(TruncatedProcessorStep):
 @ProcessorStepRegistry.register("gripper_penalty_processor")
 class GripperPenaltyProcessorStep(ComplementaryDataProcessorStep):
     """
-    Applies a penalty for inefficient gripper usage.
+    Applies a penalty for inefficient gripper usage on multiple robots.
 
-    This step penalizes actions that attempt to close an already closed gripper or
-    open an already open one, based on position thresholds.
+    For each robot:
+      - Penalizes actions that try to close an already closed gripper
+        or open an already open one.
+      - Penalties are added to complementary_data with robot-specific keys.
 
     Attributes:
-        penalty: The negative reward value to apply.
-        max_gripper_pos: The maximum position value for the gripper, used for normalization.
+        penalty: Negative reward value applied per violation.
+        max_gripper_pos: Dict of robot_name -> max gripper pos (for normalization).
     """
 
-    penalty: float = -0.01
-    max_gripper_pos: float = 30.0
+    use_gripper: dict[str, bool] = field(default_factory=dict)
+    penalty: dict[str, float] = field(default_factory=dict)
+    max_gripper_pos: dict[str, float] = field(default_factory=dict)
 
     def complementary_data(self, complementary_data: dict) -> dict:
         """
-        Calculates the gripper penalty and adds it to the complementary data.
-
-        Args:
-            complementary_data: The incoming complementary data, which should contain
-                                raw joint positions.
-
-        Returns:
-            A new complementary data dictionary with the `discrete_penalty` key added.
+        Calculates gripper penalties for each robot and adds them to complementary_data.
         """
-        action = self.transition.get(TransitionKey.ACTION)
+        action_dict = self.transition.get(TransitionKey.ACTION)
 
-        raw_joint_positions = complementary_data.get("raw_joint_positions")
-        if raw_joint_positions is None:
+        # If actions are not a dict (single robot), bail out gracefully
+        if not isinstance(action_dict, dict):
             return complementary_data
 
-        current_gripper_pos = raw_joint_positions.get(GRIPPER_KEY, None)
-        if current_gripper_pos is None:
-            return complementary_data
+        new_cd = dict(complementary_data)
+        robot_penalty = 0.0
+        for name, action in action_dict.items():
+            current_gripper_pos = complementary_data.get.get(f"{name}.{GRIPPER_KEY}", None)
 
-        # Gripper action is a PolicyAction at this stage
-        gripper_action = action[-1].item()
-        gripper_action_normalized = gripper_action / self.max_gripper_pos
+            if current_gripper_pos is None or action is None or len(action) == 0:
+                continue
 
-        # Normalize gripper state and action
-        gripper_state_normalized = current_gripper_pos / self.max_gripper_pos
+            # last element of action is gripper command
+            gripper_action = action[-1].item() if isinstance(action, torch.Tensor) else action[-1]
+            max_pos = self.max_gripper_pos.get(name, 30.0)
 
-        # Calculate penalty boolean as in original
-        gripper_penalty_bool = (gripper_state_normalized < 0.5 and gripper_action_normalized > 0.5) or (
-            gripper_state_normalized > 0.75 and gripper_action_normalized < 0.5
-        )
+            gripper_action_normalized = gripper_action / max_pos
+            gripper_state_normalized = current_gripper_pos / max_pos
 
-        gripper_penalty = self.penalty * int(gripper_penalty_bool)
+            penalty_trigger = (
+                (gripper_state_normalized < 0.5 and gripper_action_normalized > 0.5)
+                or (gripper_state_normalized > 0.75 and gripper_action_normalized < 0.5)
+            )
 
-        # Create new complementary data with penalty info
-        new_complementary_data = dict(complementary_data)
-        new_complementary_data[DISCRETE_PENALTY_KEY] = gripper_penalty
+            robot_penalty += self.penalty.get(name, -0.01) * int(penalty_trigger)
 
-        return new_complementary_data
+        new_cd[DISCRETE_PENALTY_KEY] = robot_penalty
+
+        return new_cd
 
     def get_config(self) -> dict[str, Any]:
-        """
-        Returns the configuration of the step for serialization.
-
-        Returns:
-            A dictionary containing the penalty value and max gripper position.
-        """
         return {
             "penalty": self.penalty,
             "max_gripper_pos": self.max_gripper_pos,
         }
 
     def reset(self) -> None:
-        """Resets the processor's internal state."""
         pass
 
     def transform_features(
@@ -594,3 +591,51 @@ class RewardClassifierProcessorStep(ProcessorStep):
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         return features
+
+
+
+@dataclass
+@ProcessorStepRegistry.register("multi_robot_aggregate")
+class RewardClassifierProcessorStep(ProcessorStep):
+
+    robot_names: list[str]
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        new_transition = transition.copy()
+
+        info = transition.get(TransitionKey.INFO, {})
+        is_intervention = any(info.get(TeleopEvents.IS_INTERVENTION, {DEFAULT_ROBOT_NAME: False}).values())
+        terminate_episode = any(info.get(TeleopEvents.TERMINATE_EPISODE, {DEFAULT_ROBOT_NAME: False}).values())
+        success = any(info.get(TeleopEvents.SUCCESS, {DEFAULT_ROBOT_NAME: False}).values())
+        rerecord_episode = any(info.get(TeleopEvents.RERECORD_EPISODE, {DEFAULT_ROBOT_NAME: False}).values())
+
+        # Termination / reward
+        new_transition[TransitionKey.DONE] = bool(terminate_episode) or any(
+            self.terminate_on_success.get(name, True) and success for name in self.robot_names
+        )
+        new_transition[TransitionKey.REWARD] = float(success)
+
+        # Update info / complementary data
+        info[TeleopEvents.IS_INTERVENTION] = is_intervention
+        info[TeleopEvents.RERECORD_EPISODE] = rerecord_episode
+        info[TeleopEvents.SUCCESS] = success
+        new_transition[TransitionKey.INFO] = info
+
+        return new_transition
+
+    def get_config(self) -> dict[str, Any]:
+        """
+        Returns the configuration of the step for serialization.
+
+        Returns:
+            A dictionary containing the step's configuration attributes.
+        """
+        return {
+            "robot_names": self.robot_names
+        }
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+

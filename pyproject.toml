@@ -64,14 +64,17 @@ dependencies = [
     "huggingface-hub[hf-transfer,cli]>=0.34.2",
 
     # Core dependencies
+    "atomics==1.0.3",
     "cmake>=3.29.0.1",
     "einops>=0.8.0",
     "opencv-python-headless>=4.9.0",
     "av>=14.2.0",
     "jsonlines>=4.0.0",
+    "modern-robotics==1.1.1"
     "packaging>=24.2",
     "pynput>=1.7.7",
     "pyserial>=3.5",
+    "scipy==1.15.3",
     "wandb>=0.20.0",
 
     "torch>=2.2.1,<2.8.0", # TODO: Bumb dependency
@@ -117,6 +120,8 @@ phone = ["hebi-py>=2.8.0", "teleop>=0.1.0"]
 #     "pyrender @ git+https://github.com/mmatl/pyrender.git ; sys_platform == 'linux'",
 #     "pyrealsense2>=2.55.1.6486 ; sys_platform != 'darwin'"
 # ] # TODO: Currently not supported
+ur = ["ur_rtde==1.6.2"]
+spacemouse = ["easyhid==0.0.10"]
 
 # Policies
 pi = ["transformers @ git+https://github.com/huggingface/transformers.git@fix/lerobot_openpi"]
@@ -159,6 +164,7 @@ all = [
     "lerobot[xarm]",
     "lerobot[phone]",
     "lerobot[libero]",
+    "lerobot[ur]"
 ]
 
 [project.scripts]

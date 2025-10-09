@@ -62,17 +62,17 @@ pip install -e ".[hilserl]"
 
 ### Understanding Configuration
 
-The training process begins with proper configuration for the HILSerl environment. The main configuration class is `GymManipulatorConfig` in `lerobot/rl/gym_manipulator.py`, which contains nested `HILSerlRobotEnvConfig` and `DatasetConfig`. The configuration is organized into focused, nested sub-configs:
+The training process begins with proper configuration for the HILSerl environment. The main configuration class is `GymManipulatorConfig` in `lerobot/rl/gym_manipulator.py`, which contains nested `HilSerlRobotEnvConfig` and `DatasetConfig`. The configuration is organized into focused, nested sub-configs:
 
 <!-- prettier-ignore-start -->
 ```python
 class GymManipulatorConfig:
-    env: HILSerlRobotEnvConfig    # Environment configuration (nested)
+    env: HilSerlRobotEnvConfig    # Environment configuration (nested)
     dataset: DatasetConfig    # Dataset recording/replay configuration (nested)
     mode: str | None = None    # "record", "replay", or None (for training)
     device: str = "cpu"    # Compute device
 
-class HILSerlRobotEnvConfig(EnvConfig):
+class HilSerlRobotEnvConfig(EnvConfig):
     robot: RobotConfig | None = None    # Main robot agent (defined in `lerobot/robots`)
     teleop: TeleoperatorConfig | None = None    # Teleoperator agent, e.g., gamepad or leader arm
     processor: HILSerlProcessorConfig    # Processing pipeline configuration (nested)
@@ -612,7 +612,7 @@ The reward classifier implementation in `modeling_classifier.py` uses a pretrain
 
 Before training, you need to collect a dataset with labeled examples. The `record_dataset` function in `gym_manipulator.py` enables the process of collecting a dataset of observations, actions, and rewards.
 
-To collect a dataset, you need to modify some parameters in the environment configuration based on HILSerlRobotEnvConfig.
+To collect a dataset, you need to modify some parameters in the environment configuration based on HilSerlRobotEnvConfig.
 
 ```bash
 python -m lerobot.rl.gym_manipulator --config_path src/lerobot/configs/reward_classifier_train_config.json
@@ -720,12 +720,12 @@ lerobot-train --config_path path/to/reward_classifier_train_config.json
 
 **Deploying and Testing the Model**
 
-To use your trained reward classifier, configure the `HILSerlRobotEnvConfig` to use your model:
+To use your trained reward classifier, configure the `HilSerlRobotEnvConfig` to use your model:
 
 <!-- prettier-ignore-start -->
 ```python
 config = GymManipulatorConfig(
-    env=HILSerlRobotEnvConfig(
+    env=HilSerlRobotEnvConfig(
         processor=HILSerlProcessorConfig(
             reward_classifier=RewardClassifierConfig(
                 pretrained_path="path_to_your_pretrained_trained_model"

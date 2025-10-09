@@ -435,23 +435,27 @@ class ForwardKinematicsJointsToEEObservation(ObservationProcessorStep):
         kinematics: The robot's kinematic model.
     """
 
-    kinematics: RobotKinematics
+    kinematics: dict[str: RobotKinematics]
     motor_names: list[str]
 
     def observation(self, observation: dict[str, Any]) -> dict[str, Any]:
+
+
         return compute_forward_kinematics_joints_to_ee(observation, self.kinematics, self.motor_names)
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         # We only use the ee pose in the dataset, so we don't need the joint positions
-        for n in self.motor_names:
-            features[PipelineFeatureType.OBSERVATION].pop(f"{n}.pos", None)
-        # We specify the dataset features of this step that we want to be stored in the dataset
-        for k in ["x", "y", "z", "wx", "wy", "wz", "gripper_pos"]:
-            features[PipelineFeatureType.OBSERVATION][f"ee.{k}"] = PolicyFeature(
-                type=FeatureType.STATE, shape=(1,)
-            )
+        for robot_name in self.kinematics:
+            for n in self.motor_names:
+                features[PipelineFeatureType.OBSERVATION].pop(f"{robot_name}_{n}.pos", None)
+
+            # We specify the dataset features of this step that we want to be stored in the dataset
+            for k in ["x", "y", "z", "wx", "wy", "wz", "gripper_pos"]:
+                features[PipelineFeatureType.OBSERVATION][f"{robot_name}_ee.{k}"] = PolicyFeature(
+                    type=FeatureType.STATE, shape=(1,)
+                )
         return features
 
 

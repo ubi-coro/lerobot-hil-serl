@@ -68,8 +68,8 @@ class BiSO100Follower(Robot):
 
     @property
     def _motors_ft(self) -> dict[str, type]:
-        return {f"left_{motor}.pos": float for motor in self.left_arm.bus.motors} | {
-            f"right_{motor}.pos": float for motor in self.right_arm.bus.motors
+        return {f"left.{motor}.pos": float for motor in self.left_arm.bus.motors} | {
+            f"right.{motor}.pos": float for motor in self.right_arm.bus.motors
         }
 
     @property

@@ -143,7 +143,7 @@ class MotorCurrentProcessorStep(ObservationProcessorStep):
                the hardware bus.
     """
 
-    robot: Robot | None = None
+    robot_dict: dict[str, Robot] | None = None
 
     def observation(self, observation: dict) -> dict:
         """
@@ -160,12 +160,17 @@ class MotorCurrentProcessorStep(ObservationProcessorStep):
             ValueError: If the `robot` attribute has not been set.
         """
         # Get current values from robot state
-        if self.robot is None:
+        if self.robot_dict is None:
             raise ValueError("Robot is not set")
 
-        present_current_dict = self.robot.bus.sync_read("Present_Current")  # type: ignore[attr-defined]
+        motor_currents = []
+        for name, robot in self.robot_dict:
+            if hasattr(robot, "bus") and hasattr(robot.bus, "motors"):
+                present_current_dict = robot.bus.sync_read("Present_Current")  # type: ignore[attr-defined]
+                motor_currents.extend([present_current_dict[name] for name in robot.bus.motors])
+
         motor_currents = torch.tensor(
-            [present_current_dict[name] for name in self.robot.bus.motors],  # type: ignore[attr-defined]
+            motor_currents,  # type: ignore[attr-defined]
             dtype=torch.float32,
         ).unsqueeze(0)
 
@@ -200,8 +205,10 @@ class MotorCurrentProcessorStep(ObservationProcessorStep):
             original_feature = features[PipelineFeatureType.OBSERVATION][OBS_STATE]
             # Add motor current dimensions to the original state shape
             num_motors = 0
-            if hasattr(self.robot, "bus") and hasattr(self.robot.bus, "motors"):  # type: ignore[attr-defined]
-                num_motors = len(self.robot.bus.motors)  # type: ignore[attr-defined]
+
+            for robot in self.robot_dict.values():
+                if hasattr(robot, "bus") and hasattr(robot.bus, "motors"):  # type: ignore[attr-defined]
+                    num_motors += len(self.robot.bus.motors)  # type: ignore[attr-defined]
 
             if num_motors > 0:
                 new_shape = (original_feature.shape[0] + num_motors,) + original_feature.shape[1:]

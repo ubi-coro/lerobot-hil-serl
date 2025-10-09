@@ -15,7 +15,7 @@
 """
 Provides the OpenCVCamera class for capturing frames from cameras using OpenCV.
 """
-
+import argparse
 import logging
 import math
 import os
@@ -115,6 +115,7 @@ class OpenCVCamera(Camera):
         self.fps = config.fps
         self.color_mode = config.color_mode
         self.warmup_s = config.warmup_s
+        self.focus = config.focus
 
         self.videocapture: cv2.VideoCapture | None = None
 
@@ -215,6 +216,10 @@ class OpenCVCamera(Camera):
                 self.capture_width, self.capture_height = default_width, default_height
         else:
             self._validate_width_and_height()
+
+        self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        if self.focus is not None:
+            self.camera.set(cv2.CAP_PROP_FOCUS, self.focus)
 
     def _validate_fps(self) -> None:
         """Validates and sets the camera's frames per second (FPS)."""
@@ -483,3 +488,48 @@ class OpenCVCamera(Camera):
             self.videocapture = None
 
         logger.info(f"{self} disconnected.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Save a few frames using `OpenCVCamera` for all cameras connected to the computer, or a selected subset."
+    )
+    parser.add_argument(
+        "--camera-ids",
+        type=int,
+        nargs="*",
+        default=None,
+        help="List of camera indices used to instantiate the `OpenCVCamera`. If not provided, find and use all available camera indices.",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=None,
+        help="Set the number of frames recorded per seconds for all cameras. If not provided, use the default fps of each camera.",
+    )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        help="Set the width for all cameras. If not provided, use the default width of each camera.",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=None,
+        help="Set the height for all cameras. If not provided, use the default height of each camera.",
+    )
+    parser.add_argument(
+        "--images-dir",
+        type=Path,
+        default="outputs/images_from_opencv_cameras",
+        help="Set directory to save a few frames for each camera.",
+    )
+    parser.add_argument(
+        "--record-time-s",
+        type=float,
+        default=4.0,
+        help="Set the number of seconds used to record the frames. By default, 2 seconds.",
+    )
+    args = parser.parse_args()
+    save_images_from_cameras(**vars(args))
