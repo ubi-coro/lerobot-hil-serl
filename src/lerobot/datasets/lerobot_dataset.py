@@ -1348,7 +1348,7 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
                 root=self.root / repo_id,
                 episodes=episodes[repo_id] if episodes else None,
                 image_transforms=image_transforms,
-                delta_timestamps=delta_timestamps,
+                delta_timestamps=delta_timestamps[repo_id],
                 tolerance_s=self.tolerances_s[repo_id],
                 download_videos=download_videos,
                 video_backend=video_backend,

@@ -15,8 +15,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import logging
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -493,3 +495,40 @@ def finalize_aggregation(aggr_meta, all_metadata):
     logging.info("write stats")
     aggr_meta.stats = aggregate_stats([m.stats for m in all_metadata])
     write_stats(aggr_meta.stats, aggr_meta.root)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--dataset_dir",
+        type=str,
+    )
+    parser.add_argument(
+        "--aggr_root",
+        type=str,
+        default=None
+    )
+    parser.add_argument(
+        "--aggr_name",
+        type=str,
+        default="aggregate"
+    )
+    args = parser.parse_args()
+
+    repo_ids = []
+    roots = []
+    for sub in sorted(Path(args.dataset_dir).iterdir()):
+        roots.append(sub)
+        repo_ids.append("/".join(sub.parts[-2:]))
+
+    aggregate_datasets(
+        repo_ids=repo_ids,
+        roots=roots,
+        aggr_root=args.aggr_root if args.aggr_root is not None else Path(args.dataset_dir) / args.aggr_name,
+        aggr_repo_id=args.aggr_root
+    )
+
+
+if __name__ == "__main__":
+    main()
