@@ -217,9 +217,9 @@ class OpenCVCamera(Camera):
         else:
             self._validate_width_and_height()
 
-        self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        self.videocapture.set(cv2.CAP_PROP_AUTOFOCUS, 0)
         if self.focus is not None:
-            self.camera.set(cv2.CAP_PROP_FOCUS, self.focus)
+            self.videocapture.set(cv2.CAP_PROP_FOCUS, self.focus)
 
     def _validate_fps(self) -> None:
         """Validates and sets the camera's frames per second (FPS)."""

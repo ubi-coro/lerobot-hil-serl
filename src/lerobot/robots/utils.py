@@ -13,7 +13,10 @@
 # limitations under the License.
 
 import logging
+from datetime import time
+from functools import cached_property
 from pprint import pformat
+from typing import Any
 
 from lerobot.robots import RobotConfig
 
@@ -65,6 +68,10 @@ def make_robot_from_config(config: RobotConfig) -> Robot:
         from tests.mocks.mock_robot import MockRobot
 
         return MockRobot(config)
+    elif config.type == "ur":
+        from .ur import TF_UR
+
+        return TF_UR(config)
     else:
         raise ValueError(config.type)
 
@@ -106,3 +113,120 @@ def ensure_safe_goal_position(
         )
 
     return safe_goal_positions
+
+
+class MultiRobot(Robot):
+    """
+    Generic multi-robot wrapper that accepts a dictionary of robots.
+
+    Example:
+        robots = {
+            "left": SO100Follower(left_cfg),
+            "right": SO100Follower(right_cfg),
+        }
+        cameras = make_cameras_from_configs(camera_cfgs)
+
+        multi = MultiRobot(robots=robots, cameras=cameras)
+    """
+
+    name = "multi_robot"
+
+    def __init__(self, robots: dict[str, Robot]):
+        self.robots = robots
+
+        self.cameras = {}
+        for robot in self.robots.values():
+            self.cameras.update(robot.cameras)
+            robot.cameras = {}
+
+    # --- Features ---
+    @property
+    def _motors_ft(self) -> dict[str, type]:
+        ft = {}
+        for name, robot in self.robots.items():
+            for motor in robot.bus.motors:
+                ft[f"{name}.{motor}.pos"] = float
+        return ft
+
+    @property
+    def _cameras_ft(self) -> dict[str, tuple]:
+        return {
+            cam: (cam_cfg.height, cam_cfg.width, 3)
+            for cam, cam_cfg in getattr(self, "config", {}).get("cameras", {}).items()
+        }
+
+    @cached_property
+    def observation_features(self) -> dict[str, type | tuple]:
+        return {**self._motors_ft, **self._cameras_ft}
+
+    @cached_property
+    def action_features(self) -> dict[str, type]:
+        return self._motors_ft
+
+    # --- Connection / Calibration ---
+
+    @property
+    def is_connected(self) -> bool:
+        return all(r.bus.is_connected for r in self.robots.values()) and all(
+            cam.is_connected for cam in self.cameras.values()
+        )
+
+    def connect(self, calibrate: bool = True) -> None:
+        for robot in self.robots.values():
+            robot.connect(calibrate)
+        for cam in self.cameras.values():
+            cam.connect()
+
+    @property
+    def is_calibrated(self) -> bool:
+        return all(r.is_calibrated for r in self.robots.values())
+
+    def calibrate(self) -> None:
+        for robot in self.robots.values():
+            robot.calibrate()
+
+    def configure(self) -> None:
+        for robot in self.robots.values():
+            robot.configure()
+
+    def setup_motors(self) -> None:
+        for robot in self.robots.values():
+            robot.setup_motors()
+
+    # --- Obs / Action ---
+
+    def get_observation(self) -> dict[str, Any]:
+        obs_dict = {}
+
+        for name, robot in self.robots.items():
+            robot_obs = robot.get_observation()
+            obs_dict.update({f"{name}_{k}": v for k, v in robot_obs.items()})
+
+        for cam_key, cam in self.cameras.items():
+            start = time.perf_counter()
+            obs_dict[cam_key] = cam.async_read()
+            dt_ms = (time.perf_counter() - start) * 1e3
+            logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+
+        return obs_dict
+
+    def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        results = {}
+        for name, robot in self.robots.items():
+            sub_action = {
+                k.removeprefix(f"{name}_"): v
+                for k, v in action.items()
+                if k.startswith(f"{name}_")
+            }
+            res = robot.send_action(sub_action)
+            results.update({f"{name}_{k}": v for k, v in res.items()})
+        return results
+
+    def disconnect(self) -> None:
+        for robot in self.robots.values():
+            robot.disconnect()
+        for cam in self.cameras.values():
+            cam.disconnect()
+
+
+

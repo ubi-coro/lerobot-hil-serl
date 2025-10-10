@@ -15,7 +15,7 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
     def __init__(self, config: 'SpaceMouseConfig'):
         self.id = config.id
 
-        #pyspacemouse.open(device=config.device)
+        pyspacemouse.open(device=config.device)
 
         self.stop_event = multiprocessing.Event()
 
@@ -37,7 +37,7 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
 
     @property
     def is_connected(self) -> bool:
-        return self.process is not None #and self.process.is_alive()
+        return self.process is not None and self.process.is_alive()
 
     def connect(self, _: bool = True) -> None:
         if self.is_connected:
@@ -47,7 +47,7 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
             target=self._read_spacemouse, name="SpaceMouseReader"
         )
         self.process.daemon = True
-        s#elf.process.start()
+        self.process.start()
 
         logger.info(f"{self} connected.")
 
@@ -63,7 +63,6 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
 
     def get_action(self) -> dict[str, float]:
         start = time.perf_counter()
-        print(self.latest_data)
         latest_action = self.latest_data.get("action", [0.0] * 6)
         action = {f"{ax}.vel": latest_action[i] for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"])}
         dt_ms = (time.perf_counter() - start) * 1e3

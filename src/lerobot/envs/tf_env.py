@@ -62,7 +62,7 @@ class TaskFrameEnv(gym.Env):
         self._image_keys: set[str] = set()
         for name, robot in self.robot_dict.items():
             self._motor_keys.update([f"{name}.{key}" for key in robot._motors_ft])
-            self._image_keys.update([f"{name}.{key}" for key in robot._cameras_ft])
+            self._image_keys.update(robot._cameras_ft.keys())
 
         self._setup_spaces()
 
@@ -98,14 +98,17 @@ class TaskFrameEnv(gym.Env):
 
     def _get_observation(self):
         obs_dict = {}
+        if self._image_keys:
+            obs_dict["pixels"] = {}
+
         for name in self.robot_dict:
             robot_obs_dict = self.robot_dict[name].get_observation()
             obs_dict |= {f"{name}.{key}": robot_obs_dict[key] for key in robot_obs_dict}
 
-        if self._image_keys:
-            obs_dict["pixels"] = {}
             for image_key in self._image_keys:
-                obs_dict["pixels"][image_key] = obs_dict[image_key]
+                if image_key in robot_obs_dict:
+                    obs_dict["pixels"][image_key] = robot_obs_dict[image_key]
+
         return obs_dict
 
     def _get_info(self):
@@ -195,8 +198,8 @@ if __name__ == "__main__":
     import torch
 
     env_config = TFHilSerlRobotEnvConfig(
-        robot=URConfig(mock=True, model="ur3e", robot_ip="127.0.0.1"),#, cameras={"main": OpenCVCameraConfig(index_or_path=4)}),
-        teleop=KeyboardEndEffectorTeleopConfig(),
+        robot=URConfig(mock=True, model="ur3e", robot_ip="127.0.0.1", cameras={"main": OpenCVCameraConfig(index_or_path=4)}),
+        teleop=SpacemouseConfig(),
     )
 
     online_env, env_processor, action_processor = make_robot_env(cfg=env_config)

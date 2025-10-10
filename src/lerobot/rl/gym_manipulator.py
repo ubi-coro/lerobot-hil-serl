@@ -343,20 +343,15 @@ def make_robot_env(cfg: 'HilSerlRobotEnvConfig', device: str = "cpu") -> tuple[g
     assert cfg.teleop is not None, "Teleop config must be provided for real robot environment"
 
     # Handle multi robot configuration
-    if isinstance(cfg.robot, dict):
-        assert isinstance(cfg.teleop, dict)
-        assert set(cfg.robot.keys()) == set(cfg.teleop.keys())
+    robot_dict = cfg.robot if isinstance(cfg.robot, dict) else {DEFAULT_ROBOT_NAME: cfg.robot}
+    for name in robot_dict:
+        robot_dict[name] = make_robot_from_config(robot_dict[name])
+        robot_dict[name].connect()
 
-        robot_dict = {make_robot_from_config(cfg) for cfg in cfg.robot.values()}
-        teleop_dict = {make_teleoperator_from_config(cfg) for cfg in cfg.teleop.values()}
-    else:
-        robot_dict = {DEFAULT_ROBOT_NAME: make_robot_from_config(cfg.robot)}
-        teleop_dict = {DEFAULT_ROBOT_NAME: make_teleoperator_from_config(cfg.teleop)}
-
-    # connect to all devices
-    for robot_name in robot_dict:
-        robot_dict[robot_name].connect()
-        teleop_dict[robot_name].connect()
+    teleop_dict = cfg.teleop if isinstance(cfg.teleop, dict) else {DEFAULT_ROBOT_NAME: cfg.teleop}
+    for name in teleop_dict:
+        teleop_dict[name] = make_teleoperator_from_config(teleop_dict[name])
+        teleop_dict[name].connect()
 
     # go through each processor and check if we need to turn scalar configs into configs for each robot
     for attr in ["observation", "gripper", "reset", "inverse_kinematics", "task_frame"]:
