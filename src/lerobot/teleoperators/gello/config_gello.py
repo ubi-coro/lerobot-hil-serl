@@ -15,14 +15,20 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from typing import Any
 
 from ..config import TeleoperatorConfig
+from ...motors import Motor
 
 
 @TeleoperatorConfig.register_subclass("widowx")
 @dataclass
-class WidowXConfig(TeleoperatorConfig):
+class GelloConfig(TeleoperatorConfig):
     port: str  # Port to connect to the arm
+
+    motors: dict[str, Motor]  # dict for motors, defines the action
+
+    offsets: dict[str, int]
 
     # The duration of the velocity-based time profile
     # Higher values lead to smoother motions, but increase lag.

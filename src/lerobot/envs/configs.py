@@ -19,6 +19,7 @@ from typing import Any
 
 import draccus
 
+from lerobot.cameras import CameraConfig, make_cameras_from_configs
 from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.envs.tf_env import TaskFrameEnv
 from lerobot.processor import AddTeleopActionAsComplimentaryDataStep, AddTeleopEventsAsInfoStep, InterventionActionProcessorStep, \
@@ -26,12 +27,13 @@ from lerobot.processor import AddTeleopActionAsComplimentaryDataStep, AddTeleopE
     RewardClassifierProcessorStep, AddBatchDimensionProcessorStep, DeviceProcessorStep
 from lerobot.processor.converters import identity_transition
 from lerobot.processor.tff_processor import VanillaTFFProcessorStep, SixDofVelocityInterventionActionProcessorStep
-from lerobot.rl.gym_manipulator import RobotEnv, make_default_processors
-from lerobot.robots import RobotConfig, Robot
-from lerobot.robots.ur import TF_UR
+from lerobot.rl.gym_manipulator import make_default_processors
+from lerobot.robots import RobotConfig, make_robot_from_config
+from lerobot.envs.robot_env import RobotEnv
 from lerobot.robots.ur.tff_controller import TaskFrameCommand
+from lerobot.teleoperators import make_teleoperator_from_config
 from lerobot.teleoperators.config import TeleoperatorConfig
-from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE, DEFAULT_ROBOT_NAME
 
 
 @dataclass
@@ -311,6 +313,7 @@ class HilSerlRobotEnvConfig(EnvConfig):
     robot: RobotConfig | dict[str, RobotConfig] | None = None
     teleop: TeleoperatorConfig | dict[str, TeleoperatorConfig] | None = None
     processor: HILSerlProcessorConfig = HILSerlProcessorConfig()
+    cameras: dict[str, CameraConfig] = field(default_factory=dict)
 
     name: str = "real_robot"
     root: str | None = None
@@ -319,12 +322,39 @@ class HilSerlRobotEnvConfig(EnvConfig):
     def gym_kwargs(self) -> dict:
         return {}
 
-    def make_env(self, robot_dict: dict[str, Robot]):
+    def _init_devices(self):
+        assert self.robot is not None, "Robot config must be provided for real robot environment"
+        assert self.teleop is not None, "Teleop config must be provided for real robot environment"
+
+        # Handle multi robot configuration
+        robot_dict = self.robot if isinstance(self.robot, dict) else {DEFAULT_ROBOT_NAME: self.robot}
+        for name in robot_dict:
+            robot_dict[name].cameras = {}
+            robot_dict[name] = make_robot_from_config(robot_dict[name])
+            robot_dict[name].connect()
+
+        teleop_dict = self.teleop if isinstance(self.teleop, dict) else {DEFAULT_ROBOT_NAME: self.teleop}
+        for name in teleop_dict:
+            teleop_dict[name] = make_teleoperator_from_config(teleop_dict[name])
+            teleop_dict[name].connect()
+
+        cameras = make_cameras_from_configs(self.cameras)
+
+        # go through each processor and check if we need to turn scalar configs into configs for each robot
+        for attr in ["observation", "gripper", "reset", "inverse_kinematics", "task_frame"]:
+            if not isinstance(getattr(self.processor, attr), dict):
+                setattr(self.processor, attr, {name: getattr(self.processor, attr) for name in robot_dict})
+
+        return robot_dict, teleop_dict, cameras
+
+    def make(self, device) -> tuple[RobotEnv, Any, Any]:
+        robot_dict, teleop_dict, cameras = self._init_devices()
+
         use_gripper = {name: self.processor.gripper[name].use_gripper for name in self.processor}
         reset_pose = {name: self.processor.reset[name].reset_pose for name in self.processor}
         reset_time_s = {name: self.processor.reset[name].reset_time_s for name in self.processor}
 
-        return RobotEnv(
+        env = RobotEnv(
             robot=robot_dict,
             use_gripper=use_gripper,
             reset_pose=reset_pose,
@@ -332,16 +362,18 @@ class HilSerlRobotEnvConfig(EnvConfig):
             display_cameras=self.processor.display_cameras,
         )
 
-    def make_processors(self, env, teleop_device, device):
-        env_processor, action_processor = make_default_processors(env, teleop_device, self, device)
-        return env_processor, action_processor
+        env_processor, action_processor = make_default_processors(env, teleop_dict, self, device)
+
+        return env, env_processor, action_processor
 
 
 @dataclass
 class TFHilSerlRobotEnvConfig(HilSerlRobotEnvConfig):
     """Configuration for the HILSerlRobotEnv environment."""
 
-    def make_env(self, robot_dict: dict[str, TF_UR]):
+    def make(self, device) -> tuple[TaskFrameEnv, Any, Any]:
+        robot_dict, teleop_dict, cameras = self._init_devices()
+
         task_frame = {name: self.processor.task_frame[name].command for name in self.processor.task_frame}
         control_mask = {name: self.processor.task_frame[name].control_mask for name in self.processor.task_frame}
         use_gripper = {name: self.processor.gripper[name].use_gripper for name in self.processor.gripper}
@@ -358,9 +390,9 @@ class TFHilSerlRobotEnvConfig(HilSerlRobotEnvConfig):
             display_cameras=self.processor.display_cameras,
         )
 
-        return env
+        return env, *self._processors(env, teleop_dict, device)
 
-    def make_processors(self, env: TaskFrameEnv, teleoperators, device) -> tuple[
+    def _processors(self, env: TaskFrameEnv, teleoperators, device) -> tuple[
         DataProcessorPipeline[EnvTransition, EnvTransition], DataProcessorPipeline[EnvTransition, EnvTransition]
     ]:
         terminate_on_success = {name: self.processor.reset[name].terminate_on_success for name in self.processor.reset}
@@ -413,16 +445,12 @@ class TFHilSerlRobotEnvConfig(HilSerlRobotEnvConfig):
         action_pipeline_steps = [
             AddTeleopActionAsComplimentaryDataStep(teleoperators=teleoperators),
             AddTeleopEventsAsInfoStep(teleoperators=teleoperators),
-        ]
-
-        # assumes keyboard, gamepad or spacemouse
-        action_pipeline_steps.append(
             SixDofVelocityInterventionActionProcessorStep(
                 use_gripper={name: self.processor.gripper[name].use_gripper for name in env.robot_dict},
                 control_mask={name: self.processor.task_frame[name].control_mask for name in self.processor.task_frame},
                 terminate_on_success=terminate_on_success,
             )
-        )
+        ]
 
         return (
             DataProcessorPipeline(env_pipeline_steps, to_transition=identity_transition, to_output=identity_transition),

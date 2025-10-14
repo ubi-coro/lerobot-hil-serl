@@ -101,15 +101,6 @@ def predict_action(
         torch.inference_mode(),
         torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
     ):
-        # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
-        for name in observation:
-            observation[name] = torch.from_numpy(observation[name])
-            if "image" in name:
-                observation[name] = observation[name].type(torch.float32) / 255
-                observation[name] = observation[name].permute(2, 0, 1).contiguous()
-            observation[name] = observation[name].unsqueeze(0)
-            observation[name] = observation[name].to(device)
-
         observation["task"] = task if task else ""
         observation["robot_type"] = robot_type if robot_type else ""
 
