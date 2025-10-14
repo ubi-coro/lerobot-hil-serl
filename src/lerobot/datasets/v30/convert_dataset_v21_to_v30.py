@@ -426,13 +426,14 @@ def convert_info(root, new_root, data_file_size_in_mb, video_file_size_in_mb):
 
 def convert_dataset(
     repo_id: str,
+    base: Path,
     branch: str | None = None,
     data_file_size_in_mb: int | None = None,
     video_file_size_in_mb: int | None = None,
 ):
-    root = HF_LEROBOT_HOME / repo_id
-    old_root = HF_LEROBOT_HOME / f"{repo_id}_old"
-    new_root = HF_LEROBOT_HOME / f"{repo_id}_v30"
+    root = base / repo_id
+    old_root = base / f"{repo_id}_old"
+    new_root = base / f"{repo_id}_v30"
 
     if data_file_size_in_mb is None:
         data_file_size_in_mb = DEFAULT_DATA_FILE_SIZE_IN_MB
@@ -446,12 +447,12 @@ def convert_dataset(
     if new_root.is_dir():
         shutil.rmtree(new_root)
 
-    snapshot_download(
-        repo_id,
-        repo_type="dataset",
-        revision=V21,
-        local_dir=root,
-    )
+    #snapshot_download(
+    #    repo_id,
+    #    repo_type="dataset",
+    #    revision=V21,
+    #    local_dir=root,
+    #)
 
     convert_info(root, new_root, data_file_size_in_mb, video_file_size_in_mb)
     convert_tasks(root, new_root)
@@ -461,6 +462,7 @@ def convert_dataset(
 
     shutil.move(str(root), str(old_root))
     shutil.move(str(new_root), str(root))
+    return
 
     hub_api = HfApi()
     try:
@@ -485,9 +487,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--repo-id",
         type=str,
-        required=True,
+        default="",
         help="Repository identifier on Hugging Face: a community or a user name `/` the name of the dataset "
         "(e.g. `lerobot/pusht`, `cadene/aloha_sim_insertion_human`).",
+    )
+    parser.add_argument(
+        "--root",
+        type=str,
+        default=None,
+        help="Process all datasets in root",
     )
     parser.add_argument(
         "--branch",
@@ -507,6 +515,18 @@ if __name__ == "__main__":
         default=None,
         help="File size in MB. Defaults to 100 for data and 500 for videos.",
     )
-
     args = parser.parse_args()
-    convert_dataset(**vars(args))
+
+    if args.root is not None:
+        root = Path(args.root)
+        for sub in sorted(root.iterdir()):
+            base = sub.parent.parent
+            repo_id = "/".join(sub.parts[-2:])
+            logging.info(f"Converting dataset in folder: {base} as repo {repo_id}")
+            convert_dataset(repo_id=repo_id, base=base)
+
+    else:
+        root = HF_LEROBOT_HOME
+        convert_dataset(root=root, **vars(args))
+
+
