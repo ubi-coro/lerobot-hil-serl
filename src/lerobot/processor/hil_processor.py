@@ -403,8 +403,10 @@ class InterventionActionProcessorStep(ProcessorStep):
                               `success` event is received.
     """
 
-    use_gripper: bool = False
-    terminate_on_success: bool = True
+    action_names: dict[str, dict]
+    use_gripper: dict[str, bool]
+    terminate_on_success: dict[str, bool]
+
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         """
@@ -418,13 +420,15 @@ class InterventionActionProcessorStep(ProcessorStep):
             reward, and termination status.
         """
         action = transition.get(TransitionKey.ACTION)
-        if not isinstance(action, PolicyAction):
-            raise ValueError(f"Action should be a PolicyAction type got {type(action)}")
+        assert isinstance(action, PolicyAction), f"Action should be a PolicyAction type got {type(action)}"
+        assert len(action) == sum([len(self.action_names[name]) for name in self.action_names])
 
         # Get intervention signals from complementary data
         info = transition.get(TransitionKey.INFO, {})
         complementary_data = transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
-        teleop_action = complementary_data.get(TELEOP_ACTION_KEY, {})
+
+        # Teleop actions come as dict[name -> {axis: value, ...}]
+        teleop_action_dict = complementary_data.get(TELEOP_ACTION_KEY, {})
         is_intervention = info.get(TeleopEvents.IS_INTERVENTION, False)
         terminate_episode = info.get(TeleopEvents.TERMINATE_EPISODE, False)
         success = info.get(TeleopEvents.SUCCESS, False)
@@ -433,20 +437,22 @@ class InterventionActionProcessorStep(ProcessorStep):
         new_transition = transition.copy()
 
         # Override action if intervention is active
-        if is_intervention and teleop_action is not None:
-            if isinstance(teleop_action, dict):
-                # Convert teleop_action dict to tensor format
-                action_list = [
-                    teleop_action.get("delta_x", 0.0),
-                    teleop_action.get("delta_y", 0.0),
-                    teleop_action.get("delta_z", 0.0),
-                ]
-                if self.use_gripper:
-                    action_list.append(teleop_action.get(GRIPPER_KEY, 1.0))
-            elif isinstance(teleop_action, np.ndarray):
-                action_list = teleop_action.tolist()
-            else:
-                action_list = teleop_action
+        if is_intervention and teleop_action_dict is not None:
+
+
+            for name, teleop_action in teleop_action_dict.items():
+                action_list = []
+
+                if isinstance(teleop_action, dict):
+                    # Convert teleop_action dict to tensor format
+                    for teleop_name in self.action_names[name]:
+                        if teleop_name == GRIPPER_KEY and not self.use_gripper[name]:
+                            continue
+                        action_list.append(teleop_action.get(teleop_name, 0.0))
+                elif isinstance(teleop_action, np.ndarray):
+                    action_list.extend(teleop_action.tolist())
+                else:
+                    action_list.extend(teleop_action)
 
             teleop_action_tensor = torch.tensor(action_list, dtype=action.dtype, device=action.device)
             new_transition[TransitionKey.ACTION] = teleop_action_tensor

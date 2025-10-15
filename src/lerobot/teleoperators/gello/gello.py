@@ -27,6 +27,7 @@ from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnected
 
 from ..teleoperator import Teleoperator
 from .config_gello import GelloConfig
+from ...robots.viperx.viperx import gripper_to_linear
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,11 @@ class Gello(Teleoperator):
             raise DeviceAlreadyConnectedError(f"{self} already connected")
 
         self.bus.connect()
+
+        if self.config.default_calibration:
+            with self.bus.torque_disabled():
+                self.bus.write_calibration(self.config.default_calibration)
+
         if not self.is_calibrated and calibrate:
             self.calibrate()
 
@@ -116,15 +122,6 @@ class Gello(Teleoperator):
         self.bus.disable_torque()
         self.bus.configure_motors()
 
-        # Set the drive mode to time-based profile to set moving time via velocity profiles
-        drive_mode = self.bus.read('Drive_Mode')
-        for i in range(len(self.bus.motor_names)):
-            drive_mode[i] |= 1 << 2  # set third bit to enable time-based profiles
-        self.bus.write('Drive_Mode', drive_mode)
-
-        # Set time profile
-        self.bus.write("Profile_Velocity", int(self.config.moving_time * 1000))
-
     def get_action(self) -> dict[str, float]:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
@@ -132,6 +129,7 @@ class Gello(Teleoperator):
         start = time.perf_counter()
         action = self.bus.sync_read("Present_Position")
         action = {f"{motor}.pos": val for motor, val in action.items()}
+        action["finger.pos"] = action.pop("gripper.pos")
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read action: {dt_ms:.1f}ms")
         return action

@@ -316,7 +316,6 @@ class HilSerlRobotEnvConfig(EnvConfig):
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
 
     name: str = "real_robot"
-    root: str | None = None
 
     @property
     def gym_kwargs(self) -> dict:
@@ -347,15 +346,15 @@ class HilSerlRobotEnvConfig(EnvConfig):
 
         return robot_dict, teleop_dict, cameras
 
-    def make(self, device) -> tuple[RobotEnv, Any, Any]:
+    def make(self, device: str = "cpu") -> tuple[RobotEnv, Any, Any]:
         robot_dict, teleop_dict, cameras = self._init_devices()
 
-        use_gripper = {name: self.processor.gripper[name].use_gripper for name in self.processor}
-        reset_pose = {name: self.processor.reset[name].reset_pose for name in self.processor}
-        reset_time_s = {name: self.processor.reset[name].reset_time_s for name in self.processor}
+        use_gripper = {name: self.processor.gripper[name].use_gripper for name in self.processor.gripper}
+        reset_pose = {name: self.processor.reset[name].fixed_reset_joint_positions for name in self.processor.reset}
+        reset_time_s = {name: self.processor.reset[name].reset_time_s for name in self.processor.reset}
 
         env = RobotEnv(
-            robot=robot_dict,
+            robot_dict=robot_dict,
             use_gripper=use_gripper,
             reset_pose=reset_pose,
             reset_time_s=reset_time_s,

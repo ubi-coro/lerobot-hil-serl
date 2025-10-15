@@ -123,11 +123,17 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
 
             for name, teleop_action in teleop_action_dict.items():
                 action_list = []
-                for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"]):
-                    if self.control_mask.get(name, [True]*6)[i]:
-                        action_list.append(teleop_action.get(f"{ax}.vel", 0.0))
-                if self.use_gripper.get(name, False):
-                    action_list.append(teleop_action.get(GRIPPER_KEY, 1.0))
+
+                if isinstance(teleop_action, dict):
+                    for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"]):
+                        if self.control_mask.get(name, [True]*6)[i]:
+                            action_list.append(teleop_action.get(f"{ax}.vel", 0.0))
+                    if self.use_gripper.get(name, False):
+                        action_list.append(teleop_action.get(GRIPPER_KEY, 1.0))
+                elif isinstance(teleop_action, np.ndarray):
+                    action_list.extend(teleop_action.tolist())
+                else:
+                    action_list.extend(teleop_action)
 
             new_transition[TransitionKey.ACTION] = torch.tensor(action_list, dtype=torch.float32)
 
@@ -138,6 +144,7 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
         new_transition[TransitionKey.REWARD] = float(success)
 
         # Update info / complementary data
+        info = new_transition.get(TransitionKey.INFO, {})
         info[TeleopEvents.IS_INTERVENTION] = is_intervention
         info[TeleopEvents.RERECORD_EPISODE] = rerecord_episode
         info[TeleopEvents.SUCCESS] = success
@@ -152,6 +159,7 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
         return {
             "use_gripper": self.use_gripper,
             "terminate_on_success": self.terminate_on_success,
+            "control_mask": self.control_mask
         }
 
     def transform_features(
