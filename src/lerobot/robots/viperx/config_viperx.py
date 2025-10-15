@@ -38,6 +38,10 @@ class ViperXConfig(RobotConfig):
     # then to gradually add more motors (by uncommenting), until you can teleoperate both arms fully
     max_relative_target: float | dict[str, float] = 5.0
 
+    # The duration of the velocity-based time profile
+    # Higher values lead to smoother motions, but increase lag.
+    moving_time: float = 0.1
+
     # cameras
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     # Troubleshooting: If one of your IntelRealSense cameras freeze during

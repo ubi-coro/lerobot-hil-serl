@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,16 +14,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
-
-from ..config import TeleoperatorConfig
-
-
-@TeleoperatorConfig.register_subclass("widowx")
-@dataclass
-class WidowXConfig(TeleoperatorConfig):
-    port: str  # Port to connect to the arm
-
-    # The duration of the velocity-based time profile
-    # Higher values lead to smoother motions, but increase lag.
-    moving_time: float = 0.1
+from .config_gello import GelloConfig
+from .gello import Gello
