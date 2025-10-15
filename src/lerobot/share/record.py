@@ -90,6 +90,7 @@ from pathlib import Path
 from pprint import pformat
 from typing import Any
 
+import draccus
 import numpy as np
 import torch
 
@@ -112,14 +113,12 @@ from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.processor import (
     PolicyAction,
     PolicyProcessorPipeline,
-    RobotAction,
-    RobotObservation,
     RobotProcessorPipeline,
-    make_default_processors, create_transition, TransitionKey,
+    create_transition,
+    TransitionKey,
 )
 from lerobot.processor.rename_processor import rename_stats
-from lerobot.rl.actor import log_policy_frequency_issue
-from lerobot.rl.gym_manipulator import make_robot_env, step_env_and_process_transition
+from lerobot.rl.gym_manipulator import step_env_and_process_transition
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
@@ -140,8 +139,7 @@ from lerobot.teleoperators import (  # noqa: F401
     so100_leader,
     so101_leader, TeleopEvents,
 )
-from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
-from lerobot.utils.constants import ACTION, OBS_STR, REWARD, DONE
+from lerobot.utils.constants import ACTION, REWARD, DONE
 from lerobot.utils.control_utils import (
     init_keyboard_listener,
     is_headless,
@@ -154,13 +152,13 @@ from lerobot.utils.transition import Transition
 from lerobot.utils.utils import (
     get_safe_torch_device,
     init_logging,
-    log_say, TimerManager,
+    log_say,
 )
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 
 @dataclass
-class DatasetRecordConfig:
+class DatasetRecordConfig(draccus.ChoiceRegistry):
     # Dataset identifier. By convention it should match '{hf_username}/{dataset_name}' (e.g. `lerobot/test`).
     repo_id: str
     # A short but accurate description of the task performed during the recording (e.g. "Pick the Lego block and drop it in the box on the right.")
@@ -221,9 +219,6 @@ class RecordConfig:
             cli_overrides = parser.get_cli_overrides("policy")
             self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
             self.policy.pretrained_path = policy_path
-
-        if self.teleop is None and self.policy is None:
-            raise ValueError("Choose a policy, a teleoperator or both to control the robot")
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
@@ -371,7 +366,13 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     if cfg.display_data:
         init_rerun(session_name="recording")
 
-    env, env_processor, action_processor = make_robot_env(cfg.env)
+    env, env_processor, action_processor = cfg.env.make()
+
+    aggregate_pipeline_dataset_features(
+        pipeline=action_processor,
+        initial_features=create_initial_features(action=env.action_features),
+        use_videos=cfg.dataset.video,
+    ),
 
     dataset_features = combine_feature_dicts(
         aggregate_pipeline_dataset_features(
@@ -481,9 +482,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
     log_say("Stop recording", cfg.play_sounds, blocking=True)
 
-    robot.disconnect()
-    if teleop is not None:
-        teleop.disconnect()
+    env.close()
 
     if not is_headless() and listener is not None:
         listener.stop()
@@ -496,6 +495,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
 
 def main():
+    import experiments
     record()
 
 

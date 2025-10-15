@@ -17,7 +17,6 @@ Assumptions
 * Units:  metres, rad, N, N·m
 """
 import collections
-import logging
 import os
 import time
 import enum
@@ -143,7 +142,7 @@ class RTDETFFController(mp.Process):
 
         # 2) Build the ring buffer for streaming back pose/vel/force
         if self.config.mock:
-            from tests.motors.mock_ur_rtde import RTDEReceiveInterface
+            from tests.mocks.mock_ur_rtde import RTDEReceiveInterface
         else:
             from rtde_receive import RTDEReceiveInterface
         rtde_r = RTDEReceiveInterface(hostname=config.robot_ip)
@@ -273,7 +272,7 @@ class RTDETFFController(mp.Process):
 
         # 2) Start RTDEControl & RTDEReceive
         if self.config.mock:
-            from tests.motors.mock_ur_rtde import RTDEControlInterface, RTDEReceiveInterface
+            from tests.mocks.mock_ur_rtde import RTDEControlInterface, RTDEReceiveInterface
         else:
             from rtde_control import RTDEControlInterface
             from rtde_receive import RTDEReceiveInterface

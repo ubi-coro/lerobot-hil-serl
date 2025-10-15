@@ -5,6 +5,8 @@ import gymnasium as gym
 import numpy as np
 import torch
 
+from lerobot.configs.types import PolicyFeature, FeatureType
+from lerobot.processor.hil_processor import GRIPPER_KEY
 from lerobot.robots import Robot
 from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.constants import OBS_STATE, OBS_IMAGES
@@ -23,7 +25,7 @@ def reset_follower_position(robot_arm: Robot, target_position: np.ndarray) -> No
     )  # NOTE: 30 is just an arbitrary number
     for pose in trajectory:
         action_dict = dict(zip(current_position_dict, pose, strict=False))
-        robot_arm.bus.sync_write("Goal_Position", action_dict)
+        #robot_arm.bus.sync_write("Goal_Position", action_dict)
         busy_wait(0.015)
 
 
@@ -50,6 +52,7 @@ class RobotEnv(gym.Env):
         super().__init__()
 
         self.robot_dict = robot_dict
+        self.use_gripper = use_gripper
         self.display_cameras = display_cameras
 
         if reset_pose is None:
@@ -61,19 +64,59 @@ class RobotEnv(gym.Env):
         self.current_step = 0
         self.episode_data = None
 
-        self._joint_names = {}
-        self._image_keys = {}
+        self._joint_names_list = []
+        self._joint_names_dict = {}
+        self._image_keys = []
         for name, robot in self.robot_dict.items():
-            self._joint_names | [f"{name}.{key}" for key in robot._motors_ft]
-            self._image_keys | [f"{name}.{key}" for key in robot._cameras_ft]
+            ft = robot._motors_ft
+            if f"{GRIPPER_KEY}.pos" in ft and not self.use_gripper[name]:
+                ft.pop(f"{GRIPPER_KEY}.pos")
+
+            self._joint_names_list.extend([f"{name}.{key}" for key in ft])
+            self._joint_names_dict[name] = ft
+            self._image_keys.extend(robot._cameras_ft.keys())
 
         self.reset_pose = reset_pose
         self.reset_time_s = reset_time_s
 
-        self.use_gripper = use_gripper
         self._raw_joint_positions = None
 
         self._setup_spaces()
+
+    @property
+    def action_features(self) -> PolicyFeature:
+        """
+        A dictionary describing the structure and types of the actions expected by the robot. Its structure
+        (keys) should match the structure of what is passed to :pymeth:`send_action`. Values for the dict
+        should be the type of the value if it's a simple value, e.g. `float` for single proprioceptive value
+        (a joint's goal position/velocity)
+
+        Note: this property should be able to be called regardless of whether the robot is connected or not.
+        """
+        return {key: float for key in self._joint_names_list}
+
+
+    @property
+    def observation_features(self) -> dict:
+        """
+        A dictionary describing the structure and types of the actions expected by the robot. Its structure
+        (keys) should match the structure of what is passed to :pymeth:`send_action`. Values for the dict
+        should be the type of the value if it's a simple value, e.g. `float` for single proprioceptive value
+        (a joint's goal position/velocity)
+
+        Note: this property should be able to be called regardless of whether the robot is connected or not.
+        """
+        ft = {"agent_pos": float}
+        for name in self.robot_dict:
+            ft |= {f"{name}.{key}": float for key in self.robot_dict[name]._motors_ft}
+
+        if self._image_keys:
+            ft["pixels"] = {}
+            for name in self.robot_dict:
+                ft["pixels"] |= self.robot_dict[name]._cameras_ft
+
+        return ft
+
 
     def _get_observation(self) -> dict[str, Any]:
         """Get current robot observation including joint positions and camera images."""
@@ -81,11 +124,14 @@ class RobotEnv(gym.Env):
         images = {}
         for name in self.robot_dict:
             obs_dict = self.robot_dict[name].get_observation()
-            raw_joint_joint_position |= {f"{name}.{key}": obs_dict[key] for key in self.robot_dict[name]._motors_ft}
+            raw_joint_joint_position |= {f"{name}.{key}": obs_dict[key] for key in self._joint_names_dict[name]}
             images |= {key: obs_dict[key] for key in self.robot_dict[name]._cameras_ft}
 
-        joint_positions = np.concat(list(raw_joint_joint_position.values()))
-        return {"agent_pos": joint_positions, "pixels": images, **raw_joint_joint_position}
+        obs = {"agent_pos": np.array(list(raw_joint_joint_position.values())), **raw_joint_joint_position}
+        if self._image_keys:
+            obs["pixels"] = images
+
+        return obs
 
     def _setup_spaces(self) -> None:
         """Configure observation and action spaces based on robot capabilities."""
@@ -115,7 +161,7 @@ class RobotEnv(gym.Env):
         self.observation_space = gym.spaces.Dict(observation_spaces)
 
         # Define the action space for joint positions along with setting an intervention flag.
-        action_dim = len(self._joint_names)
+        action_dim = len(self._joint_names_list)
         bounds = {}
         bounds["min"] = -np.ones(action_dim)
         bounds["max"] = np.ones(action_dim)
@@ -155,7 +201,7 @@ class RobotEnv(gym.Env):
                 reset_follower_position(robot, np.array(self.reset_pose[name]))
                 log_say("Reset the environment done.", play_sounds=True)
 
-            busy_wait(self.reset_time_s - (time.perf_counter() - start_time))
+            busy_wait(self.reset_time_s.get(name, 1.0) - (time.perf_counter() - start_time))
 
         super().reset(seed=seed, options=options)
 
@@ -163,7 +209,7 @@ class RobotEnv(gym.Env):
         self.current_step = 0
         self.episode_data = None
         obs = self._get_observation()
-        self._raw_joint_positions = {f"{key}.pos": obs[f"{key}.pos"] for key in self._joint_names}
+        self._raw_joint_positions = {key: obs[key] for key in self._joint_names_list}
         return obs, {TeleopEvents.IS_INTERVENTION: False}
 
     def step(self, action) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
@@ -171,12 +217,13 @@ class RobotEnv(gym.Env):
 
         idx_start = 0
         for name, robot in self.robot_dict.items():
-            target_joint_positions = {f"{key}.pos": action[idx_start + i] for i, key in enumerate(robot._motors_ft)}
+            target_joint_positions = {key: action[idx_start + i] for i, key in enumerate(self._joint_names_dict[name])}
             robot.send_action(target_joint_positions)
+            idx_start += len(self._joint_names_dict[name])
 
         obs = self._get_observation()
 
-        self._raw_joint_positions = {f"{key}.pos": obs[f"{key}.pos"] for key in self._joint_names}
+        self._raw_joint_positions = {key: obs[key] for key in self._joint_names_list}
 
         if self.display_cameras:
             self.render()
@@ -209,8 +256,8 @@ class RobotEnv(gym.Env):
 
     def close(self) -> None:
         """Close environment and disconnect robot."""
-        if self.robot.is_connected:
-            self.robot.disconnect()
+        for robot in self.robot_dict.values():
+            robot.disconnect()
 
     def get_raw_joint_positions(self) -> dict[str, float]:
         """Get raw joint positions."""

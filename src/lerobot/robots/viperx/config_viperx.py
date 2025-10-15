@@ -24,7 +24,7 @@ from ..config import RobotConfig
 class ViperXConfig(RobotConfig):
     port: str  # Port to connect to the arm
 
-    disable_torque_on_disconnect: bool = True
+    disable_torque_on_disconnect: bool = False
 
     # /!\ FOR SAFETY, READ THIS /!\
     # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.

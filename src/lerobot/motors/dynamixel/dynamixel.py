@@ -195,20 +195,22 @@ class DynamixelMotorsBus(MotorsBus):
             self.write("Homing_Offset", motor, calibration.homing_offset)
             self.write("Min_Position_Limit", motor, calibration.range_min)
             self.write("Max_Position_Limit", motor, calibration.range_max)
+            self.write("Drive_Mode", motor, calibration.drive_mode)
 
         if cache:
             self.calibration = calibration_dict
 
-    def disable_torque(self, motors: str | list[str] | None = None, num_retry: int = 0) -> None:
+    def disable_torque(self, motors: str | list[str] | None = None, num_retry: int = 10) -> None:
         for motor in self._get_motors_list(motors):
             self.write("Torque_Enable", motor, TorqueMode.DISABLED.value, num_retry=num_retry)
 
-    def _disable_torque(self, motor_id: int, model: str, num_retry: int = 0) -> None:
+    def _disable_torque(self, motor_id: int, model: str, num_retry: int = 10) -> None:
         addr, length = get_address(self.model_ctrl_table, model, "Torque_Enable")
         self._write(addr, length, motor_id, TorqueMode.DISABLED.value, num_retry=num_retry)
 
-    def enable_torque(self, motors: str | list[str] | None = None, num_retry: int = 0) -> None:
+    def enable_torque(self, motors: str | list[str] | None = None, num_retry: int = 10) -> None:
         for motor in self._get_motors_list(motors):
+            print(motor)
             self.write("Torque_Enable", motor, TorqueMode.ENABLED.value, num_retry=num_retry)
 
     def _encode_sign(self, data_name: str, ids_values: dict[int, int]) -> dict[int, int]:
@@ -247,7 +249,7 @@ class DynamixelMotorsBus(MotorsBus):
     def _split_into_byte_chunks(self, value: int, length: int) -> list[int]:
         return _split_into_byte_chunks(value, length)
 
-    def broadcast_ping(self, num_retry: int = 0, raise_on_error: bool = False) -> dict[int, int] | None:
+    def broadcast_ping(self, num_retry: int = 10, raise_on_error: bool = False) -> dict[int, int] | None:
         for n_try in range(1 + num_retry):
             data_list, comm = self.packet_handler.broadcastPing(self.port_handler)
             if self._is_comm_success(comm):

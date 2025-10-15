@@ -79,6 +79,7 @@ def assert_same_address(model_ctrl_table: dict[str, dict], motor_models: list[st
 
 
 class MotorNormMode(str, Enum):
+    RANGE_0_1 = "range_0_1"
     RANGE_0_100 = "range_0_100"
     RANGE_M100_100 = "range_m100_100"
     DEGREES = "degrees"
@@ -553,7 +554,7 @@ class MotorsBus(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def disable_torque(self, motors: int | str | list[str] | None = None, num_retry: int = 0) -> None:
+    def disable_torque(self, motors: int | str | list[str] | None = None, num_retry: int = 10) -> None:
         """Disable torque on selected motors.
 
         Disabling Torque allows to write to the motors' permanent memory area (EPROM/EEPROM).
@@ -567,11 +568,11 @@ class MotorsBus(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def _disable_torque(self, motor: int, model: str, num_retry: int = 0) -> None:
+    def _disable_torque(self, motor: int, model: str, num_retry: int = 10) -> None:
         pass
 
     @abc.abstractmethod
-    def enable_torque(self, motors: str | list[str] | None = None, num_retry: int = 0) -> None:
+    def enable_torque(self, motors: str | list[str] | None = None, num_retry: int = 10) -> None:
         """Enable torque on selected motors.
 
         Args:
@@ -789,6 +790,9 @@ class MotorsBus(abc.ABC):
             elif self.motors[motor].norm_mode is MotorNormMode.RANGE_0_100:
                 norm = ((bounded_val - min_) / (max_ - min_)) * 100
                 normalized_values[id_] = 100 - norm if drive_mode else norm
+            elif self.motors[motor].norm_mode is MotorNormMode.RANGE_0_1:
+                norm = ((bounded_val - min_) / (max_ - min_))
+                normalized_values[id_] = 1.0 - norm if drive_mode else norm
             elif self.motors[motor].norm_mode is MotorNormMode.DEGREES:
                 mid = (min_ + max_) / 2
                 max_res = self.model_resolution_table[self._id_to_model(id_)] - 1
@@ -823,6 +827,10 @@ class MotorsBus(abc.ABC):
                 val = 100 - val if drive_mode else val
                 bounded_val = min(100.0, max(0.0, val))
                 unnormalized_values[id_] = int((bounded_val / 100) * (max_ - min_) + min_)
+            elif self.motors[motor].norm_mode is MotorNormMode.RANGE_0_1:
+                val = 1.0 - val if drive_mode else val
+                bounded_val = min(1.0, max(0.0, val))
+                unnormalized_values[id_] = int((bounded_val) * (max_ - min_) + min_)
             elif self.motors[motor].norm_mode is MotorNormMode.DEGREES:
                 mid = (min_ + max_) / 2
                 max_res = self.model_resolution_table[self._id_to_model(id_)] - 1
@@ -871,7 +879,7 @@ class MotorsBus(abc.ABC):
         """Convert an integer into a list of byte-sized integers."""
         pass
 
-    def ping(self, motor: NameOrID, num_retry: int = 0, raise_on_error: bool = False) -> int | None:
+    def ping(self, motor: NameOrID, num_retry: int = 10, raise_on_error: bool = False) -> int | None:
         """Ping a single motor and return its model number.
 
         Args:
@@ -904,7 +912,7 @@ class MotorsBus(abc.ABC):
         return model_number
 
     @abc.abstractmethod
-    def broadcast_ping(self, num_retry: int = 0, raise_on_error: bool = False) -> dict[int, int] | None:
+    def broadcast_ping(self, num_retry: int = 10, raise_on_error: bool = False) -> dict[int, int] | None:
         """Ping every ID on the bus using the broadcast address.
 
         Args:
@@ -923,7 +931,7 @@ class MotorsBus(abc.ABC):
         motor: str,
         *,
         normalize: bool = True,
-        num_retry: int = 0,
+        num_retry: int = 10,
     ) -> Value:
         """Read a register from a motor.
 
@@ -962,7 +970,7 @@ class MotorsBus(abc.ABC):
         length: int,
         motor_id: int,
         *,
-        num_retry: int = 0,
+        num_retry: int = 10,
         raise_on_error: bool = True,
         err_msg: str = "",
     ) -> tuple[int, int]:
@@ -992,7 +1000,7 @@ class MotorsBus(abc.ABC):
         return value, comm, error
 
     def write(
-        self, data_name: str, motor: str, value: Value, *, normalize: bool = True, num_retry: int = 0
+        self, data_name: str, motor: str, value: Value, *, normalize: bool = True, num_retry: int = 10
     ) -> None:
         """Write a value to a single motor's register.
 
@@ -1033,7 +1041,7 @@ class MotorsBus(abc.ABC):
         motor_id: int,
         value: int,
         *,
-        num_retry: int = 0,
+        num_retry: int = 10,
         raise_on_error: bool = True,
         err_msg: str = "",
     ) -> tuple[int, int]:
@@ -1060,7 +1068,7 @@ class MotorsBus(abc.ABC):
         motors: str | list[str] | None = None,
         *,
         normalize: bool = True,
-        num_retry: int = 0,
+        num_retry: int = 10,
     ) -> dict[str, Value]:
         """Read the same register from several motors at once.
 
@@ -1108,7 +1116,7 @@ class MotorsBus(abc.ABC):
         length: int,
         motor_ids: list[int],
         *,
-        num_retry: int = 0,
+        num_retry: int = 10,
         raise_on_error: bool = True,
         err_msg: str = "",
     ) -> tuple[dict[int, int], int]:
@@ -1155,7 +1163,7 @@ class MotorsBus(abc.ABC):
         values: Value | dict[str, Value],
         *,
         normalize: bool = True,
-        num_retry: int = 0,
+        num_retry: int = 10,
     ) -> None:
         """Write the same register on multiple motors.
 
@@ -1196,7 +1204,7 @@ class MotorsBus(abc.ABC):
         addr: int,
         length: int,
         ids_values: dict[int, int],
-        num_retry: int = 0,
+        num_retry: int = 10,
         raise_on_error: bool = True,
         err_msg: str = "",
     ) -> int:

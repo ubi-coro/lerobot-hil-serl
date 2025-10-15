@@ -63,25 +63,6 @@ class ViperX(Robot):
         config: ViperXConfig,
     ):
         super().__init__(config)
-        default_calibration = {
-            "waist": MotorCalibration(id=1, drive_mode=0, homing_offset=0, range_min=0, range_max=4095),
-            "shoulder": MotorCalibration(id=2, drive_mode=1, homing_offset=0, range_min=0, range_max=4095),
-            "shoulder_shadow": MotorCalibration(
-                id=3, drive_mode=0, homing_offset=0, range_min=0, range_max=4095
-            ),
-            "elbow": MotorCalibration(id=4, drive_mode=1, homing_offset=0, range_min=0, range_max=4095),
-            "elbow_shadow": MotorCalibration(
-                id=5, drive_mode=0, homing_offset=0, range_min=0, range_max=4095
-            ),
-            "forearm_roll": MotorCalibration(
-                id=6, drive_mode=0, homing_offset=0, range_min=0, range_max=4095
-            ),
-            "wrist_angle": MotorCalibration(id=7, drive_mode=1, homing_offset=0, range_min=0, range_max=4095),
-            "wrist_rotate": MotorCalibration(
-                id=8, drive_mode=0, homing_offset=0, range_min=0, range_max=4095
-            ),
-            "gripper": MotorCalibration(id=9, drive_mode=0, homing_offset=0, range_min=0, range_max=4095),
-        }
         self.config = config
         self.bus = DynamixelMotorsBus(
             port=self.config.port,
@@ -94,17 +75,17 @@ class ViperX(Robot):
                 "forearm_roll": Motor(6, "xm540-w270", MotorNormMode.RADIANS),
                 "wrist_angle": Motor(7, "xm540-w270", MotorNormMode.RADIANS),
                 "wrist_rotate": Motor(8, "xm430-w350", MotorNormMode.RADIANS),
-                "gripper": Motor(9, "xm430-w350", MotorNormMode.RADIANS),
+                "gripper": Motor(9, "xm430-w350", MotorNormMode.RANGE_0_1),
             },
-            calibration=default_calibration,
         )
         self.cameras = make_cameras_from_configs(config.cameras)
+        self._last_motor_obs = None
 
     @property
     def _motors_ft(self) -> dict[str, type]:
         motors = {f"{motor}.pos": float for motor in self.bus.motors if not motor.endswith("_shadow")}
-        motors["finger.pos"] = float  # Special case for gripper position
-        motors.pop("gripper.pos", None)  # Remove gripper position, as it is not used directly
+        #motors["finger.pos"] = float  # Special case for gripper position
+        #motors.pop("gripper.pos", None)  # Remove gripper position, as it is not used directly
         return motors
 
     @property
@@ -133,7 +114,15 @@ class ViperX(Robot):
         if self.is_connected:
             raise DeviceAlreadyConnectedError(f"{self} already connected")
 
+        # we disable torque to write calibration parameters to the servos
+        # then we enable it again to read them when we check if our calibration matches (weird ik)
+        # then we turn it off again during motor configuration and keep that
         self.bus.connect()
+
+        with self.bus.torque_disabled():
+            if self.calibration:
+                self.bus.write_calibration(self.calibration)
+
         if not self.is_calibrated and calibrate:
             self.calibrate()
 
@@ -141,6 +130,8 @@ class ViperX(Robot):
             cam.connect()
 
         self.configure()
+        self.bus.disable_torque()
+        self.get_observation()
         logger.info(f"{self} connected.")
 
     @property
@@ -148,39 +139,38 @@ class ViperX(Robot):
         return self.bus.is_calibrated
 
     def calibrate(self) -> None:
-        raise NotImplementedError  # TODO(aliberts): adapt code below (copied from koch
-        logger.info(f"\nRunning calibration of {self}")
-        self.bus.disable_torque()
-        for motor in self.bus.motors:
-            self.bus.write("Operating_Mode", motor, OperatingMode.EXTENDED_POSITION.value)
+        with self.bus.torque_disabled():
+            self.calibration = {
+                "waist": MotorCalibration(id=1, drive_mode=0, homing_offset=0, range_min=0, range_max=4095),
+                "shoulder": MotorCalibration(id=2, drive_mode=1, homing_offset=0, range_min=0, range_max=4095),
+                "shoulder_shadow": MotorCalibration(
+                    id=3, drive_mode=0, homing_offset=0, range_min=0, range_max=4095
+                ),
+                "elbow": MotorCalibration(id=4, drive_mode=1, homing_offset=0, range_min=0, range_max=4095),
+                "elbow_shadow": MotorCalibration(
+                    id=5, drive_mode=0, homing_offset=0, range_min=0, range_max=4095
+                ),
+                "forearm_roll": MotorCalibration(
+                    id=6, drive_mode=0, homing_offset=0, range_min=0, range_max=4095
+                ),
+                "wrist_angle": MotorCalibration(id=7, drive_mode=1, homing_offset=0, range_min=0, range_max=4095),
+                "wrist_rotate": MotorCalibration(
+                    id=8, drive_mode=0, homing_offset=0, range_min=0, range_max=4095
+                ),
+                "gripper": MotorCalibration(id=9, drive_mode=0, homing_offset=0, range_min=0, range_max=4095),
+            }
 
-        input("Move robot to the middle of its range of motion and press ENTER....")
-        homing_offsets = self.bus.set_half_turn_homings()
-
-        full_turn_motors = ["shoulder_pan", "wrist_roll"]
-        unknown_range_motors = [motor for motor in self.bus.motors if motor not in full_turn_motors]
-        print(
-            f"Move all joints except {full_turn_motors} sequentially through their entire "
-            "ranges of motion.\nRecording positions. Press ENTER to stop..."
-        )
-        range_mins, range_maxes = self.bus.record_ranges_of_motion(unknown_range_motors)
-        for motor in full_turn_motors:
-            range_mins[motor] = 0
-            range_maxes[motor] = 4095
-
-        self.calibration = {}
-        for motor, m in self.bus.motors.items():
-            self.calibration[motor] = MotorCalibration(
-                id=m.id,
-                drive_mode=0,
-                homing_offset=homing_offsets[motor],
-                range_min=range_mins[motor],
-                range_max=range_maxes[motor],
+            print(
+                f"{self} arm: move the gripper joint through its range of motion"
             )
 
-        self.bus.write_calibration(self.calibration)
-        self._save_calibration()
-        logger.info(f"Calibration saved to {self.calibration_fpath}")
+            range_mins, range_maxes = self.bus.record_ranges_of_motion(motors="gripper", display_values=False)
+            self.calibration["gripper"].range_min = range_mins["gripper"]
+            self.calibration["gripper"].range_max = range_maxes["gripper"]
+
+            self.bus.write_calibration(self.calibration)
+            self._save_calibration()
+            logger.info(f"Calibration saved to {self.calibration_fpath}")
 
     def configure(self) -> None:
         with self.bus.torque_disabled():
@@ -196,41 +186,33 @@ class ViperX(Robot):
             # TODO(aliberts): remove as it's actually useless in position control
             # self.bus.write("Velocity_Limit", 131)
 
-            # Set the drive mode to time-based profile to set moving time via velocity profiles
-            drive_mode = self.bus.read('Drive_Mode')
-            for i in range(len(self.bus.motor_names)):
-                drive_mode[i] |= 1 << 2  # set third bit to enable time-based profiles
-            self.bus.write('Drive_Mode', drive_mode)
-
-            # Use 'extended position mode' for all motors except gripper, because in joint mode the servos
-            # can't rotate more than 360 degrees (from 0 to 4095) And some mistake can happen while assembling
-            # the arm, you could end up with a servo with a position 0 or 4095 at a crucial point.
-            # See: https://emanual.robotis.com/docs/en/dxl/x/x_series/#operating-mode11
             for motor in self.bus.motors:
+
+                # Set the drive mode to time-based profile to set moving time via velocity profiles
+                drive_mode = self.bus.read('Drive_Mode', motor)
+                drive_mode |= 1 << 2  # set third bit to enable time-based profiles
+                self.bus.write('Drive_Mode', motor, drive_mode)
+
                 if motor != "gripper":
                     self.bus.write("Operating_Mode", motor, OperatingMode.EXTENDED_POSITION.value)
+                else:
+                    self.bus.write("Operating_Mode", "gripper", OperatingMode.CURRENT_POSITION.value)
 
-            # Use 'position control current based' for follower gripper to be limited by the limit of the
-            # current. It can grasp an object without forcing too much even tho, it's goal position is a
-            # complete grasp (both gripper fingers are ordered to join and reach a touch).
-            self.bus.write("Operating_Mode", "gripper", OperatingMode.CURRENT_POSITION.value)
-
-            # Set time profile after setting operation mode
-            self.bus.write("Profile_Velocity", int(self.config.moving_time * 1000))
+                # Set time profile after setting operation mode
+                self.bus.write("Profile_Velocity", motor, int(self.config.moving_time * 1000))
 
     def get_observation(self) -> dict[str, Any]:
         """The returned observations do not have a batch dimension."""
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        obs_dict = {}
-
         # Read arm position
         start = time.perf_counter()
         obs_dict = self.bus.sync_read("Present_Position")
         obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items() if not motor.endswith("_shadow")}
-        obs_dict["finger.pos"] = gripper_to_linear(obs_dict.pop("gripper.pos"))
+        #obs_dict["finger.pos"] = gripper_to_linear(obs_dict.pop("gripper.pos"))
         dt_ms = (time.perf_counter() - start) * 1e3
+        self._last_motor_obs = dict(obs_dict)
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
         # Capture images from cameras
@@ -264,14 +246,15 @@ class ViperX(Robot):
             action["gripper.pos"] = linear_to_gripper(action["finger.pos"])
             del action["finger.pos"]
 
-        goal_pos = {key.removesuffix(".pos"): val for key, val in action.items() if key.endswith(".pos")}
+        goal_pos = {key: action.get(key, self._last_motor_obs[key]) for key in self._last_motor_obs}
 
         # Cap goal position when too far away from present position.
         # /!\ Slower fps expected due to reading from the follower.
         if self.config.max_relative_target is not None:
-            present_pos = self.bus.sync_read("Present_Position")
-            goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
+            goal_present_pos = {key: (g_pos, self._last_motor_obs[key]) for key, g_pos in goal_pos.items()}
             goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+
+        goal_pos = {key.removesuffix(".pos"): value for key, value in goal_pos.items()}
 
         # Send goal position to the arm
         self.bus.sync_write("Goal_Position", goal_pos)

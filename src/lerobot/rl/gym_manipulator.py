@@ -26,6 +26,7 @@ import torch
 from lerobot.cameras import opencv  # noqa: F401
 from lerobot.configs import parser
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.envs.robot_env import RobotEnv
 from lerobot.model.kinematics import RobotKinematics
 from lerobot.processor import (
     AddBatchDimensionProcessorStep,
@@ -132,7 +133,7 @@ def make_robot_env(cfg: 'HilSerlRobotEnvConfig', device: str = "cpu") -> tuple[g
 
 
 def make_default_processors(
-    env: gym.Env, teleop_device: Teleoperator | None, cfg: 'HilSerlRobotEnvConfig', device: str = "cpu"
+    env: gym.Env, teleoperators: dict[str, Teleoperator], cfg: 'HilSerlRobotEnvConfig', device: str = "cpu"
 ) -> tuple[
     DataProcessorPipeline[EnvTransition, EnvTransition], DataProcessorPipeline[EnvTransition, EnvTransition]
 ]:
@@ -140,16 +141,14 @@ def make_default_processors(
 
     Args:
         env: Robot environment instance.
-        teleop_device: Teleoperator device for intervention.
+        teleoperators: Teleoperator device for intervention.
         cfg: Processor configuration.
         device: Target device for computations.
 
     Returns:
         Tuple of (environment processor, action processor).
     """
-    terminate_on_success = (
-        cfg.processor.reset.terminate_on_success if cfg.processor.reset is not None else True
-    )
+    terminate_on_success = {name: cfg.processor.reset[name].terminate_on_success for name in cfg.processor.reset}
 
     if cfg.name == "gym_hil":
         action_pipeline_steps = [
@@ -170,37 +169,39 @@ def make_default_processors(
             steps=action_pipeline_steps, to_transition=identity_transition, to_output=identity_transition
         )
 
+    assert isinstance(env, RobotEnv)
+
     # Full processor pipeline for real robot environment
     # Get robot and motor information for kinematics
-    joint_names = list(env._joint_names)
+    joint_names = list(env._joint_names_list)
 
     # Set up kinematics solver if inverse kinematics is configured
     kinematics_solver = {}
-    for name in env.robot_dict:
-        if cfg.processor[name].inverse_kinematics is not None:
-            kinematics_solver[name] = RobotKinematics(
-                urdf_path=cfg.processor[name].inverse_kinematics.urdf_path,
-                target_frame_name=cfg.processor[name].inverse_kinematics.target_frame_name,
-                joint_names=env.robot_dict._motors_ft,
-            )
+    #for name in env.robot_dict:
+    #    if cfg.processor.inverse_kinematics[name].enable is not None:
+    #        kinematics_solver[name] = RobotKinematics(
+    #            urdf_path=cfg.processor.inverse_kinematics[name].urdf_path,
+    #            target_frame_name=cfg.processor.inverse_kinematics[name].target_frame_name,
+    #            joint_names=env.robot_dict[name]._motors_ft,
+    #        )
 
     env_pipeline_steps = [VanillaObservationProcessorStep()]
 
-    if cfg.processor.observation is not None:
-        if cfg.processor.observation.add_joint_velocity_to_observation:
-            env_pipeline_steps.append(JointVelocityProcessorStep(dt=1.0 / cfg.fps))
-        if cfg.processor.observation.add_current_to_observation:
-            env_pipeline_steps.append(MotorCurrentProcessorStep(robot_dict=env.robot_dict))
+    #if cfg.processor.observation is not None:
+    #    if cfg.processor.observation.add_joint_velocity_to_observation:
+    #        env_pipeline_steps.append(JointVelocityProcessorStep(dt=1.0 / cfg.fps))
+    #    if cfg.processor.observation.add_current_to_observation:
+    #        env_pipeline_steps.append(MotorCurrentProcessorStep(robot_dict=env.robot_dict))
 
-    if kinematics_solver is not None:
-        env_pipeline_steps.append(
-            ForwardKinematicsJointsToEEObservation(
-                kinematics=kinematics_solver,
-                motor_names=joint_names,
-            )
-        )
+    #if kinematics_solver is not None:
+    #    env_pipeline_steps.append(
+    #        ForwardKinematicsJointsToEEObservation(
+    #            kinematics=kinematics_solver,
+    #            motor_names=joint_names,
+    #        )
+    #    )
 
-    if cfg.processor.image_preprocessing is not None:
+    if cfg.processor.image_preprocessing:
         env_pipeline_steps.append(
             ImageCropResizeProcessorStep(
                 crop_params_dict=cfg.processor.image_preprocessing.crop_params_dict,
@@ -209,19 +210,18 @@ def make_default_processors(
         )
 
     # Add time limit processor if reset config exists
-    if cfg.processor.reset is not None:
+    if cfg.processor.control_time_s:
         env_pipeline_steps.append(
-            TimeLimitProcessorStep(max_episode_steps=int(cfg.processor.reset.control_time_s * cfg.fps))
+            TimeLimitProcessorStep(max_episode_steps=int(cfg.processor.control_time_s * cfg.fps))
         )
 
-    # Add gripper penalty processor if gripper config exists and enabled
-    if cfg.processor.gripper is not None and cfg.processor.gripper.use_gripper:
-        env_pipeline_steps.append(
-            GripperPenaltyProcessorStep(
-                penalty=cfg.processor.gripper.gripper_penalty,
-                max_gripper_pos=cfg.processor.max_gripper_pos,
-            )
+    env_pipeline_steps.append(
+        GripperPenaltyProcessorStep(
+            use_gripper={name: cfg.processor.gripper[name].use_gripper for name in env.robot_dict},
+            penalty={name: cfg.processor.gripper[name].gripper_penalty for name in env.robot_dict},
+            max_gripper_pos={name: cfg.processor.gripper[name].max_pos for name in env.robot_dict}
         )
+    )
 
     if (
         cfg.processor.reward_classifier is not None
@@ -241,16 +241,17 @@ def make_default_processors(
     env_pipeline_steps.append(DeviceProcessorStep(device=device))
 
     action_pipeline_steps = [
-        AddTeleopActionAsComplimentaryDataStep(teleop_device=teleop_device),
-        AddTeleopEventsAsInfoStep(teleop_device=teleop_device),
+        AddTeleopActionAsComplimentaryDataStep(teleoperators=teleoperators),
+        AddTeleopEventsAsInfoStep(teleoperators=teleoperators),
         InterventionActionProcessorStep(
-            use_gripper=cfg.processor.gripper.use_gripper if cfg.processor.gripper is not None else False,
+            action_names={name: teleoperators[name].action_features for name in env.robot_dict},
+            use_gripper={name: cfg.processor.gripper[name].use_gripper for name in env.robot_dict},
             terminate_on_success=terminate_on_success,
         ),
     ]
 
     # Replace InverseKinematicsProcessor with new kinematic processors
-    if cfg.processor.inverse_kinematics is not None and kinematics_solver is not None:
+    if False:  #cfg.processor.inverse_kinematics is not None and kinematics_solver is not None:
         # Add EE bounds and safety processor
         inverse_kinematics_steps = [
             MapTensorToDeltaActionDictStep(
