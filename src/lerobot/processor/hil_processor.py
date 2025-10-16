@@ -174,6 +174,28 @@ class AddTeleopEventsAsInfoStep(InfoProcessorStep):
         return features
 
 
+@ProcessorStepRegistry.register("add_footswitch_events_as_info")
+@dataclass
+class AddFootswitchEventsAsInfoStep(InfoProcessorStep):
+    mapping: dict[str, dict] = field(default_factory={})
+
+    def __post_init__(self):
+        # start listener
+        ...
+
+    def info(self, info: dict) -> dict:
+        new_info = dict(info)
+
+        # collect and store events
+
+        return new_info
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+
 @ProcessorStepRegistry.register("image_crop_resize_processor")
 @dataclass
 class ImageCropResizeProcessorStep(ObservationProcessorStep):
@@ -403,10 +425,9 @@ class InterventionActionProcessorStep(ProcessorStep):
                               `success` event is received.
     """
 
-    action_names: dict[str, dict]
+    teleop_names: dict[str, dict]
     use_gripper: dict[str, bool]
     terminate_on_success: dict[str, bool]
-
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         """
@@ -421,7 +442,7 @@ class InterventionActionProcessorStep(ProcessorStep):
         """
         action = transition.get(TransitionKey.ACTION)
         assert isinstance(action, PolicyAction), f"Action should be a PolicyAction type got {type(action)}"
-        assert len(action) == sum([len(self.action_names[name]) for name in self.action_names])
+        assert len(action) == sum([len(self.teleop_names[name]) for name in self.teleop_names])
 
         # Get intervention signals from complementary data
         info = transition.get(TransitionKey.INFO, {})
@@ -438,14 +459,12 @@ class InterventionActionProcessorStep(ProcessorStep):
 
         # Override action if intervention is active
         if is_intervention and teleop_action_dict is not None:
-
-
             for name, teleop_action in teleop_action_dict.items():
                 action_list = []
 
                 if isinstance(teleop_action, dict):
                     # Convert teleop_action dict to tensor format
-                    for teleop_name in self.action_names[name]:
+                    for teleop_name in self.teleop_names[name]:
                         if teleop_name == GRIPPER_KEY and not self.use_gripper[name]:
                             continue
                         action_list.append(teleop_action.get(teleop_name, 0.0))

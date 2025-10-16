@@ -35,7 +35,7 @@ class RobotEnv(gym.Env):
     def __init__(
         self,
         robot_dict: dict[str, Robot],
-        use_gripper: bool = dict[str, bool],
+        use_gripper: dict[str, bool] | None = None,
         reset_pose: dict[str, list] | None = None,
         reset_time_s: dict[str, float] | None = None,
         display_cameras: bool = False,
@@ -51,19 +51,24 @@ class RobotEnv(gym.Env):
         """
         super().__init__()
 
-        self.robot_dict = robot_dict
-        self.use_gripper = use_gripper
-        self.display_cameras = display_cameras
-
+        if use_gripper is None:
+            use_gripper = {name: False for name in robot_dict}
         if reset_pose is None:
             reset_pose = {name: None for name in robot_dict}
         if reset_time_s is None:
             reset_pose = {name: 5.0 for name in robot_dict}
 
+        self.robot_dict = robot_dict
+        self.use_gripper = use_gripper
+        self.display_cameras = display_cameras
+        self.reset_pose = reset_pose
+        self.reset_time_s = reset_time_s
+
         # Episode tracking.
         self.current_step = 0
         self.episode_data = None
 
+        self._raw_joint_positions = None
         self._joint_names_list = []
         self._joint_names_dict = {}
         self._image_keys = []
@@ -76,47 +81,7 @@ class RobotEnv(gym.Env):
             self._joint_names_dict[name] = ft
             self._image_keys.extend(robot._cameras_ft.keys())
 
-        self.reset_pose = reset_pose
-        self.reset_time_s = reset_time_s
-
-        self._raw_joint_positions = None
-
         self._setup_spaces()
-
-    @property
-    def action_features(self) -> PolicyFeature:
-        """
-        A dictionary describing the structure and types of the actions expected by the robot. Its structure
-        (keys) should match the structure of what is passed to :pymeth:`send_action`. Values for the dict
-        should be the type of the value if it's a simple value, e.g. `float` for single proprioceptive value
-        (a joint's goal position/velocity)
-
-        Note: this property should be able to be called regardless of whether the robot is connected or not.
-        """
-        return {key: float for key in self._joint_names_list}
-
-
-    @property
-    def observation_features(self) -> dict:
-        """
-        A dictionary describing the structure and types of the actions expected by the robot. Its structure
-        (keys) should match the structure of what is passed to :pymeth:`send_action`. Values for the dict
-        should be the type of the value if it's a simple value, e.g. `float` for single proprioceptive value
-        (a joint's goal position/velocity)
-
-        Note: this property should be able to be called regardless of whether the robot is connected or not.
-        """
-        ft = {"agent_pos": float}
-        for name in self.robot_dict:
-            ft |= {f"{name}.{key}": float for key in self.robot_dict[name]._motors_ft}
-
-        if self._image_keys:
-            ft["pixels"] = {}
-            for name in self.robot_dict:
-                ft["pixels"] |= self.robot_dict[name]._cameras_ft
-
-        return ft
-
 
     def _get_observation(self) -> dict[str, Any]:
         """Get current robot observation including joint positions and camera images."""

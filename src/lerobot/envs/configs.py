@@ -22,9 +22,30 @@ import draccus
 from lerobot.cameras import CameraConfig, make_cameras_from_configs
 from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.envs.tf_env import TaskFrameEnv
-from lerobot.processor import AddTeleopActionAsComplimentaryDataStep, AddTeleopEventsAsInfoStep, InterventionActionProcessorStep, \
-    DataProcessorPipeline, EnvTransition, ImageCropResizeProcessorStep, TimeLimitProcessorStep, GripperPenaltyProcessorStep, \
-    RewardClassifierProcessorStep, AddBatchDimensionProcessorStep, DeviceProcessorStep
+from lerobot.processor import (
+    AddBatchDimensionProcessorStep,
+    AddTeleopActionAsComplimentaryDataStep,
+    AddTeleopEventsAsInfoStep,
+    DataProcessorPipeline,
+    DeviceProcessorStep,
+    EnvTransition,
+    ForwardKinematicsJointsToEEObservation,
+    GripperPenaltyProcessorStep,
+    ImageCropResizeProcessorStep,
+    InterventionActionProcessorStep,
+    JointVelocityProcessorStep,
+    MapDeltaActionToRobotActionStep,
+    MapTensorToDeltaActionDictStep,
+    MotorCurrentProcessorStep,
+    Numpy2TorchActionProcessorStep,
+    RewardClassifierProcessorStep,
+    RobotActionToPolicyActionProcessorStep,
+    TimeLimitProcessorStep,
+    Torch2NumpyActionProcessorStep,
+    TransitionKey,
+    VanillaObservationProcessorStep,
+    create_transition,
+)
 from lerobot.processor.converters import identity_transition
 from lerobot.processor.tff_processor import VanillaTFFProcessorStep, SixDofVelocityInterventionActionProcessorStep
 from lerobot.rl.gym_manipulator import make_default_processors
@@ -34,6 +55,7 @@ from lerobot.robots.ur.tff_controller import TaskFrameCommand
 from lerobot.teleoperators import make_teleoperator_from_config
 from lerobot.teleoperators.config import TeleoperatorConfig
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE, DEFAULT_ROBOT_NAME
+
 
 
 @dataclass
@@ -194,46 +216,50 @@ class RewardClassifierConfig:
 class InverseKinematicsConfig:
     """Configuration for inverse kinematics processing."""
 
-    enable: bool = False
-    urdf_path: str | None = None
-    target_frame_name: str | None = None
-    end_effector_bounds: dict[str, list[float]] | None = None
-    end_effector_step_sizes: dict[str, float] | None = None
+    enable: bool | dict[str, bool] = False
+    urdf_path: str | dict[str, str | None] | None = None
+    target_frame_name: str | dict[str, str | None] | None = None
+    end_effector_bounds: dict[str, list[float]] | dict[str, dict[str, list[float]]] | None = None
+    end_effector_step_sizes: dict[str, float] | dict[str, dict[str, float]] | None = None
 
 
 @dataclass
 class ObservationConfig:
     """Configuration for observation processing."""
 
-    add_joint_velocity_to_observation: bool = False
-    add_current_to_observation: bool = False
-    add_ee_velocity_to_observation: bool = False
-    add_ee_wrench_to_observation: bool = False
-    stack_frames: int = 0
+    add_joint_velocity_to_observation: bool | dict[str, bool] = False
+    add_current_to_observation: bool | dict[str, bool] = False
+    add_ee_velocity_to_observation: bool | dict[str, bool] = False
+    add_ee_wrench_to_observation: bool | dict[str, bool] = False
+    stack_frames: int | dict[str, int] = 0
 
 
 @dataclass
 class GripperConfig:
     """Configuration for gripper control and penalties."""
 
-    use_gripper: bool = False
-    gripper_penalty: float = 0.0
-    max_pos: float = 100.0
+    use_gripper: bool | dict[str, bool] = False
+    gripper_penalty: float | dict[str, float] = 0.0
+    max_pos: float | dict[str, float] = 100.0
 
 
 @dataclass
 class ResetConfig:
     """Configuration for environment reset behavior."""
 
-    fixed_reset_joint_positions: Any | None = None
-    reset_time_s: float = 5.0
-    terminate_on_success: bool = True
+    fixed_reset_joint_positions: Any | dict[str, Any | None] | None = None
+    reset_time_s: float | dict[str, float] = 5.0
+    terminate_on_success: bool | dict[str, bool] = True
 
 
 @dataclass
 class TaskFrameConfig:
-    command: TaskFrameCommand = field(default_factory=TaskFrameCommand.make_default_cmd)
-    control_mask: list[int] = field(default_factory=lambda: [1] * 6)
+    command: TaskFrameCommand | dict[bool] = field(default_factory=TaskFrameCommand.make_default_cmd)
+    control_mask: list[int] | dict[bool] = field(default_factory=lambda: [1] * 6)
+
+@dataclass
+class EventConfig:
+    foot_switch_mapping: dict[str, dict] = field(default_factory=lambda: {})
 
 
 @dataclass
@@ -243,14 +269,16 @@ class HILSerlProcessorConfig:
     control_time_s: float | None = None
     display_cameras: bool = False
 
-    image_preprocessing: ImagePreprocessingConfig = None
-    reward_classifier: RewardClassifierConfig = None
+    image_preprocessing: ImagePreprocessingConfig | None = None
+    reward_classifier: RewardClassifierConfig | None = None
+    events: EventConfig = EventConfig()
 
-    observation: ObservationConfig | dict[str, ObservationConfig] = ObservationConfig()
-    gripper: GripperConfig | dict[str, GripperConfig] = GripperConfig()
-    reset: ResetConfig | dict[str, ResetConfig] = ResetConfig()
-    inverse_kinematics: InverseKinematicsConfig | dict[str, InverseKinematicsConfig] = InverseKinematicsConfig()
-    task_frame: TaskFrameConfig | dict[str, TaskFrameConfig] = TaskFrameConfig()
+    observation: ObservationConfig = ObservationConfig()
+    gripper: GripperConfig = GripperConfig()
+    reset: ResetConfig = ResetConfig()
+    inverse_kinematics: InverseKinematicsConfig = InverseKinematicsConfig()
+    task_frame: TaskFrameConfig = TaskFrameConfig()
+
 
 
 @EnvConfig.register_subclass("libero")
@@ -317,9 +345,43 @@ class HilSerlRobotEnvConfig(EnvConfig):
 
     name: str = "real_robot"
 
+    @cached_property
+    def action_dim(self):
+        robot_dict = self.robot if isinstance(self.robot, dict) else {DEFAULT_ROBOT_NAME: self.robot}
+        ik = self.processor.inverse_kinematics.enable
+        gripper = self.processor.gripper.use_gripper
+
+        _action_dim = 0
+        for name in robot_dict:
+            ik = ik if isinstance(ik, bool) else ik[name]
+            gripper = ik if isinstance(gripper, bool) else gripper[name]
+
+            if ik:
+                _action_dim += 3
+            else:
+                _action_dim += len(robot_dict[name]._motor_ft)
+
+            if gripper:
+                _action_dim += 1
+
+        return _action_dim
+
     @property
     def gym_kwargs(self) -> dict:
         return {}
+
+    def make(self, device: str = "cpu") -> tuple[RobotEnv, Any, Any]:
+        robot_dict, teleop_dict, cameras = self._init_devices()
+
+        env = RobotEnv(
+            robot_dict=robot_dict,
+            use_gripper=self.processor.gripper.use_gripper,
+            reset_pose=self.processor.reset.fixed_reset_joint_positions,
+            reset_time_s=self.processor.reset.reset_time_s,
+            display_cameras=self.processor.display_cameras,
+        )
+
+        return env, *self._processors(env, teleop_dict, device)
 
     def _init_devices(self):
         assert self.robot is not None, "Robot config must be provided for real robot environment"
@@ -341,51 +403,182 @@ class HilSerlRobotEnvConfig(EnvConfig):
 
         # go through each processor and check if we need to turn scalar configs into configs for each robot
         for attr in ["observation", "gripper", "reset", "inverse_kinematics", "task_frame"]:
-            if not isinstance(getattr(self.processor, attr), dict):
-                setattr(self.processor, attr, {name: getattr(self.processor, attr) for name in robot_dict})
+            _attr = getattr(self.processor, attr)
+            for fn in _attr.fields:
+                if not isinstance(getattr(_attr, fn), dict):
+                    setattr(_attr, fn, {name: getattr(_attr, fn) for name in robot_dict})
+            setattr(self.processor, attr, _attr)
 
         return robot_dict, teleop_dict, cameras
 
-    def make(self, device: str = "cpu") -> tuple[RobotEnv, Any, Any]:
-        robot_dict, teleop_dict, cameras = self._init_devices()
+    def _processors(self, env: RobotEnv, teleoperators, device):
+        """
+        if self.name == "gym_hil":
+            action_pipeline_steps = [
+                InterventionActionProcessorStep(terminate_on_success=terminate_on_success),
+                Torch2NumpyActionProcessorStep(),
+            ]
 
-        use_gripper = {name: self.processor.gripper[name].use_gripper for name in self.processor.gripper}
-        reset_pose = {name: self.processor.reset[name].fixed_reset_joint_positions for name in self.processor.reset}
-        reset_time_s = {name: self.processor.reset[name].reset_time_s for name in self.processor.reset}
+            env_pipeline_steps = [
+                Numpy2TorchActionProcessorStep(),
+                VanillaObservationProcessorStep(),
+                AddBatchDimensionProcessorStep(),
+                DeviceProcessorStep(device=device),
+            ]
 
-        env = RobotEnv(
-            robot_dict=robot_dict,
-            use_gripper=use_gripper,
-            reset_pose=reset_pose,
-            reset_time_s=reset_time_s,
-            display_cameras=self.processor.display_cameras,
+            return DataProcessorPipeline(
+                steps=env_pipeline_steps, to_transition=identity_transition, to_output=identity_transition
+            ), DataProcessorPipeline(
+                steps=action_pipeline_steps, to_transition=identity_transition, to_output=identity_transition
+            )
+
+        assert isinstance(env, RobotEnv)
+        """
+
+        # Full processor pipeline for real robot environment
+        # Get robot and motor information for kinematics
+        joint_names = env._joint_names_dict
+
+
+        env_pipeline_steps = [VanillaObservationProcessorStep()]
+
+        env_pipeline_steps.append(
+            JointVelocityProcessorStep(
+                enable=self.processor.observation.add_joint_velocity_to_observation,
+                dt=1.0 / self.fps)
         )
 
-        env_processor, action_processor = make_default_processors(env, teleop_dict, self, device)
+        env_pipeline_steps.append(
+            MotorCurrentProcessorStep(
+                enable=self.processor.observation.add_current_to_observation,
+                robot_dict=env.robot_dict
+            )
+        )
 
-        return env, env_processor, action_processor
+         # Set up kinematics solver if inverse kinematics is configured
+        kinematics_solver = {}
+        for name in env.robot_dict:
+            if self.processor.inverse_kinematics.enable[name]:
+                kinematics_solver[name] = RobotKinematics(
+                    urdf_path=self.processor.inverse_kinematics[name].urdf_path,
+                    target_frame_name=self.processor.inverse_kinematics[name].target_frame_name,
+                    joint_names=joint_names[name],
+                )
+        if kinematics_solver:
+            env_pipeline_steps.append(
+                ForwardKinematicsJointsToEEObservation(
+                    kinematics=kinematics_solver,
+                    motor_names=joint_names,
+                )
+            )
+
+        if self.processor.image_preprocessing:
+            env_pipeline_steps.append(
+                ImageCropResizeProcessorStep(
+                    crop_params_dict=self.processor.image_preprocessing.crop_params_dict,
+                    resize_size=self.processor.image_preprocessing.resize_size,
+                )
+            )
+
+        # Add time limit processor if reset config exists
+        if self.processor.control_time_s:
+            env_pipeline_steps.append(
+                TimeLimitProcessorStep(max_episode_steps=int(self.processor.control_time_s * self.fps))
+            )
+
+        env_pipeline_steps.append(
+            GripperPenaltyProcessorStep(
+                use_gripper=self.processor.gripper.use_gripper,
+                penalty=self.processor.gripper.gripper_penalty,
+                max_gripper_pos=self.processor.gripper.max_pos
+            )
+        )
+
+        if (
+            self.processor.reward_classifier is not None
+            and self.processor.reward_classifier.pretrained_path is not None
+        ):
+            env_pipeline_steps.append(
+                RewardClassifierProcessorStep(
+                    pretrained_path=self.processor.reward_classifier.pretrained_path,
+                    device=device,
+                    success_threshold=self.processor.reward_classifier.success_threshold,
+                    success_reward=self.processor.reward_classifier.success_reward,
+                    terminate_on_success=terminate_on_success,
+                )
+            )
+
+        env_pipeline_steps.append(AddBatchDimensionProcessorStep())
+        env_pipeline_steps.append(DeviceProcessorStep(device=device))
+
+        action_pipeline_steps = [
+            AddTeleopActionAsComplimentaryDataStep(teleoperators=teleoperators),
+            AddTeleopEventsAsInfoStep(teleoperators=teleoperators),
+            AddFootswitchEventsAsInfoStep(mapping=self.processor.events.foot_switch_mapping),
+            InterventionActionProcessorStep(
+                teleop_names={name: teleoperators[name].action_features for name in env.robot_dict},
+                use_gripper=self.processor.gripper.use_gripper,
+                terminate_on_success=terminate_on_success,
+            )
+        ]
+
+        # Replace InverseKinematicsProcessor with new kinematic processors
+        if kinematics_solver:
+            inverse_kinematics_steps = [
+                MapTensorToDeltaActionDictStep(
+                    use_gripper=self.processor.gripper.use_gripper if self.processor.gripper is not None else False
+                ),
+                MapDeltaActionToRobotActionStep(),
+                EEReferenceAndDelta(
+                    kinematics=kinematics_solver,
+                    end_effector_step_sizes=self.processor.inverse_kinematics.end_effector_step_sizes,
+                    motor_names=joint_names,
+                    use_latched_reference=False,
+                    use_ik_solution=True,
+                ),
+                EEBoundsAndSafety(
+                    end_effector_bounds=self.processor.inverse_kinematics.end_effector_bounds,
+                ),
+                GripperVelocityToJoint(
+                    clip_max=self.processor.max_gripper_pos,
+                    speed_factor=1.0,
+                    discrete_gripper=True,
+                ),
+                InverseKinematicsRLStep(
+                    kinematics=kinematics_solver, motor_names=joint_names, initial_guess_current_joints=False
+                ),
+            ]
+            action_pipeline_steps.extend(inverse_kinematics_steps)
+            action_pipeline_steps.append(RobotActionToPolicyActionProcessorStep(motor_names=joint_names))
+
+        return DataProcessorPipeline(
+            steps=env_pipeline_steps, to_transition=identity_transition, to_output=identity_transition
+        ), DataProcessorPipeline(
+            steps=action_pipeline_steps, to_transition=identity_transition, to_output=identity_transition
+        )
 
 
 @dataclass
 class TFHilSerlRobotEnvConfig(HilSerlRobotEnvConfig):
     """Configuration for the HILSerlRobotEnv environment."""
+    @cached_property
+    def action_dim(self):
+        masks = self.processor.task_frame.control_mask
+        masks = masks if isistance(masks, dict) else {DEFAULT_ROBOT_NAME: masks}
+        gripper = self.processor.gripper.use_gripper
+        gripper = gripper if isistance(gripper, dict) else {DEFAULT_ROBOT_NAME: gripper}
+        return sum([sum(m) for m in masks.values()]) + sum(gripper.values())
 
     def make(self, device) -> tuple[TaskFrameEnv, Any, Any]:
         robot_dict, teleop_dict, cameras = self._init_devices()
 
-        task_frame = {name: self.processor.task_frame[name].command for name in self.processor.task_frame}
-        control_mask = {name: self.processor.task_frame[name].control_mask for name in self.processor.task_frame}
-        use_gripper = {name: self.processor.gripper[name].use_gripper for name in self.processor.gripper}
-        reset_pose = {name: self.processor.reset[name].fixed_reset_joint_positions for name in self.processor.reset}
-        reset_time_s = {name: self.processor.reset[name].reset_time_s for name in self.processor.reset}
-
         env = TaskFrameEnv(
             robot_dict=robot_dict,
-            task_frame=task_frame,
-            control_mask=control_mask,
-            use_gripper=use_gripper,
-            reset_pose=reset_pose,
-            reset_time_s=reset_time_s,
+            task_frame=self.processor.task_frame.command,
+            control_mask=self.processor.task_frame.control_mask,
+            use_gripper=self.processor.gripper.use_gripper,
+            reset_pose=self.processor.reset.fixed_reset_joint_positions,
+            reset_time_s=self.processor.reset.reset_time_s,
             display_cameras=self.processor.display_cameras,
         )
 
@@ -394,13 +587,10 @@ class TFHilSerlRobotEnvConfig(HilSerlRobotEnvConfig):
     def _processors(self, env: TaskFrameEnv, teleoperators, device) -> tuple[
         DataProcessorPipeline[EnvTransition, EnvTransition], DataProcessorPipeline[EnvTransition, EnvTransition]
     ]:
-        terminate_on_success = {name: self.processor.reset[name].terminate_on_success for name in self.processor.reset}
-        stack_frames = {name: self.processor.observation[name].stack_frames for name in self.processor.observation}
-
         env_pipeline_steps = [
             VanillaTFFProcessorStep(
-                add_ee_velocity_to_observation={name: self.processor.observation[name].add_ee_velocity_to_observation for name in env.robot_dict},
-                add_ee_wrench_to_observation={name: self.processor.observation[name].add_ee_wrench_to_observation for name in env.robot_dict},
+                add_ee_velocity_to_observation=self.processor.observation.add_ee_velocity_to_observation,
+                add_ee_wrench_to_observation=self.processor.observation[name].add_ee_wrench_to_observation,
                 ee_pos_mask=env.control_mask,
             )
         ]
@@ -422,9 +612,9 @@ class TFHilSerlRobotEnvConfig(HilSerlRobotEnvConfig):
 
         env_pipeline_steps.append(
             GripperPenaltyProcessorStep(
-                use_gripper={name: self.processor.gripper[name].use_gripper for name in env.robot_dict},
-                penalty={name: self.processor.gripper[name].gripper_penalty for name in env.robot_dict},
-                max_gripper_pos={name: self.processor.gripper[name].max_pos for name in env.robot_dict}
+                use_gripper=self.processor.gripper.use_gripper,
+                penalty=self.processor.gripper.gripper_penalty,
+                max_gripper_pos=self.processor.gripper.max_pos
             )
         )
 
@@ -435,7 +625,7 @@ class TFHilSerlRobotEnvConfig(HilSerlRobotEnvConfig):
                     device=device,
                     success_threshold=self.processor.reward_classifier.success_threshold,
                     success_reward=self.processor.reward_classifier.success_reward,
-                    terminate_on_success=any(terminate_on_success.values()),
+                    terminate_on_success=any(self.processor.reset.terminate_on_success.values()),
                 )
             )
 
@@ -444,10 +634,11 @@ class TFHilSerlRobotEnvConfig(HilSerlRobotEnvConfig):
         action_pipeline_steps = [
             AddTeleopActionAsComplimentaryDataStep(teleoperators=teleoperators),
             AddTeleopEventsAsInfoStep(teleoperators=teleoperators),
+            AddFootswitchEventsAsInfoStep(mapping=self.processor.events.foot_switch_mapping),
             SixDofVelocityInterventionActionProcessorStep(
-                use_gripper={name: self.processor.gripper[name].use_gripper for name in env.robot_dict},
-                control_mask={name: self.processor.task_frame[name].control_mask for name in self.processor.task_frame},
-                terminate_on_success=terminate_on_success,
+                use_gripper=self.processor.gripper.use_gripper,
+                control_mask=self.processor.task_frame.control_mask,
+                terminate_on_success=self.processor.reset.terminate_on_success,
             )
         ]
 

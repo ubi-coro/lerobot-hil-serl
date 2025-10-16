@@ -155,6 +155,7 @@ from lerobot.utils.utils import (
     log_say,
 )
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
+from lerobot.share.utils import get_pipeline_dataset_features
 
 
 @dataclass
@@ -368,24 +369,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
     env, env_processor, action_processor = cfg.env.make()
 
-    aggregate_pipeline_dataset_features(
-        pipeline=action_processor,
-        initial_features=create_initial_features(action=env.action_features),
-        use_videos=cfg.dataset.video,
-    ),
-
-    dataset_features = combine_feature_dicts(
-        aggregate_pipeline_dataset_features(
-            pipeline=action_processor,
-            initial_features=create_initial_features(action=env.action_space),
-            use_videos=cfg.dataset.video,
-        ),
-        aggregate_pipeline_dataset_features(
-            pipeline=env_processor,
-            initial_features=create_initial_features(observation=env.observation_space),
-            use_videos=cfg.dataset.video,
-        ),
-    )
+    dataset_features = get_pipeline_dataset_features(env, env_processor, action_dim=cfg.env.action_dim, use_videos=cfg.dataset.video)
 
     if cfg.resume:
         dataset = LeRobotDataset(

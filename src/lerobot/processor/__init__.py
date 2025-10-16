@@ -75,6 +75,7 @@ from .policy_robot_bridge import (
     RobotActionToPolicyActionProcessorStep,
 )
 from .rename_processor import RenameObservationsProcessorStep
+from .robot_kinematic_processor import ForwardKinematicsJointsToEEObservation
 from .tokenizer_processor import TokenizerProcessorStep
 
 __all__ = [
