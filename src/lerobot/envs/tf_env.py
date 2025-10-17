@@ -4,6 +4,7 @@ import gymnasium as gym
 from gymnasium import spaces
 from typing import Any
 
+from lerobot.cameras import make_cameras_from_configs, Camera
 from lerobot.robots.ur.tff_controller import TaskFrameCommand, AxisMode
 from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.robot_utils import busy_wait
@@ -16,25 +17,27 @@ class TaskFrameEnv(gym.Env):
     def __init__(
         self,
         robot_dict: dict[str, "TF_UR"],
-        task_frame: dict[str, TaskFrameCommand],
-        control_mask: dict[str, list[bool]],
-        use_gripper: dict[str, bool],
-        reset_pose: dict[str, list[float]],
-        reset_time_s: dict[str, float],
+        cameras: dict[str, Camera] | None = None,
+        task_frame: dict[str, TaskFrameCommand] | None = None,
+        control_mask: dict[str, list[bool]] | None = None,
+        use_gripper: dict[str, bool] | None = None,
+        reset_pose: dict[str, list[float]] | None = None,
+        reset_time_s: dict[str, float] | None = None,
         display_cameras: bool = False,
     ) -> None:
         super().__init__()
 
         self.robot_dict = robot_dict
-        self.task_frame = task_frame
-        self.control_mask = control_mask
-        self.use_gripper = use_gripper
-        self.reset_pose = reset_pose
-        self.reset_time_s = reset_time_s
+        self.cameras = cameras if cameras else {}
+        self.task_frame = task_frame if task_frame else {name: TaskFrameCommand.make_default_cmd() for name in robot_dict}
+        self.control_mask = control_mask if control_mask else {name: [1] * 6 for name in robot_dict}
+        self.use_gripper = use_gripper if use_gripper else {name: False for name in robot_dict}
+        self.reset_pose = reset_pose if reset_pose else {name: None for name in robot_dict}
+        self.reset_time_s = reset_time_s if reset_time_s else {name: 5.0 for name in robot_dict}
         self.display_cameras = display_cameras
 
         # build reset task frame commands
-        self.reset_task_frame: dict[str, TaskFrameCommand] = {}
+        self.reset_task_frame: dict[str, TaskFrameCommand | None] = {}
         for name, robot in self.robot_dict.items():
             if self.reset_pose[name] is None:
                 self.reset_task_frame[name] = None
@@ -53,6 +56,9 @@ class TaskFrameEnv(gym.Env):
 
             if not robot.is_connected:
                 robot.connect()
+
+            # remove cameras to only use "ours"
+            robot.cameras = {}
 
         self.current_step = 0
         self.episode_data = None

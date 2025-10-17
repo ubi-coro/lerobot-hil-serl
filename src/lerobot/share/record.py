@@ -139,7 +139,7 @@ from lerobot.teleoperators import (  # noqa: F401
     so100_leader,
     so101_leader, TeleopEvents,
 )
-from lerobot.utils.constants import ACTION, REWARD, DONE
+from lerobot.utils.constants import ACTION, REWARD, DONE, OBS_STR
 from lerobot.utils.control_utils import (
     init_keyboard_listener,
     is_headless,
@@ -168,8 +168,8 @@ class DatasetRecordConfig(draccus.ChoiceRegistry):
     root: str | Path | None = None
     # Limit the frames per second.
     fps: int = 30
-    # Number of seconds for resetting the environment after each episode.
-    reset_time_s: int | float = 60
+    # Number of seconds for a single episode or intervention
+    episode_time_s: int = 30
     # Number of episodes to record.
     num_episodes: int = 50
     # Encode frames in the dataset into video
@@ -258,6 +258,7 @@ class RecordConfig:
 
 @safe_stop_image_writer
 def record_loop(
+    cfg: RecordConfig,
     env: RobotEnv,
     events: dict,
     fps: int,
@@ -275,6 +276,9 @@ def record_loop(
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
+
+    action_feature = dataset.features[ACTION]
+    obs_features = {ft for ft in dataset.features if OBS_STR in ft}
 
     # Reset policy and processor if they are provided
     if policy is not None and preprocessor is not None and postprocessor is not None:
@@ -299,9 +303,8 @@ def record_loop(
             events["exit_early"] = False
             break
 
-        observation = {k: v for k, v in transition[TransitionKey.OBSERVATION].items() if k in policy_input_features}
-
         if policy is not None and preprocessor is not None and postprocessor is not None:
+            observation = {k: v for k, v in transition[TransitionKey.OBSERVATION].items() if k in policy_input_features}
             predict_action(
                 observation=observation,
                 policy=policy,
@@ -315,10 +318,10 @@ def record_loop(
 
         else:
             # todo: get correct shape from dataset / env + processors
-            action = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32)
+            action = torch.tensor([0.0] * action_feature["shape"][0], dtype=torch.float32)
             transition[TransitionKey.INFO][TeleopEvents.IS_INTERVENTION] = True
 
-        new_transition = step_env_and_process_transition(
+        transition = step_env_and_process_transition(
             env=env,
             transition=transition,
             action=action,
@@ -330,22 +333,22 @@ def record_loop(
         terminated = transition.get(TransitionKey.DONE, False)
         truncated = transition.get(TransitionKey.TRUNCATED, False)
 
-        next_observation = {k: v for k, v in new_transition[TransitionKey.OBSERVATION].items() if k in policy_input_features}
-        action_to_record = new_transition[TransitionKey.COMPLEMENTARY_DATA].get("teleop_action", transition[TransitionKey.ACTION])
+        observation = {k: v.squeeze(0).cpu() for k, v in transition[TransitionKey.OBSERVATION].items() if k in obs_features}
+        action_to_record = transition[TransitionKey.COMPLEMENTARY_DATA].get("teleop_action", transition[TransitionKey.ACTION])
 
         frame = {
-            **next_observation,
+            **observation,
             ACTION: action_to_record.cpu(),
             REWARD: np.array([reward], dtype=np.float32),
             DONE: np.array([terminated or truncated], dtype=bool),
         }
 
         if dataset is not None:
-            frame["task"] = dataset.task
+            frame["task"] = cfg.dataset.single_task
             dataset.add_frame(frame)
 
         if display_data:
-            log_rerun_data(observation=next_observation, action=action_to_record)
+            log_rerun_data(observation=observation, action=action_to_record)
 
         episode_step += 1
 
@@ -367,9 +370,13 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     if cfg.display_data:
         init_rerun(session_name="recording")
 
+    # Overwrite control time with dataset config
+    if hasattr(cfg.env, "processor"):
+        cfg.env.processor.control_time_s = cfg.dataset.episode_time_s
+
     env, env_processor, action_processor = cfg.env.make()
 
-    dataset_features = get_pipeline_dataset_features(env, env_processor, action_dim=cfg.env.action_dim, use_videos=cfg.dataset.video)
+    dataset_features = get_pipeline_dataset_features(env, env_processor, action_dim=cfg.env.action_dim, use_video=cfg.dataset.video)
 
     if cfg.resume:
         dataset = LeRobotDataset(
@@ -421,6 +428,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
             log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
             record_loop(
+                cfg=cfg,
                 env=env,
                 events=events,
                 fps=cfg.dataset.fps,
@@ -441,6 +449,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             ):
                 log_say("Reset the environment", cfg.play_sounds)
                 record_loop(
+                    cfg=cfg,
                     env=env,
                     events=events,
                     fps=cfg.dataset.fps,

@@ -15,10 +15,17 @@ from lerobot.teleoperators.widowx import WidowXConfig
 @dataclass
 @EnvConfig.register_subclass("aloha_single")
 class AlohaSingleEnvConfig(HilSerlRobotEnvConfig):
-    teleop: TeleoperatorConfig = WidowXConfig(port="/dev/ttyDXL_leader_left", id="left")
-    robot: RobotConfig = ViperXConfig(port="/dev/ttyDXL_follower_left", id="left")
-    cameras: dict[str, CameraConfig] = field(
-        default_factory=lambda: {
+
+    def __post_init__(self):
+        self.robot = {
+            "left": ViperXConfig(port="/dev/ttyDXL_follower_left", id="left"),
+            "right": ViperXConfig(port="/dev/ttyDXL_follower_right", id="right")
+        }
+        self.teleop = {
+            "left": WidowXConfig(port="/dev/ttyDXL_leader_left", id="left"),
+            "right": WidowXConfig(port="/dev/ttyDXL_leader_right", id="right")
+        }
+        self.cameras = {
             "cam_low": OpenCVCameraConfig(
                 index_or_path=Path("/dev/CAM_LOW"),
                 fps=30,
@@ -44,9 +51,7 @@ class AlohaSingleEnvConfig(HilSerlRobotEnvConfig):
                 height=480,
             )
         }
-    )
 
-    def __post_init__(self):
         self.processor.gripper.use_gripper = True
         self.processor.events.foot_switch_mapping = {
             (TeleopEvents.TERMINATE_EPISODE,): {"device": 2, "toggle": False},
@@ -57,9 +62,7 @@ class AlohaSingleEnvConfig(HilSerlRobotEnvConfig):
 @dataclass
 @DatasetRecordConfig.register_subclass("aloha_single")
 class AlohaSingleDatasetConfig(DatasetRecordConfig):
-    repo_id: str = "test/aloha_single"
+    repo_id: str = "test/aloha_bimanual"
     single_task: str = "test"
-    root: str = "/media/nvme1/jstranghoener/lerobot/data/test/aloha_single"
-
-
+    root: str = "/media/nvme1/jstranghoener/lerobot/data/test/aloha_bimanual"
 

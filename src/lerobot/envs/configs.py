@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import abc
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from functools import cached_property
 from typing import Any
 
@@ -22,6 +22,7 @@ import draccus
 from lerobot.cameras import CameraConfig, make_cameras_from_configs
 from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.envs.tf_env import TaskFrameEnv
+from lerobot.model.kinematics import RobotKinematics
 from lerobot.processor import (
     AddBatchDimensionProcessorStep,
     AddTeleopActionAsComplimentaryDataStep,
@@ -37,22 +38,19 @@ from lerobot.processor import (
     MapDeltaActionToRobotActionStep,
     MapTensorToDeltaActionDictStep,
     MotorCurrentProcessorStep,
-    Numpy2TorchActionProcessorStep,
     RewardClassifierProcessorStep,
     RobotActionToPolicyActionProcessorStep,
     TimeLimitProcessorStep,
-    Torch2NumpyActionProcessorStep,
-    TransitionKey,
     VanillaObservationProcessorStep,
-    create_transition,
 )
 from lerobot.processor.converters import identity_transition
+from lerobot.processor.hil_processor import AddFootswitchEventsAsInfoStep
+from lerobot.processor.robot_kinematic_processor import EEReferenceAndDelta, EEBoundsAndSafety, GripperVelocityToJoint
 from lerobot.processor.tff_processor import VanillaTFFProcessorStep, SixDofVelocityInterventionActionProcessorStep
-from lerobot.rl.gym_manipulator import make_default_processors
 from lerobot.robots import RobotConfig, make_robot_from_config
 from lerobot.envs.robot_env import RobotEnv
 from lerobot.robots.ur.tff_controller import TaskFrameCommand
-from lerobot.teleoperators import make_teleoperator_from_config
+from lerobot.teleoperators import make_teleoperator_from_config, TeleopEvents
 from lerobot.teleoperators.config import TeleoperatorConfig
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE, DEFAULT_ROBOT_NAME
 
@@ -259,7 +257,7 @@ class TaskFrameConfig:
 
 @dataclass
 class EventConfig:
-    foot_switch_mapping: dict[str, dict] = field(default_factory=lambda: {})
+    foot_switch_mapping: dict[tuple[TeleopEvents], dict] = field(default_factory=lambda: {})
 
 
 @dataclass
@@ -348,18 +346,12 @@ class HilSerlRobotEnvConfig(EnvConfig):
     @cached_property
     def action_dim(self):
         robot_dict = self.robot if isinstance(self.robot, dict) else {DEFAULT_ROBOT_NAME: self.robot}
-        ik = self.processor.inverse_kinematics.enable
         gripper = self.processor.gripper.use_gripper
 
         _action_dim = 0
         for name in robot_dict:
-            ik = ik if isinstance(ik, bool) else ik[name]
-            gripper = ik if isinstance(gripper, bool) else gripper[name]
-
-            if ik:
-                _action_dim += 3
-            else:
-                _action_dim += len(robot_dict[name]._motor_ft)
+            gripper = gripper if isinstance(gripper, bool) else gripper[name]
+            _action_dim += 6 # we cannot access this here, so we need to make assumptions, ie 6 joints / dofs
 
             if gripper:
                 _action_dim += 1
@@ -375,6 +367,7 @@ class HilSerlRobotEnvConfig(EnvConfig):
 
         env = RobotEnv(
             robot_dict=robot_dict,
+            cameras=cameras,
             use_gripper=self.processor.gripper.use_gripper,
             reset_pose=self.processor.reset.fixed_reset_joint_positions,
             reset_time_s=self.processor.reset.reset_time_s,
@@ -394,19 +387,23 @@ class HilSerlRobotEnvConfig(EnvConfig):
             robot_dict[name] = make_robot_from_config(robot_dict[name])
             robot_dict[name].connect()
 
+        # Handle multi teleop configuration
         teleop_dict = self.teleop if isinstance(self.teleop, dict) else {DEFAULT_ROBOT_NAME: self.teleop}
         for name in teleop_dict:
             teleop_dict[name] = make_teleoperator_from_config(teleop_dict[name])
             teleop_dict[name].connect()
 
+        # Handle cameras
         cameras = make_cameras_from_configs(self.cameras)
+        for name in cameras:
+            cameras[name].connect()
 
         # go through each processor and check if we need to turn scalar configs into configs for each robot
         for attr in ["observation", "gripper", "reset", "inverse_kinematics", "task_frame"]:
             _attr = getattr(self.processor, attr)
-            for fn in _attr.fields:
-                if not isinstance(getattr(_attr, fn), dict):
-                    setattr(_attr, fn, {name: getattr(_attr, fn) for name in robot_dict})
+            for fn in fields(_attr):
+                if not isinstance(getattr(_attr, fn.name), dict):
+                    setattr(_attr, fn.name, {name: getattr(_attr, fn.name) for name in robot_dict})
             setattr(self.processor, attr, _attr)
 
         return robot_dict, teleop_dict, cameras
@@ -439,23 +436,19 @@ class HilSerlRobotEnvConfig(EnvConfig):
         # Get robot and motor information for kinematics
         joint_names = env._joint_names_dict
 
-
-        env_pipeline_steps = [VanillaObservationProcessorStep()]
-
-        env_pipeline_steps.append(
+        env_pipeline_steps = [
+            VanillaObservationProcessorStep(),
             JointVelocityProcessorStep(
                 enable=self.processor.observation.add_joint_velocity_to_observation,
-                dt=1.0 / self.fps)
-        )
-
-        env_pipeline_steps.append(
+                dt=1.0 / self.fps
+            ),
             MotorCurrentProcessorStep(
                 enable=self.processor.observation.add_current_to_observation,
                 robot_dict=env.robot_dict
             )
-        )
+        ]
 
-         # Set up kinematics solver if inverse kinematics is configured
+        # Set up kinematics solver if inverse kinematics is configured
         kinematics_solver = {}
         for name in env.robot_dict:
             if self.processor.inverse_kinematics.enable[name]:
@@ -504,7 +497,7 @@ class HilSerlRobotEnvConfig(EnvConfig):
                     device=device,
                     success_threshold=self.processor.reward_classifier.success_threshold,
                     success_reward=self.processor.reward_classifier.success_reward,
-                    terminate_on_success=terminate_on_success,
+                    terminate_on_success=self.processor.reset.terminate_on_success
                 )
             )
 
@@ -518,7 +511,7 @@ class HilSerlRobotEnvConfig(EnvConfig):
             InterventionActionProcessorStep(
                 teleop_names={name: teleoperators[name].action_features for name in env.robot_dict},
                 use_gripper=self.processor.gripper.use_gripper,
-                terminate_on_success=terminate_on_success,
+                terminate_on_success=self.processor.reset.terminate_on_success
             )
         ]
 
@@ -564,16 +557,17 @@ class TFHilSerlRobotEnvConfig(HilSerlRobotEnvConfig):
     @cached_property
     def action_dim(self):
         masks = self.processor.task_frame.control_mask
-        masks = masks if isistance(masks, dict) else {DEFAULT_ROBOT_NAME: masks}
+        masks = masks if isinstance(masks, dict) else {DEFAULT_ROBOT_NAME: masks}
         gripper = self.processor.gripper.use_gripper
-        gripper = gripper if isistance(gripper, dict) else {DEFAULT_ROBOT_NAME: gripper}
+        gripper = gripper if isinstance(gripper, dict) else {DEFAULT_ROBOT_NAME: gripper}
         return sum([sum(m) for m in masks.values()]) + sum(gripper.values())
 
-    def make(self, device) -> tuple[TaskFrameEnv, Any, Any]:
+    def make(self, device: str = "cpu") -> tuple[TaskFrameEnv, Any, Any]:
         robot_dict, teleop_dict, cameras = self._init_devices()
 
         env = TaskFrameEnv(
             robot_dict=robot_dict,
+            cameras=cameras,
             task_frame=self.processor.task_frame.command,
             control_mask=self.processor.task_frame.control_mask,
             use_gripper=self.processor.gripper.use_gripper,
@@ -590,7 +584,7 @@ class TFHilSerlRobotEnvConfig(HilSerlRobotEnvConfig):
         env_pipeline_steps = [
             VanillaTFFProcessorStep(
                 add_ee_velocity_to_observation=self.processor.observation.add_ee_velocity_to_observation,
-                add_ee_wrench_to_observation=self.processor.observation[name].add_ee_wrench_to_observation,
+                add_ee_wrench_to_observation=self.processor.observation.add_ee_wrench_to_observation,
                 ee_pos_mask=env.control_mask,
             )
         ]

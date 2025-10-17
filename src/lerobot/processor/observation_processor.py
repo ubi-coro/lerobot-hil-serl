@@ -84,7 +84,7 @@ class VanillaObservationProcessorStep(ObservationProcessorStep):
             raise ValueError(f"Expected torch.uint8 images, but got {img_tensor.dtype}")
 
         # Convert to channel-first format
-        img_tensor = einops.rearrange(img_tensor, "b h w c -> b c h w").contiguous()
+        #img_tensor = einops.rearrange(img_tensor, "b h w c -> b c h w").contiguous()
 
         # Convert to float32 and normalize to [0, 1]
         img_tensor = img_tensor.type(torch.float32) / 255.0

@@ -15,6 +15,7 @@
 import logging
 import math
 import time
+from collections import OrderedDict
 from functools import cached_property
 from typing import Any
 
@@ -66,7 +67,7 @@ class ViperX(Robot):
         self.config = config
         self.bus = DynamixelMotorsBus(
             port=self.config.port,
-            motors={
+            motors=OrderedDict({
                 "waist": Motor(1, "xm540-w270", MotorNormMode.RADIANS),
                 "shoulder": Motor(2, "xm540-w270", MotorNormMode.RADIANS),
                 "shoulder_shadow": Motor(3, "xm540-w270", MotorNormMode.RADIANS),
@@ -76,7 +77,7 @@ class ViperX(Robot):
                 "wrist_angle": Motor(7, "xm540-w270", MotorNormMode.RADIANS),
                 "wrist_rotate": Motor(8, "xm430-w350", MotorNormMode.RADIANS),
                 "gripper": Motor(9, "xm430-w350", MotorNormMode.RANGE_0_1),
-            },
+            }),
         )
         self.cameras = make_cameras_from_configs(config.cameras)
         self._last_motor_obs = None
@@ -130,7 +131,6 @@ class ViperX(Robot):
             cam.connect()
 
         self.configure()
-        self.bus.disable_torque()
         self.get_observation()
         logger.info(f"{self} connected.")
 
@@ -255,6 +255,11 @@ class ViperX(Robot):
             goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
 
         goal_pos = {key.removesuffix(".pos"): value for key, value in goal_pos.items()}
+
+        goal_pos = {
+            "wrist_rotate": goal_pos["wrist_rotate"],
+            "gripper": goal_pos["gripper"],
+        }
 
         # Send goal position to the arm
         self.bus.sync_write("Goal_Position", goal_pos)

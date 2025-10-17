@@ -5,6 +5,7 @@ import gymnasium as gym
 import numpy as np
 import torch
 
+from lerobot.cameras import Camera
 from lerobot.configs.types import PolicyFeature, FeatureType
 from lerobot.processor.hil_processor import GRIPPER_KEY
 from lerobot.robots import Robot
@@ -35,6 +36,7 @@ class RobotEnv(gym.Env):
     def __init__(
         self,
         robot_dict: dict[str, Robot],
+        cameras: dict[str, Camera] | None = None,
         use_gripper: dict[str, bool] | None = None,
         reset_pose: dict[str, list] | None = None,
         reset_time_s: dict[str, float] | None = None,
@@ -51,18 +53,12 @@ class RobotEnv(gym.Env):
         """
         super().__init__()
 
-        if use_gripper is None:
-            use_gripper = {name: False for name in robot_dict}
-        if reset_pose is None:
-            reset_pose = {name: None for name in robot_dict}
-        if reset_time_s is None:
-            reset_pose = {name: 5.0 for name in robot_dict}
-
         self.robot_dict = robot_dict
-        self.use_gripper = use_gripper
+        self.cameras = cameras if cameras else {}
+        self.use_gripper = use_gripper if use_gripper else {name: False for name in robot_dict}
+        self.reset_pose = reset_pose if reset_pose else {name: None for name in robot_dict}
+        self.reset_time_s = reset_time_s if reset_time_s else {name: 5.0 for name in robot_dict}
         self.display_cameras = display_cameras
-        self.reset_pose = reset_pose
-        self.reset_time_s = reset_time_s
 
         # Episode tracking.
         self.current_step = 0
@@ -71,7 +67,6 @@ class RobotEnv(gym.Env):
         self._raw_joint_positions = None
         self._joint_names_list = []
         self._joint_names_dict = {}
-        self._image_keys = []
         for name, robot in self.robot_dict.items():
             ft = robot._motors_ft
             if f"{GRIPPER_KEY}.pos" in ft and not self.use_gripper[name]:
@@ -79,23 +74,22 @@ class RobotEnv(gym.Env):
 
             self._joint_names_list.extend([f"{name}.{key}" for key in ft])
             self._joint_names_dict[name] = ft
-            self._image_keys.extend(robot._cameras_ft.keys())
 
         self._setup_spaces()
 
     def _get_observation(self) -> dict[str, Any]:
         """Get current robot observation including joint positions and camera images."""
+        # Capture state info from robots
         raw_joint_joint_position = {}
-        images = {}
         for name in self.robot_dict:
             obs_dict = self.robot_dict[name].get_observation()
             raw_joint_joint_position |= {f"{name}.{key}": obs_dict[key] for key in self._joint_names_dict[name]}
-            images |= {key: obs_dict[key] for key in self.robot_dict[name]._cameras_ft}
 
         obs = {"agent_pos": np.array(list(raw_joint_joint_position.values())), **raw_joint_joint_position}
-        if self._image_keys:
-            obs["pixels"] = images
 
+        # Capture images
+        if self.cameras:
+            obs["pixels"] = {cam_key: cam.async_read() for cam_key, cam in self.cameras.items()}
         return obs
 
     def _setup_spaces(self) -> None:
@@ -106,20 +100,18 @@ class RobotEnv(gym.Env):
 
         # Define observation spaces for images and other states.
         if current_observation is not None and "pixels" in current_observation:
-            prefix = OBS_IMAGES
             observation_spaces = {
-                f"{prefix}.{key}": gym.spaces.Box(
+                f"pixels.{key}": gym.spaces.Box(
                     low=0, high=255, shape=current_observation["pixels"][key].shape, dtype=np.uint8
                 )
                 for key in current_observation["pixels"]
             }
 
         if current_observation is not None:
-            agent_pos = current_observation["agent_pos"]
-            observation_spaces[OBS_STATE] = gym.spaces.Box(
+            observation_spaces["agent_pos"] = gym.spaces.Box(
                 low=0,
                 high=10,
-                shape=agent_pos.shape,
+                shape=current_observation["agent_pos"].shape,
                 dtype=np.float32,
             )
 

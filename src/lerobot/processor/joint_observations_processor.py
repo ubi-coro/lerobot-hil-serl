@@ -45,9 +45,9 @@ class JointVelocityProcessorStep(ObservationProcessorStep):
                               to enable velocity calculation.
     """
 
+    enable: dict[str, bool]
     dt: float = 0.1
-
-    last_joint_positions: torch.Tensor | None = None
+    last_joint_positions: dict[str, torch.Tensor] | None = None
 
     def observation(self, observation: dict) -> dict:
         """
@@ -64,27 +64,29 @@ class JointVelocityProcessorStep(ObservationProcessorStep):
         Raises:
             ValueError: If `observation.state` is not found in the observation.
         """
-        # Get current joint positions (assuming they're in observation.state)
-        current_positions = observation.get(OBS_STATE)
-        if current_positions is None:
-            raise ValueError(f"{OBS_STATE} is not in observation")
-
-        # Initialize last joint positions if not already set
-        if self.last_joint_positions is None:
-            self.last_joint_positions = current_positions.clone()
-            joint_velocities = torch.zeros_like(current_positions)
-        else:
-            # Compute velocities
-            joint_velocities = (current_positions - self.last_joint_positions) / self.dt
-
-        self.last_joint_positions = current_positions.clone()
-
-        # Extend observation with velocities
-        extended_state = torch.cat([current_positions, joint_velocities], dim=-1)
-
-        # Create new observation dict
         new_observation = dict(observation)
-        new_observation[OBS_STATE] = extended_state
+
+        if any(self.enable.values()):
+            # Get current joint positions (assuming they're in observation.state)
+            current_positions = observation.get(OBS_STATE)
+            if current_positions is None:
+                raise ValueError(f"{OBS_STATE} is not in observation")
+
+            # Initialize last joint positions if not already set
+            if self.last_joint_positions is None:
+                self.last_joint_positions = current_positions.clone()
+                joint_velocities = torch.zeros_like(current_positions)
+            else:
+                # Compute velocities
+                joint_velocities = (current_positions - self.last_joint_positions) / self.dt
+
+            self.last_joint_positions = current_positions.clone()
+
+            # Extend observation with velocities
+            extended_state = torch.cat([current_positions, joint_velocities], dim=-1)
+
+            # Create new observation dict
+            new_observation[OBS_STATE] = extended_state
 
         return new_observation
 
@@ -97,6 +99,7 @@ class JointVelocityProcessorStep(ObservationProcessorStep):
         """
         return {
             "dt": self.dt,
+            "enable": self.enable
         }
 
     def reset(self) -> None:
@@ -118,7 +121,7 @@ class JointVelocityProcessorStep(ObservationProcessorStep):
         Returns:
             The updated policy features dictionary.
         """
-        if OBS_STATE in features[PipelineFeatureType.OBSERVATION]:
+        if OBS_STATE in features[PipelineFeatureType.OBSERVATION] and any(self.enable.values()):
             original_feature = features[PipelineFeatureType.OBSERVATION][OBS_STATE]
             # Double the shape to account for positions + velocities
             new_shape = (original_feature.shape[0] * 2,) + original_feature.shape[1:]
@@ -143,6 +146,7 @@ class MotorCurrentProcessorStep(ObservationProcessorStep):
                the hardware bus.
     """
 
+    enable: dict[str, bool]
     robot_dict: dict[str, Robot] | None = None
 
     def observation(self, observation: dict) -> dict:
@@ -164,8 +168,8 @@ class MotorCurrentProcessorStep(ObservationProcessorStep):
             raise ValueError("Robot is not set")
 
         motor_currents = []
-        for name, robot in self.robot_dict:
-            if hasattr(robot, "bus") and hasattr(robot.bus, "motors"):
+        for name, robot in self.robot_dict.items():
+            if self.enable[name] and hasattr(robot, "bus") and hasattr(robot.bus, "motors"):
                 present_current_dict = robot.bus.sync_read("Present_Current")  # type: ignore[attr-defined]
                 motor_currents.extend([present_current_dict[name] for name in robot.bus.motors])
 
@@ -201,13 +205,13 @@ class MotorCurrentProcessorStep(ObservationProcessorStep):
         Returns:
             The updated policy features dictionary.
         """
-        if OBS_STATE in features[PipelineFeatureType.OBSERVATION] and self.robot is not None:
+        if OBS_STATE in features[PipelineFeatureType.OBSERVATION] and self.robot_dict is not None:
             original_feature = features[PipelineFeatureType.OBSERVATION][OBS_STATE]
             # Add motor current dimensions to the original state shape
             num_motors = 0
 
-            for robot in self.robot_dict.values():
-                if hasattr(robot, "bus") and hasattr(robot.bus, "motors"):  # type: ignore[attr-defined]
+            for name, robot in self.robot_dict.items():
+                if self.enable[name] and hasattr(robot, "bus") and hasattr(robot.bus, "motors"):  # type: ignore[attr-defined]
                     num_motors += len(self.robot.bus.motors)  # type: ignore[attr-defined]
 
             if num_motors > 0:
@@ -216,3 +220,14 @@ class MotorCurrentProcessorStep(ObservationProcessorStep):
                     type=original_feature.type, shape=new_shape
                 )
         return features
+
+    def get_config(self) -> dict[str, Any]:
+        """
+        Returns the configuration of the step for serialization.
+
+        Returns:
+            A dictionary containing the time step `dt`.
+        """
+        return {
+            "enable": self.enable
+        }

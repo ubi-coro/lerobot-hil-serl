@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-
+import logging
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,10 +16,12 @@
 # limitations under the License.
 
 import math
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
+import evdev
 import numpy as np
 import torch
 import torchvision.transforms.functional as F  # noqa: N812
@@ -37,7 +39,6 @@ from .pipeline import (
     ProcessorStepRegistry,
     TruncatedProcessorStep,
 )
-from ..utils.constants import DEFAULT_ROBOT_NAME
 
 GRIPPER_KEY = "gripper"
 DISCRETE_PENALTY_KEY = "discrete_penalty"
@@ -88,6 +89,51 @@ def _check_teleop_with_events(teleop: Teleoperator) -> None:
             f"Teleoperator {type(teleop).__name__} must implement get_teleop_events() method. "
             f"Compatible teleoperators: GamepadTeleop, KeyboardEndEffectorTeleop"
         )
+
+
+class FootSwitchHandler:
+    def __init__(self, device_path="/dev/input/event18", event_names: tuple[str] = (TeleopEvents.SUCCESS, ), toggle: bool = False):
+        self.device = evdev.InputDevice(device_path)
+        self.events = {name: False for name in event_names}
+        self.toggle = toggle
+        self.event_names = event_names
+        self.running = True
+
+    def start(self):
+        thread = threading.Thread(target=self._run, daemon=True)
+        thread.start()
+
+    def _run(self):
+        logging.info(f"Listening for foot switch events from {self.device.name} ({self.device.path})...")
+        for event in self.device.read_loop():
+            if not self.running:
+                break
+            if event.type == evdev.ecodes.EV_KEY:
+                key_event = evdev.categorize(event)
+                if key_event.keystate == 1:  # Key down
+                    if self.toggle:
+                        if self.events[self.event_names[0]]:
+                            logging.info(f"Foot switch pressed again - {self.event_names} toggled OFF")
+                            for name in self.event_names:
+                                self.events[name] = False
+                        else:
+                            logging.info(f"Foot switch pressed - {self.event_names} toggled ON")
+                            for name in self.event_names:
+                                self.events[name] = True
+                    else:
+                        logging.info(f"Foot switch pressed - {self.event_names} ON")
+                        for name in self.event_names:
+                            self.events[name] = True
+                elif key_event.keystate == 0 and not self.toggle:  # Key release
+                    logging.info(f"Foot switch released - {self.event_names} OFF")
+                    for name in self.event_names:
+                        self.events[name] = False
+
+    def stop(self):
+        self.running = False
+
+    def reset(self):
+        self.events = {name: False for name in self.event_names}
 
 
 @ProcessorStepRegistry.register("add_teleop_action_as_complementary_data")
@@ -177,23 +223,39 @@ class AddTeleopEventsAsInfoStep(InfoProcessorStep):
 @ProcessorStepRegistry.register("add_footswitch_events_as_info")
 @dataclass
 class AddFootswitchEventsAsInfoStep(InfoProcessorStep):
-    mapping: dict[str, dict] = field(default_factory={})
+    mapping: dict[tuple[TeleopEvents], dict] = field(default_factory=dict)
 
     def __post_init__(self):
-        # start listener
-        ...
+        self._foot_switch_threads = dict()
+
+        for events, params in self.mapping.items():
+            self._foot_switch_threads[events] = FootSwitchHandler(
+                device_path=f'/dev/input/event{params["device"]}',
+                toggle=bool(params["toggle"]),
+                event_names=events
+            )
+            self._foot_switch_threads[events].start()
 
     def info(self, info: dict) -> dict:
         new_info = dict(info)
-
-        # collect and store events
-
+        for handler in self._foot_switch_threads.values():
+            for event_name, event_value in handler.events.items():
+                new_info[event_name] = new_info.get(event_name, False) | event_value
         return new_info
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         return features
+
+    def reset(self) -> None:
+        for handler in self._foot_switch_threads.values():
+            handler.reset()
+
+    def __del__(self):
+        for handler in self._foot_switch_threads.values():
+            handler.stop()
+
 
 
 @ProcessorStepRegistry.register("image_crop_resize_processor")
@@ -312,6 +374,7 @@ class TimeLimitProcessorStep(TruncatedProcessorStep):
             True if the episode step limit is reached, otherwise the incoming value.
         """
         self.current_step += 1
+        print(self.max_episode_steps - self.current_step)
         if self.current_step >= self.max_episode_steps:
             truncated = True
         # TODO (steven): missing an else truncated = False?
@@ -465,7 +528,7 @@ class InterventionActionProcessorStep(ProcessorStep):
                 if isinstance(teleop_action, dict):
                     # Convert teleop_action dict to tensor format
                     for teleop_name in self.teleop_names[name]:
-                        if teleop_name == GRIPPER_KEY and not self.use_gripper[name]:
+                        if teleop_name == f"{GRIPPER_KEY}.pos" and not self.use_gripper[name]:
                             continue
                         action_list.append(teleop_action.get(teleop_name, 0.0))
                 elif isinstance(teleop_action, np.ndarray):

@@ -210,7 +210,6 @@ class DynamixelMotorsBus(MotorsBus):
 
     def enable_torque(self, motors: str | list[str] | None = None, num_retry: int = 10) -> None:
         for motor in self._get_motors_list(motors):
-            print(motor)
             self.write("Torque_Enable", motor, TorqueMode.ENABLED.value, num_retry=num_retry)
 
     def _encode_sign(self, data_name: str, ids_values: dict[int, int]) -> dict[int, int]:
