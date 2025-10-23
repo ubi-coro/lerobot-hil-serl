@@ -1,20 +1,20 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
-from lerobot.cameras import CameraConfig
+from pynput import keyboard
+
 from lerobot.cameras.opencv import OpenCVCameraConfig
 from lerobot.cameras.realsense import RealSenseCameraConfig
 from lerobot.envs.configs import HilSerlRobotEnvConfig, EnvConfig
-from lerobot.robots import RobotConfig
 from lerobot.robots.viperx import ViperXConfig
-from lerobot.share.record import DatasetRecordConfig
-from lerobot.teleoperators import TeleoperatorConfig, TeleopEvents
+from lerobot.share.configs import DatasetRecordConfig
+from lerobot.teleoperators import TeleopEvents
 from lerobot.teleoperators.widowx import WidowXConfig
 
 
 @dataclass
-@EnvConfig.register_subclass("aloha_single")
-class AlohaSingleEnvConfig(HilSerlRobotEnvConfig):
+@EnvConfig.register_subclass("aloha_bimanual")
+class AlohaBimanualEnvConfig(HilSerlRobotEnvConfig):
 
     def __post_init__(self):
         self.robot = {
@@ -53,16 +53,20 @@ class AlohaSingleEnvConfig(HilSerlRobotEnvConfig):
         }
 
         self.processor.gripper.use_gripper = True
+        self.processor.reset.terminate_on_success = True
         self.processor.events.foot_switch_mapping = {
-            (TeleopEvents.TERMINATE_EPISODE,): {"device": 2, "toggle": False},
-            (TeleopEvents.IS_INTERVENTION, ): {"device": 6, "toggle": True},
+            (TeleopEvents.SUCCESS,): {"device": 3, "toggle": False},
+            (TeleopEvents.IS_INTERVENTION,): {"device": 6, "toggle": True},
+        }
+        self.processor.events.key_mapping = {
+            TeleopEvents.RERECORD_EPISODE: keyboard.Key.left
         }
 
 
 @dataclass
-@DatasetRecordConfig.register_subclass("aloha_single")
-class AlohaSingleDatasetConfig(DatasetRecordConfig):
+@DatasetRecordConfig.register_subclass("aloha_bimanual")
+class AlohaBimanualDatasetConfig(DatasetRecordConfig):
     repo_id: str = "test/aloha_bimanual"
-    single_task: str = "test"
+    single_task: str = "Fold the hoodie"
     root: str = "/media/nvme1/jstranghoener/lerobot/data/test/aloha_bimanual"
 

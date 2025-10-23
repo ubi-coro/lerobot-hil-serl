@@ -1,6 +1,6 @@
-from copy import deepcopy
-
-import gymnasium
+import types
+import typing
+from typing import get_origin, get_args
 
 from lerobot.configs.types import PolicyFeature, FeatureType, PipelineFeatureType
 from lerobot.datasets.pipeline_features import create_initial_features, strip_prefix, PREFIXES_TO_STRIP
@@ -46,4 +46,11 @@ def get_pipeline_dataset_features(
             }
 
     return features
+
+
+def is_union_with_dict(field_type) -> bool:
+    origin = get_origin(field_type)
+    if origin is types.UnionType or origin is typing.Union:
+        return any(get_origin(arg) is dict for arg in get_args(field_type))
+    return False
 

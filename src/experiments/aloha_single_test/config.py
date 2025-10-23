@@ -7,7 +7,7 @@ from lerobot.cameras.realsense import RealSenseCameraConfig
 from lerobot.envs.configs import HilSerlRobotEnvConfig, EnvConfig
 from lerobot.robots import RobotConfig
 from lerobot.robots.viperx import ViperXConfig
-from lerobot.share.record import DatasetRecordConfig
+from lerobot.share.configs import DatasetRecordConfig
 from lerobot.teleoperators import TeleoperatorConfig, TeleopEvents
 from lerobot.teleoperators.widowx import WidowXConfig
 
@@ -49,7 +49,7 @@ class AlohaSingleEnvConfig(HilSerlRobotEnvConfig):
     def __post_init__(self):
         self.processor.gripper.use_gripper = True
         self.processor.events.foot_switch_mapping = {
-            (TeleopEvents.TERMINATE_EPISODE,): {"device": 2, "toggle": False},
+            (TeleopEvents.TERMINATE_EPISODE,): {"device": 3, "toggle": False},
             (TeleopEvents.IS_INTERVENTION, ): {"device": 6, "toggle": True},
         }
 

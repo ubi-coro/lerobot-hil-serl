@@ -120,8 +120,10 @@ class ViperX(Robot):
         # then we turn it off again during motor configuration and keep that
         self.bus.connect()
 
-        with self.bus.torque_disabled():
-            if self.calibration:
+        self.bus.enable_torque()
+
+        if self.calibration:
+            with self.bus.torque_disabled():
                 self.bus.write_calibration(self.calibration)
 
         if not self.is_calibrated and calibrate:
@@ -255,11 +257,6 @@ class ViperX(Robot):
             goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
 
         goal_pos = {key.removesuffix(".pos"): value for key, value in goal_pos.items()}
-
-        goal_pos = {
-            "wrist_rotate": goal_pos["wrist_rotate"],
-            "gripper": goal_pos["gripper"],
-        }
 
         # Send goal position to the arm
         self.bus.sync_write("Goal_Position", goal_pos)

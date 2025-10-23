@@ -63,6 +63,8 @@ class WidowX(Teleoperator):
                 "gripper": Motor(9, "xl430-w250", MotorNormMode.RANGE_0_1),
             }
         )
+        self._last_motor_obs = None
+        self._torque_enabled = False
 
     @property
     def action_features(self) -> dict[str, type]:
@@ -100,6 +102,7 @@ class WidowX(Teleoperator):
             self.calibrate()
 
         self.configure()
+        self.get_action()
         logger.info(f"{self} connected.")
 
     @property
@@ -181,14 +184,43 @@ class WidowX(Teleoperator):
         #action["finger.pos"] = gripper_to_linear(action.pop("gripper.pos"))
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read action: {dt_ms:.1f}ms")
+
+        self._last_motor_obs = action
+
         return action
 
     def send_feedback(self, feedback: dict[str, float]) -> None:
-        raise NotImplementedError
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
 
-    def get_teleop_events(self) -> dict[str, Any]:
+        self.enable_torque()
+
+        goal_pos = {key: feedback.get(key, self._last_motor_obs[key]) for key in self._last_motor_obs}
+
+        # Cap goal position when too far away from present position.
+        # /!\ Slower fps expected due to reading from the follower.
+        if self.config.max_relative_target is not None:
+            goal_present_pos = {key: (g_pos, self._last_motor_obs[key]) for key, g_pos in goal_pos.items()}
+            goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+
+        goal_pos = {key.removesuffix(".pos"): value for key, value in goal_pos.items()}
+
+        # Send goal position to the arm
+        self.bus.sync_write("Goal_Position", goal_pos)
+
+    def enable_torque(self):
+        if not self._torque_enabled:
+            self.bus.enable_torque()
+            self._torque_enabled = True
+
+    def disable_torque(self):
+        if self._torque_enabled:
+            self.bus.disable_torque()
+            self._torque_enabled = False
+
+    def get_teleop_events(self) -> dict[TeleopEvents, Any]:
         return {
-            TeleopEvents.IS_INTERVENTION: True,
+            TeleopEvents.IS_INTERVENTION: False,
             TeleopEvents.TERMINATE_EPISODE: False,
             TeleopEvents.SUCCESS: False,
             TeleopEvents.RERECORD_EPISODE: False,

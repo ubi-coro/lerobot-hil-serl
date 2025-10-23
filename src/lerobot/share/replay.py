@@ -108,11 +108,30 @@ from lerobot.processor import (
     create_transition,
     TransitionKey,
 )
-from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
 from lerobot.processor.rename_processor import rename_stats
+from lerobot.rl.gym_manipulator import step_env_and_process_transition
+from lerobot.robots import (  # noqa: F401
+    Robot,
+    RobotConfig,
+    bi_so100_follower,
+    hope_jr,
+    koch_follower,
+    make_robot_from_config,
+    so100_follower,
+    so101_follower,
+)
 from lerobot.share.configs import RecordConfig
-from lerobot.teleoperators import Teleoperator, TeleopEvents
-from lerobot.utils.constants import ACTION, REWARD, DONE
+from lerobot.teleoperators import (  # noqa: F401
+    Teleoperator,
+    TeleoperatorConfig,
+    bi_so100_leader,
+    homunculus,
+    koch_leader,
+    make_teleoperator_from_config,
+    so100_leader,
+    so101_leader, TeleopEvents,
+)
+from lerobot.utils.constants import ACTION, REWARD, DONE, OBS_STR
 from lerobot.utils.control_utils import (
     predict_action,
     sanity_check_dataset_name,
@@ -206,6 +225,7 @@ def record_loop(
     info: dict = transition[TransitionKey.INFO]
     episode_step = 0
     episode_start_time = time.perf_counter()
+    print("Teleoperate" if teleoperate else "Record")
     while (time.perf_counter() - episode_start_time) < control_time_s:
         start_loop_t = time.perf_counter()
 
@@ -218,7 +238,7 @@ def record_loop(
             # Permanently set the intervention flag to stay in control
             info[TeleopEvents.IS_INTERVENTION] = True
 
-        # (3) Decide and process action a_t
+        # (3) Decide action a_t
         if has_policy:
             policy_observation = {
                 k: v for k, v in prev_transition[TransitionKey.OBSERVATION].items() if k in policy.config.input_features
@@ -238,47 +258,14 @@ def record_loop(
             # Dummy action, expected to be overwritten by teleop action
             action = torch.tensor([0.0] * action_dim, dtype=torch.float32)
 
-        # Process action
-        action_transition = create_transition(action=action, info=info)
-        processed_action_transition = action_processor(action_transition)
-
-        # (4) Terminate on intervention end to correctly store episode bounds
-        if interactive:
-            is_intervention = processed_action_transition[TransitionKey.INFO].get(TeleopEvents.IS_INTERVENTION, False)
-            intervention_occurred = intervention_occurred | is_intervention
-
-            if intervention_occurred and not is_intervention:
-                info[TeleopEvents.INTERVENTION_COMPLETED] = True
-                episode_time = time.perf_counter() - episode_start_time
-                logging.info(
-                    f"Intervention ended after {episode_step} steps in {episode_time:.1f}s with reward {transition[TransitionKey.REWARD]}"
-                )
-                return info
-
-        # (5) Step env
-        obs, reward, terminated, truncated, info = env.step(processed_action_transition[TransitionKey.ACTION])
-
-        # (6) Read out info and possibly overwrite action
-        complementary_data = processed_action_transition[TransitionKey.COMPLEMENTARY_DATA].copy()
-        info.update(processed_action_transition[TransitionKey.INFO].copy())
-
-        # determine which action to store
-        if info.get(TeleopEvents.IS_INTERVENTION, False) and TELEOP_ACTION_KEY in complementary_data:
-            action_to_record = complementary_data[TELEOP_ACTION_KEY]
-        else:
-            action_to_record = action_transition[TransitionKey.ACTION]
-
-        # (7) Create and process transition
-        transition = create_transition(
-            observation=obs,
-            action=action_to_record,
-            reward=reward + processed_action_transition[TransitionKey.REWARD],
-            done=terminated or processed_action_transition[TransitionKey.DONE],
-            truncated=truncated or processed_action_transition[TransitionKey.TRUNCATED],
-            info=info,
-            complementary_data=processed_action_transition[TransitionKey.COMPLEMENTARY_DATA].copy(),
+        # (4) Step the env -> returns NEW transition with o_{t+1}, r_{t+1}, done
+        transition = step_env_and_process_transition(
+            env=env,
+            action=action,
+            env_processor=env_processor,
+            action_processor=action_processor,
+            info=info
         )
-        transition = env_processor(transition)
 
         action = transition[TransitionKey.ACTION]
         reward = transition[TransitionKey.REWARD]
@@ -286,7 +273,7 @@ def record_loop(
         truncated = transition.get(TransitionKey.TRUNCATED, False)
         info = transition.get(TransitionKey.INFO, {})
 
-        # (8) Store transition. When interactive, only store frames on interventions
+        # (5) Store transition. When interactive, only store frames on interventions
         if dataset is not None and (not interactive or info.get(TeleopEvents.IS_INTERVENTION, False)):
 
             # observations are batched and may contain other keys
@@ -312,7 +299,7 @@ def record_loop(
 
         episode_step += 1
 
-        # (9) Handle done
+        # (6) Handle done
         if terminated or truncated:
             episode_time = time.perf_counter() - episode_start_time
             logging.info(
@@ -320,10 +307,21 @@ def record_loop(
             )
             return info
 
+        # Terminate on intervention end to correctly store episode bounds
+        if interactive:
+            intervention_occurred = intervention_occurred | info.get(TeleopEvents.IS_INTERVENTION, False)
+            if intervention_occurred and not info.get(TeleopEvents.IS_INTERVENTION, False):
+                info[TeleopEvents.INTERVENTION_COMPLETED] = True
+                episode_time = time.perf_counter() - episode_start_time
+                logging.info(
+                    f"Intervention ended after {episode_step} steps in {episode_time:.1f}s with reward {transition[TransitionKey.REWARD]}"
+                )
+                return info
+
         if info.get(TeleopEvents.RERECORD_EPISODE, False) or info.get(TeleopEvents.TERMINATE_EPISODE, False):
             return info
 
-        # (10) Handle frequency
+        # (7) Handle frequency
         dt_load = time.perf_counter() - start_loop_t
         busy_wait(1 / fps - dt_load)
         dt_loop = time.perf_counter() - start_loop_t
@@ -336,130 +334,34 @@ def record_loop(
         return info
 
 @parser.wrap()
-def record(cfg: RecordConfig) -> LeRobotDataset:
-    init_logging()
-    logging.info(pformat(asdict(cfg)))
-    if cfg.display_data:
-        init_rerun(session_name="recording")
+def replay(cfg: RecordConfig) -> LeRobotDataset:
+    replay_episode = 0
 
     env, env_processor, action_processor = cfg.env.make(device="cpu" if cfg.policy is None else cfg.policy.device)
 
-    dataset_features = get_pipeline_dataset_features(env, env_processor, action_dim=cfg.env.action_dim, use_video=cfg.dataset.video)
+    dataset = LeRobotDataset(
+        cfg.dataset.repo_id,
+        root=cfg.dataset.root,
+        batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+    )
+    episode_frames = dataset.hf_dataset.filter(lambda x: x["episode_index"] == replay_episode)
+    actions = episode_frames.select_columns(ACTION)
 
-    teleop_on_reset = cfg.env.processor.reset.teleop_on_reset if hasattr(cfg.env, "processor") else False
+    env.reset()
+    env_processor.reset()
+    action_processor.reset()
 
-    if cfg.resume:
-        dataset = LeRobotDataset(
-            cfg.dataset.repo_id,
-            root=cfg.dataset.root,
-            batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+    for action_data in actions:
+        start_time = time.perf_counter()
+        step_env_and_process_transition(
+            env=env,
+            action=action_data[ACTION],
+            env_processor=env_processor,
+            action_processor=action_processor,
+            info={}
         )
-
-        if hasattr(env, "cameras") and len(env.cameras) > 0:
-            dataset.start_image_writer(
-                num_processes=cfg.dataset.num_image_writer_processes,
-                num_threads=cfg.dataset.num_image_writer_threads_per_camera * len(env.cameras),
-            )
-        sanity_check_dataset_robot_compatibility(dataset, cfg.env.type, cfg.dataset.fps, dataset_features)
-    else:
-        # Create empty dataset or load existing saved episodes
-        sanity_check_dataset_name(cfg.dataset.repo_id, cfg.policy)
-        dataset = LeRobotDataset.create(
-            cfg.dataset.repo_id,
-            cfg.dataset.fps,
-            root=cfg.dataset.root,
-            robot_type=cfg.env.type,
-            features=dataset_features,
-            use_videos=cfg.dataset.video,
-            image_writer_processes=cfg.dataset.num_image_writer_processes,
-            image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * len(cfg.env.cameras),
-            batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-        )
-
-    # Load pretrained policy
-    policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
-    preprocessor = None
-    postprocessor = None
-    if cfg.policy is not None:
-        preprocessor, postprocessor = make_pre_post_processors(
-            policy_cfg=cfg.policy,
-            pretrained_path=cfg.policy.pretrained_path,
-            dataset_stats=rename_stats(dataset.meta.stats, cfg.dataset.rename_map),
-            preprocessor_overrides={
-                "device_processor": {"device": cfg.policy.device},
-                "rename_observations_processor": {"rename_map": cfg.dataset.rename_map},
-            },
-        )
-
-    info = {}
-    with (VideoEncodingManager(dataset)):
-        recorded_episodes = 0
-        while recorded_episodes < cfg.dataset.num_episodes and not info.get(TeleopEvents.STOP_RECORDING, False):
-
-            # Execute a few seconds without recording to give time to manually reset the environment
-            # Skip reset for the last episode to be recorded
-            if teleop_on_reset and not info.get(TeleopEvents.INTERVENTION_COMPLETED, False):
-                log_say("Reset the environment", cfg.play_sounds)
-
-                info = record_loop(
-                    env=env,
-                    fps=cfg.dataset.fps,
-                    control_time_s=cfg.env.processor.reset.reset_time_s,
-                    action_dim=cfg.env.action_dim,
-                    action_processor=action_processor,
-                    env_processor=env_processor,
-                    policy=None,
-                    dataset=None,
-                    display_data=cfg.display_data,
-                    interactive=False
-                )
-
-            if info.get(TeleopEvents.STOP_RECORDING, False):
-                break
-
-            log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
-            info = record_loop(
-                env=env,
-                fps=cfg.dataset.fps,
-                action_dim=cfg.env.action_dim,
-                action_processor=action_processor,
-                env_processor=env_processor,
-                policy=policy,
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
-                dataset=dataset,
-                interactive=cfg.interactive,
-                single_task=cfg.dataset.single_task,
-                robot_type=cfg.env.type,
-                display_data=cfg.display_data,
-            )
-
-            if info.get(TeleopEvents.RERECORD_EPISODE, False):
-                log_say("Re-record episode", cfg.play_sounds)
-                dataset.clear_episode_buffer()
-                continue
-
-            if dataset.episode_buffer["size"] > 0:
-                dataset.save_episode()
-                recorded_episodes += 1
-
-            if info.get(TeleopEvents.STOP_RECORDING, False):
-                break
-
-            if dataset.episode_buffer["size"] == 0:
-                log_say("Dataset is empty, re-record episode", cfg.play_sounds)
-
-    log_say("Stop recording", cfg.play_sounds, blocking=True)
-
-    env.close()
-
-    if cfg.dataset.push_to_hub:
-        dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
-
-    log_say("Exiting", cfg.play_sounds)
-    return dataset
-
+        busy_wait(1 / cfg.env.fps - (time.perf_counter() - start_time))
 
 if __name__ == "__main__":
     import experiments
-    record()
+    replay()

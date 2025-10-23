@@ -26,7 +26,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor
-from torch.distributions import MultivariateNormal, TanhTransform, Transform, TransformedDistribution
+from torch.distributions import MultivariateNormal, TanhTransform, Transform, TransformedDistribution, Distribution
 
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.sac.configuration_sac import SACConfig, is_image_feature
@@ -338,7 +338,7 @@ class SACPolicy(
             # critics subsample size
             min_q, _ = q_targets.min(dim=0)  # Get values from min operation
             if self.config.use_backup_entropy:
-                min_q = min_q - (self.temperature * action_dist.log_prob(sample_actions))
+                min_q = min_q - (self.temperature * action_dist.log_prob(action_dist.rsample()))
 
             td_target = rewards + (1 - done) * self.config.discount * min_q
 
@@ -480,7 +480,7 @@ class SACPolicy(
         )
         min_q_preds = q_preds.min(dim=0)[0]
 
-        actor_loss = ((self.temperature * dist.log_prob(sample_actions)) - min_q_preds).mean()
+        actor_loss = ((self.temperature * dist.log_prob(policy_actions)) - min_q_preds).mean()
         return actor_loss
 
     def compute_loss_noise(

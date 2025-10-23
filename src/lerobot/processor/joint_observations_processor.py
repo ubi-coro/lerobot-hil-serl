@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+from sympy.physics.units import current
 
 from lerobot.configs.types import PipelineFeatureType, PolicyFeature
 from lerobot.processor.pipeline import (
@@ -167,6 +168,10 @@ class MotorCurrentProcessorStep(ObservationProcessorStep):
         if self.robot_dict is None:
             raise ValueError("Robot is not set")
 
+        current_state = observation.get(OBS_STATE)
+        if current_state is None:
+            return observation
+
         motor_currents = []
         for name, robot in self.robot_dict.items():
             if self.enable[name] and hasattr(robot, "bus") and hasattr(robot.bus, "motors"):
@@ -175,12 +180,11 @@ class MotorCurrentProcessorStep(ObservationProcessorStep):
 
         motor_currents = torch.tensor(
             motor_currents,  # type: ignore[attr-defined]
-            dtype=torch.float32,
-        ).unsqueeze(0)
+            dtype=current_state.dtype,
+            device=current_state.device
+        )
 
-        current_state = observation.get(OBS_STATE)
-        if current_state is None:
-            return observation
+
 
         extended_state = torch.cat([current_state, motor_currents], dim=-1)
 

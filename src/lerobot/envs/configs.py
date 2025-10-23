@@ -44,16 +44,17 @@ from lerobot.processor import (
     VanillaObservationProcessorStep,
 )
 from lerobot.processor.converters import identity_transition
-from lerobot.processor.hil_processor import AddFootswitchEventsAsInfoStep
-from lerobot.processor.robot_kinematic_processor import EEReferenceAndDelta, EEBoundsAndSafety, GripperVelocityToJoint
+from lerobot.processor.hil_processor import AddFootswitchEventsAsInfoStep, AddKeyboardEventsAsInfoStep
+from lerobot.processor.robot_kinematic_processor import EEReferenceAndDelta, EEBoundsAndSafety, GripperVelocityToJoint, \
+    InverseKinematicsRLStep
 from lerobot.processor.tff_processor import VanillaTFFProcessorStep, SixDofVelocityInterventionActionProcessorStep
 from lerobot.robots import RobotConfig, make_robot_from_config
 from lerobot.envs.robot_env import RobotEnv
 from lerobot.robots.ur.tff_controller import TaskFrameCommand
+from lerobot.share.utils import is_union_with_dict
 from lerobot.teleoperators import make_teleoperator_from_config, TeleopEvents
 from lerobot.teleoperators.config import TeleoperatorConfig
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE, DEFAULT_ROBOT_NAME
-
 
 
 @dataclass
@@ -246,18 +247,28 @@ class ResetConfig:
     """Configuration for environment reset behavior."""
 
     fixed_reset_joint_positions: Any | dict[str, Any | None] | None = None
-    reset_time_s: float | dict[str, float] = 5.0
     terminate_on_success: bool | dict[str, bool] = True
+    reset_time_s: float = 5.0
+    teleop_on_reset: bool = False
 
 
 @dataclass
 class TaskFrameConfig:
-    command: TaskFrameCommand | dict[bool] = field(default_factory=TaskFrameCommand.make_default_cmd)
-    control_mask: list[int] | dict[bool] = field(default_factory=lambda: [1] * 6)
+    command: TaskFrameCommand | dict[str, TaskFrameCommand] = field(default_factory=TaskFrameCommand.make_default_cmd)
+    control_mask: list[int] | dict[str, list[int]] = field(default_factory=lambda: [1] * 6)
+
 
 @dataclass
 class EventConfig:
+    key_mapping: dict[TeleopEvents, dict] = field(default_factory=lambda: {})
     foot_switch_mapping: dict[tuple[TeleopEvents], dict] = field(default_factory=lambda: {})
+
+
+@dataclass
+class HookConfig:
+    time_env_processor: bool = False
+    time_action_processor: bool = False
+    log_every: int = 10
 
 
 @dataclass
@@ -270,13 +281,13 @@ class HILSerlProcessorConfig:
     image_preprocessing: ImagePreprocessingConfig | None = None
     reward_classifier: RewardClassifierConfig | None = None
     events: EventConfig = EventConfig()
+    hooks: HookConfig = HookConfig()
 
     observation: ObservationConfig = ObservationConfig()
     gripper: GripperConfig = GripperConfig()
     reset: ResetConfig = ResetConfig()
     inverse_kinematics: InverseKinematicsConfig = InverseKinematicsConfig()
     task_frame: TaskFrameConfig = TaskFrameConfig()
-
 
 
 @EnvConfig.register_subclass("libero")
@@ -365,6 +376,9 @@ class HilSerlRobotEnvConfig(EnvConfig):
     def make(self, device: str = "cpu") -> tuple[RobotEnv, Any, Any]:
         robot_dict, teleop_dict, cameras = self._init_devices()
 
+        if self.processor.reset.teleop_on_reset:
+            self.processor.reset.fixed_reset_joint_positions = {name: None for name in robot_dict}
+
         env = RobotEnv(
             robot_dict=robot_dict,
             cameras=cameras,
@@ -402,7 +416,7 @@ class HilSerlRobotEnvConfig(EnvConfig):
         for attr in ["observation", "gripper", "reset", "inverse_kinematics", "task_frame"]:
             _attr = getattr(self.processor, attr)
             for fn in fields(_attr):
-                if not isinstance(getattr(_attr, fn.name), dict):
+                if is_union_with_dict(fn.type) and not isinstance(getattr(_attr, fn.name), dict):
                     setattr(_attr, fn.name, {name: getattr(_attr, fn.name) for name in robot_dict})
             setattr(self.processor, attr, _attr)
 
@@ -437,7 +451,7 @@ class HilSerlRobotEnvConfig(EnvConfig):
         joint_names = env._joint_names_dict
 
         env_pipeline_steps = [
-            VanillaObservationProcessorStep(),
+            VanillaObservationProcessorStep(device=device),
             JointVelocityProcessorStep(
                 enable=self.processor.observation.add_joint_velocity_to_observation,
                 dt=1.0 / self.fps
@@ -501,19 +515,23 @@ class HilSerlRobotEnvConfig(EnvConfig):
                 )
             )
 
-        env_pipeline_steps.append(AddBatchDimensionProcessorStep())
-        env_pipeline_steps.append(DeviceProcessorStep(device=device))
+        action_pipeline_steps = [AddTeleopEventsAsInfoStep(teleoperators=teleoperators)]
 
-        action_pipeline_steps = [
-            AddTeleopActionAsComplimentaryDataStep(teleoperators=teleoperators),
-            AddTeleopEventsAsInfoStep(teleoperators=teleoperators),
-            AddFootswitchEventsAsInfoStep(mapping=self.processor.events.foot_switch_mapping),
+        if self.processor.events.key_mapping:
+            action_pipeline_steps.append(AddKeyboardEventsAsInfoStep(mapping=self.processor.events.key_mapping))
+
+        if self.processor.events.foot_switch_mapping:
+            action_pipeline_steps.append(AddFootswitchEventsAsInfoStep(mapping=self.processor.events.foot_switch_mapping))
+
+        action_pipeline_steps.append(AddTeleopActionAsComplimentaryDataStep(teleoperators=teleoperators))
+
+        action_pipeline_steps.append(
             InterventionActionProcessorStep(
-                teleop_names={name: teleoperators[name].action_features for name in env.robot_dict},
+                teleoperators=teleoperators,
                 use_gripper=self.processor.gripper.use_gripper,
                 terminate_on_success=self.processor.reset.terminate_on_success
             )
-        ]
+        )
 
         # Replace InverseKinematicsProcessor with new kinematic processors
         if kinematics_solver:
@@ -544,10 +562,38 @@ class HilSerlRobotEnvConfig(EnvConfig):
             action_pipeline_steps.extend(inverse_kinematics_steps)
             action_pipeline_steps.append(RobotActionToPolicyActionProcessorStep(motor_names=joint_names))
 
+        # time the env pipeline with hooks
+        if self.processor.hooks.time_action_processor or self.processor.hooks.time_env_processor:
+            from lerobot.utils.control_utils import make_step_timing_hooks
+
+        if self.processor.hooks.time_env_processor:
+            env_before_hooks, env_after_hooks = make_step_timing_hooks(
+                pipeline_steps=env_pipeline_steps,
+                label="env",
+                log_every=self.processor.hooks.log_every,
+                ema_alpha=0.2,
+                also_print=False,
+            )
+        else:
+            env_before_hooks, env_after_hooks = [], []
+
+        if self.processor.hooks.time_action_processor:
+            action_before_hooks, action_after_hooks = make_step_timing_hooks(
+                pipeline_steps=action_pipeline_steps,
+                label="action",
+                log_every=self.processor.hooks.log_every,
+                ema_alpha=0.2,
+                also_print=False,
+            )
+        else:
+            action_before_hooks, action_after_hooks = [], []
+
         return DataProcessorPipeline(
-            steps=env_pipeline_steps, to_transition=identity_transition, to_output=identity_transition
+            steps=env_pipeline_steps, to_transition=identity_transition, to_output=identity_transition,
+            before_step_hooks=env_before_hooks, after_step_hooks=env_after_hooks
         ), DataProcessorPipeline(
-            steps=action_pipeline_steps, to_transition=identity_transition, to_output=identity_transition
+            steps=action_pipeline_steps, to_transition=identity_transition, to_output=identity_transition,
+            before_step_hooks=action_before_hooks, after_step_hooks=action_after_hooks
         )
 
 

@@ -38,8 +38,8 @@ class RobotEnv(gym.Env):
         robot_dict: dict[str, Robot],
         cameras: dict[str, Camera] | None = None,
         use_gripper: dict[str, bool] | None = None,
-        reset_pose: dict[str, list] | None = None,
-        reset_time_s: dict[str, float] | None = None,
+        reset_pose: dict[str, list | None] | None = None,
+        reset_time_s: float | None = None,
         display_cameras: bool = False,
     ) -> None:
         """Initialize robot environment with configuration options.
@@ -57,7 +57,7 @@ class RobotEnv(gym.Env):
         self.cameras = cameras if cameras else {}
         self.use_gripper = use_gripper if use_gripper else {name: False for name in robot_dict}
         self.reset_pose = reset_pose if reset_pose else {name: None for name in robot_dict}
-        self.reset_time_s = reset_time_s if reset_time_s else {name: 5.0 for name in robot_dict}
+        self.reset_time_s = reset_time_s if reset_time_s else 5.0
         self.display_cameras = display_cameras
 
         # Episode tracking.
@@ -158,7 +158,7 @@ class RobotEnv(gym.Env):
                 reset_follower_position(robot, np.array(self.reset_pose[name]))
                 log_say("Reset the environment done.", play_sounds=True)
 
-            busy_wait(self.reset_time_s.get(name, 1.0) - (time.perf_counter() - start_time))
+                busy_wait(self.reset_time_s.get(name, 5.0) - (time.perf_counter() - start_time))
 
         super().reset(seed=seed, options=options)
 

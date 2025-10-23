@@ -27,6 +27,158 @@ from .pipeline import ObservationProcessorStep, ProcessorStepRegistry
 
 
 @dataclass
+@ProcessorStepRegistry.register(name="observation_processor_new")
+class VanillaObservationProcessorStep_new(ObservationProcessorStep):
+    """
+    Fast, zero-copy observation processor:
+    - Images: keep as uint8 HWC on CPU (no normalization, no permute, no batch dim).
+    - States: torch.from_numpy + float cast only if needed; no batch dim here.
+    - Let later steps handle batching and device transfer.
+    """
+
+    def _to_tensor_uint8_hwc(self, img: np.ndarray | torch.Tensor) -> torch.Tensor:
+        # Accept numpy (preferred) or torch (already a tensor).
+        if isinstance(img, torch.Tensor):
+            t = img
+        else:
+            # Zero-copy from numpy (must be contiguous; typical camera frames are)
+            t = torch.from_numpy(img)
+
+        # Sanity: expect 3D HWC or 4D BHWC (some sources may already have batch)
+        if t.ndim == 3:
+            h, w, c = t.shape
+        elif t.ndim == 4:
+            _, h, w, c = t.shape
+        else:
+            raise ValueError(f"Expected image with 3 or 4 dims (HWC or BHWC); got shape {tuple(t.shape)}")
+
+        # Keep channel-last; do NOT normalize or permute here.
+        # Ensure dtype is uint8 (zero-copy path stays cheap).
+        if t.dtype != torch.uint8:
+            # If your source isn’t uint8, this will copy — try to fix at the source if possible.
+            t = t.to(torch.uint8)
+
+        # Ensure contiguous memory to avoid downstream surprises.
+        if not t.is_contiguous():
+            t = t.contiguous()
+
+        return t  # uint8 HWC (or BHWC if upstream provided batch), CPU
+
+    def _to_tensor_1d_or_2d_float(self, arr: np.ndarray | torch.Tensor) -> torch.Tensor:
+        # Zero-copy from numpy when possible
+        t = arr if isinstance(arr, torch.Tensor) else torch.from_numpy(arr)
+        if t.dtype != torch.float32:
+            t = t.float()
+        # No batch dim here; AddBatchDimensionProcessorStep will handle it.
+        return t
+
+    def _process_observation(self, observation: dict) -> dict:
+        processed_obs = observation.copy()
+
+        # Images: pixels or pixels.{cam}
+        if "pixels" in processed_obs:
+            pixels = processed_obs.pop("pixels")
+            if isinstance(pixels, dict):
+                imgs = {f"{OBS_IMAGES}.{key}": img for key, img in pixels.items()}
+            else:
+                imgs = {OBS_IMAGE: pixels}
+
+            for imgkey, img in imgs.items():
+                processed_obs[imgkey] = self._to_tensor_uint8_hwc(img)
+
+        # State-like arrays
+        if "environment_state" in processed_obs:
+            env_state = processed_obs.pop("environment_state")
+            processed_obs[OBS_ENV_STATE] = self._to_tensor_1d_or_2d_float(env_state)
+
+        if "agent_pos" in processed_obs:
+            agent_pos = processed_obs.pop("agent_pos")
+            processed_obs[OBS_STATE] = self._to_tensor_1d_or_2d_float(agent_pos)
+
+        return processed_obs
+
+    def observation(self, observation: dict) -> dict:
+        return self._process_observation(observation)
+
+    def transform_features(
+            self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        """
+        Transforms feature keys from the Gym standard to the LeRobot standard.
+
+        This method standardizes the feature dictionary by renaming keys according
+        to LeRobot's conventions, ensuring that policies can be constructed correctly.
+        It handles various raw key formats, including those with an "observation." prefix.
+
+        **Renaming Rules:**
+        - `pixels` or `observation.pixels` -> `observation.image`
+        - `pixels.{cam}` or `observation.pixels.{cam}` -> `observation.images.{cam}`
+        - `environment_state` or `observation.environment_state` -> `observation.environment_state`
+        - `agent_pos` or `observation.agent_pos` -> `observation.state`
+
+        Args:
+            features: The policy features dictionary with Gym-style keys.
+
+        Returns:
+            The policy features dictionary with standardized LeRobot keys.
+        """
+        # Build a new features mapping keyed by the same FeatureType buckets
+        # We assume callers already placed features in the correct FeatureType.
+        new_features: dict[PipelineFeatureType, dict[str, PolicyFeature]] = {ft: {} for ft in features}
+
+        exact_pairs = {
+            "pixels": OBS_IMAGE,
+            "environment_state": OBS_ENV_STATE,
+            "agent_pos": OBS_STATE,
+        }
+
+        prefix_pairs = {
+            "pixels.": f"{OBS_IMAGES}.",
+        }
+
+        # Iterate over all incoming feature buckets and normalize/move each entry
+        for src_ft, bucket in features.items():
+            for key, feat in list(bucket.items()):
+                handled = False
+
+                # Prefix-based rules (e.g. pixels.cam1 -> OBS_IMAGES.cam1)
+                for old_prefix, new_prefix in prefix_pairs.items():
+                    prefixed_old = f"{OBS_STR}.{old_prefix}"
+                    if key.startswith(prefixed_old):
+                        suffix = key[len(prefixed_old):]
+                        new_key = f"{new_prefix}{suffix}"
+                        new_features[src_ft][new_key] = feat
+                        handled = True
+                        break
+
+                    if key.startswith(old_prefix):
+                        suffix = key[len(old_prefix):]
+                        new_key = f"{new_prefix}{suffix}"
+                        new_features[src_ft][new_key] = feat
+                        handled = True
+                        break
+
+                if handled:
+                    continue
+
+                # Exact-name rules (pixels, environment_state, agent_pos)
+                for old, new in exact_pairs.items():
+                    if key == old or key == f"{OBS_STR}.{old}":
+                        new_key = new
+                        new_features[src_ft][new_key] = feat
+                        handled = True
+                        break
+
+                if handled:
+                    continue
+
+                # Default: keep key in the same source FeatureType bucket
+                new_features[src_ft][key] = feat
+
+        return new_features
+
+
+@dataclass
 @ProcessorStepRegistry.register(name="observation_processor")
 class VanillaObservationProcessorStep(ObservationProcessorStep):
     """
@@ -51,6 +203,7 @@ class VanillaObservationProcessorStep(ObservationProcessorStep):
     -   Converts NumPy arrays to PyTorch tensors.
     -   Adds a batch dimension if one is not already present.
     """
+    device: str
 
     def _process_single_image(self, img: np.ndarray) -> Tensor:
         """
@@ -69,14 +222,10 @@ class VanillaObservationProcessorStep(ObservationProcessorStep):
                         format or is not of `uint8` dtype.
         """
         # Convert to tensor
-        img_tensor = torch.from_numpy(img)
-
-        # Add batch dimension if needed
-        if img_tensor.ndim == 3:
-            img_tensor = img_tensor.unsqueeze(0)
+        img_tensor = torch.from_numpy(img).to(self.device)
 
         # Validate image format
-        _, h, w, c = img_tensor.shape
+        h, w, c = img_tensor.shape
         if not (c < h and c < w):
             raise ValueError(f"Expected channel-last images, but got shape {img_tensor.shape}")
 
@@ -84,7 +233,7 @@ class VanillaObservationProcessorStep(ObservationProcessorStep):
             raise ValueError(f"Expected torch.uint8 images, but got {img_tensor.dtype}")
 
         # Convert to channel-first format
-        #img_tensor = einops.rearrange(img_tensor, "b h w c -> b c h w").contiguous()
+        img_tensor = einops.rearrange(img_tensor, "h w c -> c h w").contiguous()
 
         # Convert to float32 and normalize to [0, 1]
         img_tensor = img_tensor.type(torch.float32) / 255.0
@@ -111,16 +260,12 @@ class VanillaObservationProcessorStep(ObservationProcessorStep):
 
         if "environment_state" in processed_obs:
             env_state_np = processed_obs.pop("environment_state")
-            env_state = torch.from_numpy(env_state_np).float()
-            if env_state.dim() == 1:
-                env_state = env_state.unsqueeze(0)
+            env_state = torch.from_numpy(env_state_np).float().to(self.device)
             processed_obs[OBS_ENV_STATE] = env_state
 
         if "agent_pos" in processed_obs:
             agent_pos_np = processed_obs.pop("agent_pos")
-            agent_pos = torch.from_numpy(agent_pos_np).float()
-            if agent_pos.dim() == 1:
-                agent_pos = agent_pos.unsqueeze(0)
+            agent_pos = torch.from_numpy(agent_pos_np).float().to(self.device)
             processed_obs[OBS_STATE] = agent_pos
 
         return processed_obs
@@ -168,6 +313,9 @@ class VanillaObservationProcessorStep(ObservationProcessorStep):
         for src_ft, bucket in features.items():
             for key, feat in list(bucket.items()):
                 handled = False
+
+                if len(feat.shape) == 3:
+                    feat.shape = (feat.shape[2], feat.shape[0], feat.shape[1])
 
                 # Prefix-based rules (e.g. pixels.cam1 -> OBS_IMAGES.cam1)
                 for old_prefix, new_prefix in prefix_pairs.items():

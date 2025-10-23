@@ -62,7 +62,7 @@ from lerobot.policies.factory import get_policy_class, make_policy_config, make_
 from lerobot.utils.constants import ACTION
 
 
-def extract_normalization_stats(state_dict: dict[str, torch.Tensor]) -> dict[str, dict[str, torch.Tensor]]:
+def extract_normalization_stats(state_dict: dict[str, torch.Tensor], policy_features: dict[str, dict]) -> dict[str, dict[str, torch.Tensor]]:
     """
     Scans a model's state_dict to find and extract normalization statistics.
 
@@ -109,7 +109,13 @@ def extract_normalization_stats(state_dict: dict[str, torch.Tensor]) -> dict[str
                     # Last part is the stat type (mean, std, min, max, etc.)
                     stat_type = parts[-1]
                     # Everything else is the feature name
-                    feature_name = ".".join(parts[:-1]).replace("_", ".")
+
+                    # if the policy feature has underscores, we keep them
+                    try:
+                        feature_key = [ft_key.split(".")[-1] for ft_key in policy_features if ft_key.split(".")[-1] in remaining][0]
+                    except:
+                        feature_key = "action"
+                    feature_name = remaining.split(feature_key)[0].replace("_", ".") + feature_key
 
                     # Add to stats
                     if feature_name not in stats:
@@ -525,7 +531,7 @@ def main():
 
     # Extract normalization statistics
     print("Extracting normalization statistics...")
-    stats = extract_normalization_stats(state_dict)
+    stats = extract_normalization_stats(state_dict, train_config["policy"]["input_features"])
 
     print(f"Found normalization statistics for: {list(stats.keys())}")
 

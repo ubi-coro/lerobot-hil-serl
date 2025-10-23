@@ -32,11 +32,13 @@ from lerobot.processor import (
     TransitionKey,
     create_transition,
 )
+from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
 from lerobot.robots import (  # noqa: F401
     RobotConfig,
     make_robot_from_config,
     so100_follower,
 )
+from lerobot.teleoperators import TeleopEvents
 from lerobot.teleoperators.teleoperator import Teleoperator
 from lerobot.utils.constants import ACTION, DONE, OBS_STATE, REWARD
 from lerobot.utils.robot_utils import busy_wait
@@ -97,10 +99,10 @@ def make_robot_env(cfg: 'HilSerlRobotEnvConfig', device: str = "cpu") -> tuple[g
 
 def step_env_and_process_transition(
     env: gym.Env,
-    transition: EnvTransition,
     action: torch.Tensor,
     env_processor: DataProcessorPipeline[EnvTransition, EnvTransition],
     action_processor: DataProcessorPipeline[EnvTransition, EnvTransition],
+    info: {}
 ) -> EnvTransition:
     """
     Execute one step with processor pipeline.
@@ -117,8 +119,7 @@ def step_env_and_process_transition(
     """
 
     # Create action transition
-    transition[TransitionKey.ACTION] = action
-    transition[TransitionKey.OBSERVATION] = {}
+    transition = create_transition(action=action, info=info)
     processed_action_transition = action_processor(transition)
     processed_action = processed_action_transition[TransitionKey.ACTION]
 
@@ -128,20 +129,23 @@ def step_env_and_process_transition(
     terminated = terminated or processed_action_transition[TransitionKey.DONE]
     truncated = truncated or processed_action_transition[TransitionKey.TRUNCATED]
     complementary_data = processed_action_transition[TransitionKey.COMPLEMENTARY_DATA].copy()
-    new_info = info
     info.update(processed_action_transition[TransitionKey.INFO].copy())
+
+    if info.get(TeleopEvents.IS_INTERVENTION, False):
+        action_to_record = complementary_data.get(TELEOP_ACTION_KEY, transition[TransitionKey.ACTION])
+    else:
+        action_to_record = transition[TransitionKey.ACTION]
 
     new_transition = create_transition(
         observation=obs,
-        action=processed_action,
+        action=action_to_record,
         reward=reward,
         done=terminated,
         truncated=truncated,
-        info=new_info,
+        info=info,
         complementary_data=complementary_data,
     )
     new_transition = env_processor(new_transition)
-
     return new_transition
 
 

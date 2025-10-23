@@ -25,6 +25,7 @@ import evdev
 import numpy as np
 import torch
 import torchvision.transforms.functional as F  # noqa: N812
+from tqdm import tqdm
 
 from lerobot.configs.types import PipelineFeatureType, PolicyFeature
 from lerobot.teleoperators.teleoperator import Teleoperator
@@ -138,7 +139,7 @@ class FootSwitchHandler:
 
 @ProcessorStepRegistry.register("add_teleop_action_as_complementary_data")
 @dataclass
-class AddTeleopActionAsComplimentaryDataStep(ComplementaryDataProcessorStep):
+class AddTeleopActionAsComplimentaryDataStep(ProcessorStep):
     """
     Adds the raw action from a teleoperator to the transition's complementary data.
 
@@ -152,23 +153,23 @@ class AddTeleopActionAsComplimentaryDataStep(ComplementaryDataProcessorStep):
 
     teleoperators: dict[str, Teleoperator] = field(default_factory={})
 
-    def complementary_data(self, complementary_data: dict) -> dict:
-        """
-        Retrieves the teleoperator's action and adds it to the complementary data.
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        """Applies the `complementary_data` method to the transition's data."""
+        self._current_transition = transition.copy()
+        new_transition = self._current_transition
 
-        Args:
-            complementary_data: The incoming complementary data dictionary.
+        complementary_data = new_transition.get(TransitionKey.COMPLEMENTARY_DATA)
+        if complementary_data is None or not isinstance(complementary_data, dict):
+            raise ValueError("ComplementaryDataProcessorStep requires complementary data in the transition.")
 
-        Returns:
-            A new dictionary with the teleoperator action added under the
-            `teleop_action` key.
-        """
-        new_complementary_data = dict(complementary_data)
-        new_complementary_data[TELEOP_ACTION_KEY] = {}
-        for name in self.teleoperators:
-            new_complementary_data[TELEOP_ACTION_KEY][name] = self.teleoperators[name].get_action()
+        processed_complementary_data = complementary_data.copy()
+        if transition[TransitionKey.INFO].get(TeleopEvents.IS_INTERVENTION, False):
+            processed_complementary_data[TELEOP_ACTION_KEY] = {}
+            for name in self.teleoperators:
+                processed_complementary_data[TELEOP_ACTION_KEY][name] = self.teleoperators[name].get_action()
 
-        return new_complementary_data
+        new_transition[TransitionKey.COMPLEMENTARY_DATA] = processed_complementary_data
+        return new_transition
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
@@ -255,6 +256,64 @@ class AddFootswitchEventsAsInfoStep(InfoProcessorStep):
     def __del__(self):
         for handler in self._foot_switch_threads.values():
             handler.stop()
+
+
+@ProcessorStepRegistry.register("add_keyboard_events_as_info")
+@dataclass
+class AddKeyboardEventsAsInfoStep(InfoProcessorStep):
+    mapping: dict[TeleopEvents, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self._events = {event: False for event in self.mapping}
+        self._is_string_key = {event: isinstance(mapping_key, str) for event, mapping_key in self.mapping.items()}
+
+        from pynput import keyboard
+
+        def on_press(key):
+            for event, mapping_key in self.mapping.items():
+                try:
+                    if self._is_string_key[event]:
+                        if key.char == mapping_key:
+                            self._events[event] = True
+                    else:
+                        if key == mapping_key:
+                            self._events[event] = True
+                except Exception:
+                    ...
+
+        def on_release(key):
+            for event, mapping_key in self.mapping.items():
+                try:
+                    if self._is_string_key[event]:
+                        if key.char == mapping_key:
+                            self._events[event] = False
+                    else:
+                        if key == mapping_key:
+                            self._events[event] = False
+                except Exception:
+                    ...
+
+
+        self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        self._listener.start()
+
+    def info(self, info: dict) -> dict:
+        new_info = dict(info)
+        for event_name, event_value in self._events.items():
+            new_info[event_name] = new_info.get(event_name, False) | event_value
+        return new_info
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+    def reset(self) -> None:
+        self._events = {event: False for event in self.mapping}
+
+    def __del__(self):
+        for l in self._listener.values():
+            l.stop()
 
 
 
@@ -363,6 +422,16 @@ class TimeLimitProcessorStep(TruncatedProcessorStep):
     max_episode_steps: int
     current_step: int = 0
 
+    def __post_init__(self):
+        """Initialize the tqdm progress bar."""
+        self._pbar = tqdm(
+            total=self.max_episode_steps,
+            desc="Episode Progress",
+            unit="step",
+            leave=False,
+            dynamic_ncols=True,
+        )
+
     def truncated(self, truncated: bool) -> bool:
         """
         Increments the step counter and sets the truncated flag if the time limit is reached.
@@ -374,10 +443,15 @@ class TimeLimitProcessorStep(TruncatedProcessorStep):
             True if the episode step limit is reached, otherwise the incoming value.
         """
         self.current_step += 1
-        print(self.max_episode_steps - self.current_step)
-        if self.current_step >= self.max_episode_steps:
-            truncated = True
-        # TODO (steven): missing an else truncated = False?
+        if self._pbar is not None:
+            self._pbar.update(1)
+            self._pbar.set_postfix_str(f"Remaining: {self.max_episode_steps - self.current_step}")
+
+        truncated = self.current_step >= self.max_episode_steps
+        if truncated:
+            if self._pbar is not None:
+                self._pbar.close()
+
         return truncated
 
     def get_config(self) -> dict[str, Any]:
@@ -488,9 +562,12 @@ class InterventionActionProcessorStep(ProcessorStep):
                               `success` event is received.
     """
 
-    teleop_names: dict[str, dict]
+    teleoperators: dict[str, Teleoperator]
     use_gripper: dict[str, bool]
     terminate_on_success: dict[str, bool]
+
+    def __post_init__(self):
+        self._disable_torque_on_intervention = {name: hasattr(teleop, "bus") for name, teleop in self.teleoperators.items()}
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         """
@@ -505,7 +582,7 @@ class InterventionActionProcessorStep(ProcessorStep):
         """
         action = transition.get(TransitionKey.ACTION)
         assert isinstance(action, PolicyAction), f"Action should be a PolicyAction type got {type(action)}"
-        assert len(action) == sum([len(self.teleop_names[name]) for name in self.teleop_names])
+        assert len(action) == sum([len(self.teleoperators[name].action_features) for name in self.teleoperators])
 
         # Get intervention signals from complementary data
         info = transition.get(TransitionKey.INFO, {})
@@ -522,15 +599,21 @@ class InterventionActionProcessorStep(ProcessorStep):
 
         # Override action if intervention is active
         if is_intervention and teleop_action_dict is not None:
-            for name, teleop_action in teleop_action_dict.items():
-                action_list = []
 
+            # loop over teleoperators and concat their actions
+            action_list = []
+            for name, teleop_action in teleop_action_dict.items():
+                # torque leaders off on interventions
+                if self._disable_torque_on_intervention[name]:
+                    self.teleoperators[name].bus.disable_torque()
+
+                # process teleop action
                 if isinstance(teleop_action, dict):
-                    # Convert teleop_action dict to tensor format
-                    for teleop_name in self.teleop_names[name]:
-                        if teleop_name == f"{GRIPPER_KEY}.pos" and not self.use_gripper[name]:
+                    # convert teleop_action dict to tensor format
+                    for ft in self.teleoperators[name].action_features:
+                        if ft == f"{GRIPPER_KEY}.pos" and not self.use_gripper[name]:
                             continue
-                        action_list.append(teleop_action.get(teleop_name, 0.0))
+                        action_list.append(teleop_action.get(ft, 0.0))
                 elif isinstance(teleop_action, np.ndarray):
                     action_list.extend(teleop_action.tolist())
                 else:
@@ -539,9 +622,19 @@ class InterventionActionProcessorStep(ProcessorStep):
             teleop_action_tensor = torch.tensor(action_list, dtype=action.dtype, device=action.device)
             new_transition[TransitionKey.ACTION] = teleop_action_tensor
 
+        else:
+            # send the current action as feedback to the robots
+            idx = 0
+            for teleop_name, teleop in self.teleoperators.items():
+                feedback_action = {}
+                for ft in teleop.action_features:
+                    feedback_action[ft] = action[idx]
+                    idx += 1
+                teleop.send_feedback(feedback_action)
+
         # Handle episode termination
         new_transition[TransitionKey.DONE] = bool(terminate_episode) or (
-            self.terminate_on_success and success
+            any(self.terminate_on_success.values()) and success
         )
         new_transition[TransitionKey.REWARD] = float(success)
 
