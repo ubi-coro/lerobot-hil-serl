@@ -49,6 +49,12 @@ class WidowX(Teleoperator):
     ):
         super().__init__(config)
         self.config = config
+
+        if config.use_aloha2_gripper_servo:
+            gripper_servo_model = "xc430-w150"
+        else:
+            gripper_servo_model = "xl430-w250"
+
         self.bus = DynamixelMotorsBus(
             port=self.config.port,
             motors={
@@ -60,7 +66,7 @@ class WidowX(Teleoperator):
                 "forearm_roll": Motor(6, "xm430-w350", MotorNormMode.RADIANS),
                 "wrist_angle": Motor(7, "xm430-w350", MotorNormMode.RADIANS),
                 "wrist_rotate": Motor(8, "xl430-w250", MotorNormMode.RADIANS),
-                "gripper": Motor(9, "xl430-w250", MotorNormMode.RANGE_0_1),
+                "gripper": Motor(9, gripper_servo_model, MotorNormMode.RANGE_0_1),
             }
         )
         self._last_motor_obs = None

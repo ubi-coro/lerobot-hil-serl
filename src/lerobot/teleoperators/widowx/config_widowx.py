@@ -36,3 +36,6 @@ class WidowXConfig(TeleoperatorConfig):
     # The duration of the velocity-based time profile
     # Higher values lead to smoother motions, but increase lag.
     moving_time: float = 0.1
+
+    # use aloha2 servo
+    use_aloha2_gripper_servo: bool = False

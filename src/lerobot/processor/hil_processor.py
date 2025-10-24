@@ -568,6 +568,7 @@ class InterventionActionProcessorStep(ProcessorStep):
 
     def __post_init__(self):
         self._disable_torque_on_intervention = {name: hasattr(teleop, "bus") for name, teleop in self.teleoperators.items()}
+        self._intervention_occurred = False
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         """
@@ -597,6 +598,12 @@ class InterventionActionProcessorStep(ProcessorStep):
 
         new_transition = transition.copy()
 
+        # Terminate on intervention end to correctly store episode bounds
+        self._intervention_occurred = self._intervention_occurred  | is_intervention
+        if self._intervention_occurred and not is_intervention:
+            info[TeleopEvents.INTERVENTION_COMPLETED] = True
+            terminate_episode = True
+
         # Override action if intervention is active
         if is_intervention and teleop_action_dict is not None:
 
@@ -622,7 +629,8 @@ class InterventionActionProcessorStep(ProcessorStep):
             teleop_action_tensor = torch.tensor(action_list, dtype=action.dtype, device=action.device)
             new_transition[TransitionKey.ACTION] = teleop_action_tensor
 
-        else:
+        elif not self._intervention_occurred:  # dont write feedback on intervention end
+
             # send the current action as feedback to the robots
             idx = 0
             for teleop_name, teleop in self.teleoperators.items():
@@ -632,6 +640,13 @@ class InterventionActionProcessorStep(ProcessorStep):
                     idx += 1
                 teleop.send_feedback(feedback_action)
 
+        else:
+            # torque leader on intervention end
+            for name, teleop_action in self.teleoperators.items():
+                # torque leaders off on interventions
+                if self._disable_torque_on_intervention[name]:
+                    self.teleoperators[name].enable_torque()
+
         # Handle episode termination
         new_transition[TransitionKey.DONE] = bool(terminate_episode) or (
             any(self.terminate_on_success.values()) and success
@@ -639,7 +654,6 @@ class InterventionActionProcessorStep(ProcessorStep):
         new_transition[TransitionKey.REWARD] = float(success)
 
         # Update info with intervention metadata
-        info = new_transition.get(TransitionKey.INFO, {})
         info[TeleopEvents.IS_INTERVENTION] = is_intervention
         info[TeleopEvents.RERECORD_EPISODE] = rerecord_episode
         info[TeleopEvents.SUCCESS] = success
@@ -668,6 +682,9 @@ class InterventionActionProcessorStep(ProcessorStep):
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         return features
+
+    def reset(self) -> None:
+        self._intervention_occurred = False
 
 
 @dataclass

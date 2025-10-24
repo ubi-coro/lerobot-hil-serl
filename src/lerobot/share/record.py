@@ -242,18 +242,13 @@ def record_loop(
         action_transition = create_transition(action=action, info=info)
         processed_action_transition = action_processor(action_transition)
 
-        # (4) Terminate on intervention end to correctly store episode bounds
-        if interactive:
-            is_intervention = processed_action_transition[TransitionKey.INFO].get(TeleopEvents.IS_INTERVENTION, False)
-            intervention_occurred = intervention_occurred | is_intervention
-
-            if intervention_occurred and not is_intervention:
-                info[TeleopEvents.INTERVENTION_COMPLETED] = True
-                episode_time = time.perf_counter() - episode_start_time
-                logging.info(
-                    f"Intervention ended after {episode_step} steps in {episode_time:.1f}s with reward {transition[TransitionKey.REWARD]}"
-                )
-                return info
+        if processed_action_transition.get(TransitionKey.DONE, False):
+            info.update(processed_action_transition[TransitionKey.INFO].copy())
+            episode_time = time.perf_counter() - episode_start_time
+            logging.info(
+                f"Intervention ended after {episode_step} steps in {episode_time:.1f}s with reward {transition[TransitionKey.REWARD]}"
+            )
+            return info
 
         # (5) Step env
         obs, reward, terminated, truncated, info = env.step(processed_action_transition[TransitionKey.ACTION])
@@ -442,6 +437,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             if dataset.episode_buffer["size"] > 0:
                 dataset.save_episode()
                 recorded_episodes += 1
+                continue
 
             if info.get(TeleopEvents.STOP_RECORDING, False):
                 break

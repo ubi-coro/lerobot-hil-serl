@@ -159,6 +159,7 @@ class MigrateInterventionActionProcessorStep(ProcessorStep):
 
     def __post_init__(self):
         self._disable_torque_on_intervention = {name: hasattr(teleop, "disable_torque") for name, teleop in self.teleoperators.items()}
+        self._intervention_occurred = False
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         """
@@ -187,6 +188,12 @@ class MigrateInterventionActionProcessorStep(ProcessorStep):
         rerecord_episode = info.get(TeleopEvents.RERECORD_EPISODE, False)
 
         new_transition = transition.copy()
+
+        # Terminate on intervention end to correctly store episode bounds
+        self._intervention_occurred = self._intervention_occurred  | is_intervention
+        if self._intervention_occurred and not is_intervention:
+            info[TeleopEvents.INTERVENTION_COMPLETED] = True
+            terminate_episode = True
 
         # Override action if intervention is active
         if is_intervention and teleop_action_dict is not None:
@@ -218,7 +225,8 @@ class MigrateInterventionActionProcessorStep(ProcessorStep):
             # action tensor (tha we save to task) must look like the original action
             teleop_action_tensor_processed = apply_calibration(teleop_action_tensor, num_robots=len(self.teleoperators))
             complementary_data[TELEOP_ACTION_KEY] = teleop_action_tensor_processed
-        else:
+
+        elif not self._intervention_occurred:  # dont write feedback on intervention end
             processed_action = invert_calibration(action, num_robots=len(self.teleoperators))
             processed_action_cpu = processed_action.detach().to("cpu", non_blocking=False)
 
@@ -233,6 +241,13 @@ class MigrateInterventionActionProcessorStep(ProcessorStep):
                 idx += ln
 
             new_transition[TransitionKey.ACTION] = processed_action
+
+        else:
+            # torque leader on intervention end
+            for name, teleop_action in self.teleoperators.items():
+                # torque leaders off on interventions
+                if self._disable_torque_on_intervention[name]:
+                    self.teleoperators[name].enable_torque()
 
         # Handle episode termination
         new_transition[TransitionKey.DONE] = bool(terminate_episode) or (
@@ -271,3 +286,5 @@ class MigrateInterventionActionProcessorStep(ProcessorStep):
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         return features
 
+    def reset(self) -> None:
+        self._intervention_occurred = False
