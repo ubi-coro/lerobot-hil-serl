@@ -142,6 +142,20 @@ pusht = ["gym-pusht>=0.1.5", "pymunk>=6.6.0,<7.0.0"] # TODO: Fix pymunk version 
 xarm = ["gym-xarm>=0.1.1"]
 libero = ["lerobot[transformers-dep]", "libero @ git+https://github.com/huggingface/lerobot-libero.git@main#egg=libero"]
 
+# Web GUI
+web = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "python-socketio>=5.11.0",
+    "click>=8.1.0",
+    "requests>=2.31.0",
+    "python-multipart>=0.0.6",
+    "opencv-python>=4.9.0",  # For web GUI camera support
+]
+
+# Misc
+umi = ["imagecodecs>=2024.1.1"]
+
 
 # All
 all = [
@@ -168,6 +182,15 @@ all = [
 ]
 
 [project.scripts]
+# LeRobot Web GUI CLI Commands
+lerobot-gui = "web.scripts.cli:gui_main"
+lerobot-gui-dev = "web.scripts.cli:dev_main"
+lerobot-gui-backend = "web.scripts.cli:backend_main"
+lerobot-gui-frontend = "web.scripts.cli:frontend_main"
+lerobot-gui-shortcut = "web.scripts.cli:create_shortcut_main"
+lerobot-gui-status = "web.scripts.cli:status_main"
+
+# LeRobot CLI Commands
 lerobot-calibrate="lerobot.scripts.lerobot_calibrate:main"
 lerobot-find-cameras="lerobot.scripts.lerobot_find_cameras:main"
 lerobot-find-port="lerobot.scripts.lerobot_find_port:main"
@@ -182,9 +205,14 @@ lerobot-info="lerobot.scripts.lerobot_info:main"
 lerobot-find-joint-limits="lerobot.scripts.lerobot_find_joint_limits:main"
 lerobot-imgtransform-viz="lerobot.scripts.lerobot_imgtransform_viz:main"
 
+# Share-RL CLI Commands (experiment-based with calibration migration)
+lerobot-record-exp="lerobot.share.record:main"
+lerobot-teleoperate-exp="lerobot.share.teleoperate:main"
+
 # ---------------- Tool Configurations ----------------
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["lerobot*", "web*"]
 
 [tool.ruff]
 target-version = "py310"

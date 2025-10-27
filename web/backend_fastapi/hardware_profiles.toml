@@ -1,0 +1,96 @@
+# hardware_profiles.toml
+[profiles.viperx_right.robot]
+type = "viperx"
+id = "follower_right"
+port = "/dev/ttyDXL_follower_right"
+calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/robots/viperx"
+
+[profiles.viperx_right.teleop]
+type = "widowx"
+id = "leader_right"
+port = "/dev/ttyDXL_leader_right"
+calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/teleoperators/widowx"
+
+[profiles.viperx_right.robot.cameras.right]
+serial_number_or_name = "130322274116"
+width = 640
+height = 480
+fps = 30
+
+[profiles.viperx_right.robot.cameras.top]
+serial_number_or_name = "218722270994"
+width = 640
+height = 480
+fps = 30
+
+[profiles.viperx_right.robot.cameras.front]
+serial_number_or_name = "130322272007"
+width = 640
+height = 480
+fps = 30
+
+[profiles.viperx_left.robot]
+type = "viperx"
+id = "follower_left"
+port = "/dev/ttyDXL_follower_left"
+calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/robots/viperx"
+
+[profiles.viperx_left.teleop]
+type = "widowx"
+id = "leader_left"
+port = "/dev/ttyDXL_leader_left"
+calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/teleoperators/widowx"
+
+[profiles.viperx_left.robot.cameras.left]
+serial_number_or_name = "218622276088"
+width = 640
+height = 480
+fps = 30
+
+[profiles.viperx_left.robot.cameras.top]
+serial_number_or_name = "218722270994"
+width = 640
+height = 480
+fps = 30
+
+[profiles.viperx_left.robot.cameras.front]
+serial_number_or_name = "130322272007"
+width = 640
+height = 480
+fps = 30
+
+[profiles.bi_viperx.robot]
+type = "bi_viperx"
+id = "bi_viperx"
+left_arm = { port = "/dev/ttyDXL_follower_left", id = "bi_viperx_left", calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/robots/bi_viperx" }
+right_arm = { port = "/dev/ttyDXL_follower_right", id = "bi_viperx_right", calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/robots/bi_viperx" }
+
+[profiles.bi_viperx.robot.cameras.left]
+serial_number_or_name = "218622276088"
+width = 640
+height = 480
+fps = 30
+
+[profiles.bi_viperx.robot.cameras.right]
+serial_number_or_name = "130322274116"
+width = 640
+height = 480
+fps = 30
+
+[profiles.bi_viperx.robot.cameras.top]
+serial_number_or_name = "218722270994"
+width = 640
+height = 480
+fps = 30
+
+[profiles.bi_viperx.robot.cameras.front]
+serial_number_or_name = "130322272007"
+width = 640
+height = 480
+fps = 30
+
+[profiles.bi_viperx.teleop]
+type = "bi_widowx"
+id = "bi_widowx"
+left_arm = { port = "/dev/ttyDXL_leader_left", id = "bi_widowx_left", calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/teleoperators/bi_widowx" }
+right_arm = { port = "/dev/ttyDXL_leader_right", id = "bi_widowx_right", calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/teleoperators/bi_widowx" }

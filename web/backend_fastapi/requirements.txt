@@ -1,0 +1,37 @@
+# FastAPI Backend Requirements
+# ===========================
+
+# Core FastAPI dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# WebSocket support
+websockets==12.0
+
+# Socket.IO support for compatibility with frontend
+python-socketio==5.10.0
+
+# Data validation and serialization
+pydantic==2.5.0
+
+# CORS middleware
+python-multipart==0.0.6
+
+# Optional: Database support (if needed later)
+# sqlalchemy==2.0.23
+# alembic==1.13.1
+
+# Development dependencies
+# pytest==7.4.3
+# pytest-asyncio==0.21.1
+# httpx==0.25.2  # For testing FastAPI endpoints
+
+# Existing dependencies (should already be installed)
+# flask
+# flask-cors
+# flask-socketio
+# requests
+# numpy
+# opencv-python
+# Pillow
