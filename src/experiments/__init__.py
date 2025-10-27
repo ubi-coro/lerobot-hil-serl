@@ -1,3 +1,4 @@
 from .aloha_bimanual_test.config import AlohaBimanualDatasetConfig, AlohaBimanualEnvConfig
 from .aloha_bimanual_v2.config import AlohaBimanualDatasetConfigV2, AlohaBimanualEnvConfigV2
 from .aloha_single_test.config import AlohaSingleDatasetConfig, AlohaSingleEnvConfig
+from .aloha_bimanual_lemgo_v2.config import AlohaBimanualDatasetConfigLemgoV2, AlohaBimanualEnvConfigLemgoV2

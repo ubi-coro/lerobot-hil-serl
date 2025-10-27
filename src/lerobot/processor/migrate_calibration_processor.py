@@ -7,7 +7,6 @@ from typing import Any
 import numpy as np
 import torch
 from torch import Tensor
-from zipp.compat.py313 import apply
 
 from lerobot.configs.types import PolicyFeature, PipelineFeatureType
 from lerobot.processor import ProcessorStepRegistry, ObservationProcessorStep, EnvTransition, TransitionKey, \
