@@ -70,7 +70,7 @@ dependencies = [
     "opencv-python-headless>=4.9.0",
     "av>=14.2.0",
     "jsonlines>=4.0.0",
-    "modern-robotics==1.1.1"
+    "modern-robotics==1.1.1",
     "packaging>=24.2",
     "pynput>=1.7.7",
     "pyserial>=3.5",

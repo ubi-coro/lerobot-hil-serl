@@ -1,4 +1,3 @@
-import logging
 import math
 import time
 from dataclasses import dataclass
@@ -7,7 +6,6 @@ from typing import Any
 import numpy as np
 import torch
 from torch import Tensor
-from zipp.compat.py313 import apply
 
 from lerobot.configs.types import PolicyFeature, PipelineFeatureType
 from lerobot.processor import ProcessorStepRegistry, ObservationProcessorStep, EnvTransition, TransitionKey, \
@@ -201,6 +199,7 @@ class MigrateInterventionActionProcessorStep(ProcessorStep):
             # loop over teleoperators and concat their actions
             action_list = []
             for name, teleop_action in teleop_action_dict.items():
+
                 # torque leaders off on interventions
                 if self._disable_torque_on_intervention[name]:
                     self.teleoperators[name].disable_torque()
