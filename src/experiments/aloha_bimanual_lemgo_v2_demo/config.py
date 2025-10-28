@@ -65,7 +65,7 @@ class AlohaBimanualEnvConfigLemgoV2Demo(HilSerlRobotEnvConfig):
         self.processor.reset.reset_time_s = 10.0
         self.processor.events.foot_switch_mapping = {
             (TeleopEvents.SUCCESS,): {"device": 3, "toggle": False},
-            (TeleopEvents.IS_INTERVENTION,): {"device": 6, "toggle": True},
+            (TeleopEvents.IS_INTERVENTION,): {"device": 5, "toggle": True},
         }
         self.processor.events.key_mapping = {
             TeleopEvents.RERECORD_EPISODE: keyboard.Key.left
@@ -113,4 +113,4 @@ class AlohaBimanualEnvConfigLemgoV2Demo(HilSerlRobotEnvConfig):
 class AlohaBimanualDatasetConfigLemgoV2Demo(DatasetRecordConfig):
     repo_id: str = "local/20251024_hoodie_folding_lemgo_demo"
     single_task: str = "Hoodie Folding Lemgo Demo"
-    root: str = "/media/jannick/DATA/aloha_data_lerobot/jannick-st/eval_20251024_hoodie_folding_lemgo_demo"bb
+    root: str = "/media/jannick/DATA/aloha_data_lerobot/jannick-st/eval_20251024_hoodie_folding_lemgo_demo"

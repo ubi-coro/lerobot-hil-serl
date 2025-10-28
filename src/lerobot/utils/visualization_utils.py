@@ -58,7 +58,7 @@ def log_rerun_data(
         observation: An optional dictionary containing observation data to log.
         action: An optional dictionary containing action data to log.
     """
-    if observation:
+    if observation is not None:
         for k, v in observation.items():
             if v is None:
                 continue
@@ -77,20 +77,31 @@ def log_rerun_data(
                 else:
                     rr.log(key, rr.Image(arr), static=True)
 
-    if action:
-        for k, v in action.items():
-            if v is None:
-                continue
-            key = k if str(k).startswith("action.") else f"action.{k}"
+    if action is not None:
+        if isinstance(action, dict):
+            for k, v in action.items():
+                if v is None:
+                    continue
+                key = k if str(k).startswith("action.") else f"action.{k}"
 
-            if _is_scalar(v):
-                rr.log(key, rr.Scalar(float(v)))
-            elif isinstance(v, np.ndarray):
-                if v.ndim == 1:
-                    for i, vi in enumerate(v):
-                        rr.log(f"{key}_{i}", rr.Scalar(float(vi)))
-                else:
-                    # Fall back to flattening higher-dimensional arrays
-                    flat = v.flatten()
-                    for i, vi in enumerate(flat):
-                        rr.log(f"{key}_{i}", rr.Scalar(float(vi)))
+                if _is_scalar(v):
+                    rr.log(key, rr.Scalar(float(v)))
+                elif isinstance(v, np.ndarray):
+                    if v.ndim == 1:
+                        for i, vi in enumerate(v):
+                            rr.log(f"{key}_{i}", rr.Scalar(float(vi)))
+                    else:
+                        # Fall back to flattening higher-dimensional arrays
+                        flat = v.flatten()
+                        for i, vi in enumerate(flat):
+                            rr.log(f"{key}_{i}", rr.Scalar(float(vi)))
+        elif isinstance(action, np.ndarray):
+            # Handle flat numpy array action
+            if action.ndim == 1:
+                for i, val in enumerate(action):
+                    rr.log(f"action/dim_{i}", rr.Scalar(float(val)))
+            else:
+                # Fallback for higher-dimensional arrays
+                flat_action = action.flatten()
+                for i, val in enumerate(flat_action):
+                    rr.log(f"action/dim_{i}", rr.Scalar(float(val)))
