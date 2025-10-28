@@ -20,15 +20,11 @@ from typing import Optional, Dict, Any
 import logging
 import time
 import threading
-import json
 import os
-from pathlib import Path
 from enum import Enum
+from types import SimpleNamespace
 
-# ALOHA-specific imports from LeRobot
-from lerobot.processor import make_default_processors
-from lerobot.utils.robot_utils import busy_wait
-from lerobot.utils.utils import init_logging
+import torch
 # Optional visualization dependency (rerun). Provide no-op fallbacks if unavailable.
 try:  # pragma: no cover - optional dependency guard
     import rerun as rr  # type: ignore
@@ -48,8 +44,17 @@ except Exception:
         return None
 import shared
 from . import camera_streaming
-from . import robot as robot_module
-from . import camera_streaming
+from .experiment_config_mapper import ExperimentConfigMapper
+
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.policies.factory import make_policy, make_pre_post_processors
+from lerobot.processor.converters import create_transition
+from lerobot.processor.core import TransitionKey
+from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
+from lerobot.teleoperators import TeleopEvents
+from lerobot.utils.control_utils import predict_action
+from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.utils import get_safe_torch_device
 
 # LeRobot imports are deferred to runtime inside functions to tolerate environments
 # where optional dependencies (e.g., draccus) are not installed. This keeps the
@@ -66,28 +71,6 @@ def get_calibration_dir():
     calibration_dir = os.path.join(project_root, ".cache", "calibration", "aloha_lemgo_tabea")
     return calibration_dir
 
-def load_hardware_config():
-    """Load hardware configuration from ~/.config/lerobot/hardware_config.json"""
-    config_path = Path.home() / ".config" / "lerobot" / "hardware_config.json"
-    if not config_path.exists():
-        raise FileNotFoundError(f"Hardware config not found at {config_path}. Please create it with your workstation's hardware settings.")
-    with open(config_path, 'r') as f:
-        return json.load(f)
-
-def _ensure_calibration_applied(device, device_name: str):
-    """Check if device (robot or teleoperator) has calibration applied.
-    
-    Args:
-        device: Robot or teleoperator instance
-        device_name: Human-readable name for logging
-    """
-    if hasattr(device, 'is_calibrated'):
-        if not device.is_calibrated:
-            logger.warning(f"{device_name} is not calibrated. Teleoperation may not work correctly.")
-        else:
-            logger.info(f"{device_name} calibration verified.")
-    else:
-        logger.debug(f"{device_name} does not have calibration checking.")
 
 # Create router
 router = APIRouter(prefix="/api/aloha-teleoperation", tags=["aloha-teleoperation"])
@@ -96,6 +79,22 @@ class OperationMode(str, Enum):
     BIMANUAL = "bimanual"
     LEFT_ONLY = "left_only"
     RIGHT_ONLY = "right_only"
+
+    @classmethod
+    def from_legacy(cls, value: str) -> "OperationMode":
+        mapping = {
+            "bimanual": cls.BIMANUAL,
+            "left": cls.LEFT_ONLY,
+            "left_arm": cls.LEFT_ONLY,
+            "left_only": cls.LEFT_ONLY,
+            "right": cls.RIGHT_ONLY,
+            "right_arm": cls.RIGHT_ONLY,
+            "right_only": cls.RIGHT_ONLY,
+        }
+        try:
+            return mapping[value]
+        except KeyError:
+            raise ValueError(f"Unsupported operation_mode '{value}'")
 
 # Pydantic models
 class ApiResponse(BaseModel):
@@ -117,6 +116,8 @@ class AlohaConfig(BaseModel):
     safety_limits: bool = Field(default=True, description="Enable safety limits")
     performance_monitoring: bool = Field(default=True, description="Enable performance monitoring")
     calibration_dir: str = Field(default_factory=get_calibration_dir, description="Calibration directory")
+    demo_mode: bool = Field(default=False, description="Run in policy demo/evaluation mode")
+    policy_path: Optional[str] = Field(default=None, description="Optional path to pretrained policy for evaluation")
 
 class AlohaStartRequest(BaseModel):
     """Start ALOHA teleoperation request (single configuration path)."""
@@ -127,6 +128,7 @@ class AlohaStartRequest(BaseModel):
 aloha_state = {
     "active": False,
     "robot": None,          # Robot instance in use for teleoperation
+    "teleop": None,
     "owned_robot": False,    # Whether this module created (and must disconnect) the robot
     "config": None,
     "start_time": None,
@@ -152,70 +154,6 @@ def _is_dataset_recording_active() -> bool:
         return bool(getattr(worker, "active", False))
     except Exception:
         return False
-
-
-def create_aloha_configs(config: AlohaConfig):
-    """
-    Create robot and teleoperator configs for ALOHA using the new unified configuration system.
-    """
-    try:
-        logger.info(f"Creating ALOHA configs for operation mode: {config.operation_mode}")
-
-        # Import new configuration system
-        import sys
-        import os
-        # Add the backend directory to the path so we can import config modules
-        backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if backend_dir not in sys.path:
-            sys.path.insert(0, backend_dir)
-        
-        from config_resolver import resolve
-        from lerobot_adapter import to_lerobot_configs
-        from config_models import TeleopRequest
-
-        # Map AlohaConfig to TeleopRequest
-        # Convert operation_mode from enum to string and map to TeleopRequest format
-        op_mode_str = str(config.operation_mode.value) if hasattr(config.operation_mode, 'value') else str(config.operation_mode)
-        if op_mode_str == "left_only":
-            teleop_op_mode = "left"
-        elif op_mode_str == "right_only":
-            teleop_op_mode = "right"
-        else:  # "bimanual"
-            teleop_op_mode = "bimanual"
-            
-        req = TeleopRequest(
-            operation_mode=teleop_op_mode,
-            display_data=config.display_data,
-            fps=config.fps,
-            robot_type="bi_viperx" if teleop_op_mode == "bimanual" else "viperx",
-            teleop_type="bi_widowx" if teleop_op_mode == "bimanual" else "widowx",
-            cameras_enabled=config.show_cameras,
-            profile_name="bi_viperx" if teleop_op_mode == "bimanual" else ("viperx_left" if teleop_op_mode == "left" else "viperx_right")
-        )
-
-        # Resolve configuration through layers
-        robot, teleop, runtime = resolve(req)
-        
-        # Apply AlohaConfig parameters to robot and teleop configs
-        # This ensures GUI settings override profile defaults
-        robot.max_relative_target = config.max_relative_target
-        robot.moving_time = config.moving_time
-        teleop.max_relative_target = config.max_relative_target
-        teleop.moving_time = config.moving_time
-        # Note: use_aloha2_gripper_servo is typically set in hardware profiles
-        # but can be overridden here if needed in the future
-
-        # Convert to LeRobot configs
-        robot_config, teleop_config = to_lerobot_configs(robot, teleop)
-
-        logger.info(f"Resolved configuration: robot={robot.type} ({robot.id}), teleop={teleop.type} ({teleop.id})")
-        logger.info(f"Motion parameters: max_relative_target={config.max_relative_target}°, moving_time={config.moving_time}s")
-
-        return robot_config, teleop_config
-
-    except Exception as e:
-        logger.error(f"Error creating ALOHA configs: {e}")
-        raise
 
 
 def get_teleoperation_status_snapshot() -> Dict[str, Any]:
@@ -251,183 +189,252 @@ async def emit_teleoperation_status(room: str | None = None):
     except Exception:
         logger.debug("teleoperation_status emit failed", exc_info=True)
 
-def aloha_teleoperation_worker(config: AlohaConfig, reuse_existing: bool):
-    """
-    Worker thread for ALOHA teleoperation.
-    This function now uses new LeRobot factories for robot and teleoperator.
-    """
-    # Initialize variables at function scope to avoid UnboundLocalError in finally block
-    robot = None
-    teleop = None
-    
+def aloha_teleoperation_worker(config: AlohaConfig):
+    """Worker thread for ALOHA teleoperation using experiment-based configs."""
+
+    env = None
+    env_processor = None
+    action_processor = None
+    teleop_dict: dict[str, Any] = {}
+
     try:
-        # Lazy imports here too
-        from lerobot.robots.utils import make_robot_from_config
-        from lerobot.teleoperators.utils import make_teleoperator_from_config
-        if reuse_existing and aloha_state["robot"] is not None:
-            robot = aloha_state["robot"]
-            logger.info("Reusing already connected robot instance for teleoperation (no reconnection)")
-            # Still create the teleoperator and connect it
-            _, teleop_config = create_aloha_configs(config)
-            teleop = make_teleoperator_from_config(teleop_config)
-            # Connect with calibration if file exists (no interactive prompt needed)
-            # This writes calibration to motors, which is critical for correct operation
-            teleop.connect(calibrate=True)
-            _ensure_calibration_applied(robot, "robot (reused)")
-            _ensure_calibration_applied(teleop, "teleoperator")
-            aloha_state["teleop"] = teleop
-            aloha_state["owned_robot"] = False
-            logger.info("Teleoperator created and connected; robot reused from RobotService")
-        else:
-            # Create robot and teleoperator using new factories
-            robot_config, teleop_config = create_aloha_configs(config)
-            robot = make_robot_from_config(robot_config)
-            teleop = make_teleoperator_from_config(teleop_config)
-            
-            # Connect with calibration if files exist (no interactive prompt needed)
-            # This writes calibration to motors, which is critical for correct operation
-            # The calibration files must exist, otherwise this will prompt for calibration
-            robot.connect(calibrate=True)
-            teleop.connect(calibrate=True)
-            _ensure_calibration_applied(robot, "robot")
-            _ensure_calibration_applied(teleop, "teleoperator")
-            
-            aloha_state["robot"] = robot
-            aloha_state["teleop"] = teleop
-            aloha_state["owned_robot"] = True
-            logger.info("Robot and teleoperator created and connected using new factories")
+        op_mode_mapping = {
+            OperationMode.BIMANUAL: "bimanual",
+            OperationMode.LEFT_ONLY: "left",
+            OperationMode.RIGHT_ONLY: "right",
+        }
 
-        # Prepare processing pipelines similar to CLI teleoperate script
-        try:
-            (
-                teleop_action_processor,
-                robot_action_processor,
-                robot_observation_processor,
-            ) = make_default_processors()
-        except Exception:  # pragma: no cover - fallback when processors unavailable
-            logger.warning("Default processor pipelines unavailable; using identity fallbacks")
+        operation_key = op_mode_mapping[config.operation_mode]
+        demo_enabled = bool(config.demo_mode or config.policy_path)
 
-            def teleop_action_processor(payload):  # type: ignore
-                return payload[0]
+        env, env_processor, action_processor, env_cfg, mapping = ExperimentConfigMapper.create_env_from_gui_selection(
+            operation_mode=operation_key,
+            demo_mode=demo_enabled,
+            policy_path_override=config.policy_path,
+        )
 
-            def robot_action_processor(payload):  # type: ignore
-                return payload[0]
+        action_dim = env_cfg.action_dim
 
-            def robot_observation_processor(observation):  # type: ignore
-                return observation
+        policy = None
+        policy_cfg: PreTrainedConfig | None = None
+        preprocessor = None
+        postprocessor = None
+        policy_device = torch.device("cpu")
+        use_amp = False
 
-        # 2. Prepare for teleoperation loop
-        # Initialize rerun if display_data is enabled
+        if demo_enabled:
+            if not mapping.supports_policy:
+                logger.warning(
+                    "Demo mode requested for %s but no policy is registered; falling back to teleoperation",
+                    mapping.experiment_type,
+                )
+            else:
+                policy_path_resolved = config.policy_path or mapping.default_policy_path
+                if not policy_path_resolved:
+                    raise ValueError(
+                        "Demo mode enabled but no policy path provided. Configure policy_path via GUI or default mapping."
+                    )
+
+                try:
+                    policy_cfg = PreTrainedConfig.from_pretrained(policy_path_resolved)
+                    policy_cfg.pretrained_path = policy_path_resolved
+                    policy_device = get_safe_torch_device(getattr(policy_cfg, "device", "cpu") or "cpu")
+                    policy_cfg.device = str(policy_device)
+                    use_amp = bool(getattr(policy_cfg, "use_amp", False))
+
+                    policy = make_policy(policy_cfg, env_cfg=env_cfg)
+                    preprocessor, postprocessor = make_pre_post_processors(
+                        policy_cfg=policy_cfg,
+                        pretrained_path=policy_cfg.pretrained_path,
+                        preprocessor_overrides={"device_processor": {"device": str(policy_device)}},
+                        postprocessor_overrides={"device_processor": {"device": str(policy_device)}},
+                    )
+                    policy.reset()
+                    logger.info("Loaded demo policy from %s on device %s", policy_path_resolved, policy_device)
+                except Exception:
+                    logger.error("Failed to initialize demo policy from %s", policy_path_resolved, exc_info=True)
+                    policy = None
+                    policy_cfg = None
+                    preprocessor = None
+                    postprocessor = None
+
+        # Extract teleoperator instances from processor pipeline for later cleanup
+        for step in getattr(action_processor, "steps", []):
+            potential = getattr(step, "teleoperators", None)
+            if isinstance(potential, dict) and potential:
+                teleop_dict = potential
+                break
+
+        aloha_state["robot"] = env.robot_dict
+        aloha_state["teleop"] = teleop_dict
+        aloha_state["owned_robot"] = True
+
         if config.display_data and _RERUN_AVAILABLE:
             logger.info("🖥️ display_data=true: Initializing LeRobot's rerun session...")
             _init_rerun(session_name="lerobot_control_loop_teleop")
             logger.info("✅ LeRobot rerun session initialized.")
 
-        # Start camera streams if requested
-        try:
-            if config.show_cameras:
+        camera_proxy = SimpleNamespace(cameras=getattr(env, "cameras", {})) if getattr(env, "cameras", None) else None
+        if config.show_cameras and camera_proxy is not None:
+            try:
                 cam_fps = min(config.fps, 12)
-                camera_streaming.start_streams(robot, fps=cam_fps)
+                camera_streaming.start_streams(camera_proxy, fps=cam_fps)
                 logger.info(f"Started camera streaming (fps={cam_fps})")
-        except Exception as e:
-            logger.warning(f"Failed to start camera streaming: {e}")
+            except Exception as exc:
+                logger.warning(f"Failed to start camera streaming: {exc}")
 
-        # 3. Simple teleoperation loop (similar to teleoperate.py)
+        obs, info = env.reset()
+        env_processor.reset()
+        action_processor.reset()
+        if policy is not None:
+            try:
+                policy.reset()
+            except Exception:
+                logger.debug("Policy reset failed", exc_info=True)
+
+        transition = create_transition(observation=obs, info=info)
+        transition = env_processor(data=transition)
+
+        demo_active = bool(policy)
+
+        if isinstance(aloha_state.get("config"), dict):
+            aloha_state["config"]["demo_mode_active"] = demo_active
+
         aloha_state["stage"] = "running"
-        logger.info(f"Starting teleoperation loop (fps={config.fps}, display_data={config.display_data})")
-        
-        # NOTE: We do NOT use async observation worker to avoid bus conflicts!
-        # The CLI script works synchronously and so should we for reliability.
-        # Multiple threads accessing the Dynamixel bus simultaneously causes
-        # "Port is in use" and "Incorrect status packet" errors.
+        logger.info(
+            "Starting teleoperation loop (fps=%s, display_data=%s, demo_mode=%s)",
+            config.fps,
+            config.display_data,
+            demo_active,
+        )
 
         while not aloha_state["stop_event"].is_set():
             loop_start = time.perf_counter()
-            
-            # Always fetch observation synchronously to avoid bus conflicts
-            try:
-                observation = robot.get_observation()
-            except Exception as exc:
-                logger.debug("Observation fetch failed: %s", exc)
-                time.sleep(0.01)
-                continue
 
-            if observation is None:
-                busy_wait(0.005)
-                continue
+            prev_transition = transition
+            info = {}
 
-            # Get raw action from teleoperator
-            teleop_raw_action = teleop.get_action()
+            if policy is not None and policy_cfg is not None:
+                policy_observation = {
+                    k: v
+                    for k, v in prev_transition[TransitionKey.OBSERVATION].items()
+                    if k in policy.config.input_features
+                }
+                try:
+                    action = predict_action(
+                        observation=policy_observation,
+                        policy=policy,
+                        device=policy_device,
+                        preprocessor=preprocessor,
+                        postprocessor=postprocessor,
+                        use_amp=use_amp,
+                        task=getattr(env_cfg, "task", None),
+                        robot_type=getattr(env_cfg, "type", None),
+                    )
+                except Exception:
+                    logger.error("Policy inference failed; switching to teleoperation fallback", exc_info=True)
+                    policy = None
+                    policy_cfg = None
+                    preprocessor = None
+                    postprocessor = None
+                    action = torch.zeros(action_dim, dtype=torch.float32)
+            else:
+                action = torch.zeros(action_dim, dtype=torch.float32)
+            action_transition = create_transition(action=action, info=info)
+            processed_action_transition = action_processor(action_transition)
 
-            # Run through default processing pipelines to mirror CLI behaviour
-            processed_teleop_action = teleop_action_processor((teleop_raw_action, observation))
-            robot_action_to_send = robot_action_processor((processed_teleop_action, observation))
+            if processed_action_transition.get(TransitionKey.DONE, False):
+                logger.info("Intervention processor requested termination")
+                break
 
-            # Send processed action to robot
-            robot.send_action(robot_action_to_send)
+            next_action = processed_action_transition[TransitionKey.ACTION]
+            obs, reward, terminated, truncated, info = env.step(next_action)
 
-            # Log data to rerun viewer when enabled
+            complementary_data = processed_action_transition.get(TransitionKey.COMPLEMENTARY_DATA, {}).copy()
+            info.update(processed_action_transition.get(TransitionKey.INFO, {}).copy())
+
+            if info.get(TeleopEvents.IS_INTERVENTION, False) and TELEOP_ACTION_KEY in complementary_data:
+                action_to_apply = complementary_data[TELEOP_ACTION_KEY]
+            else:
+                action_to_apply = next_action
+
+            transition = create_transition(
+                observation=obs,
+                action=action_to_apply,
+                reward=reward + processed_action_transition.get(TransitionKey.REWARD, 0.0),
+                done=terminated or processed_action_transition.get(TransitionKey.DONE, False),
+                truncated=truncated or processed_action_transition.get(TransitionKey.TRUNCATED, False),
+                info=info,
+                complementary_data=complementary_data,
+            )
+            transition = env_processor(data=transition)
+
             if config.display_data and _RERUN_AVAILABLE:
                 try:
-                    obs_for_display = robot_observation_processor(observation)
-                except Exception:  # pragma: no cover - visualization fallback
-                    obs_for_display = observation
-                log_rerun_data(obs_for_display, processed_teleop_action)
-            
-            # Control timing
+                    def _to_numpy(payload):
+                        if isinstance(payload, dict):
+                            return {key: _to_numpy(value) for key, value in payload.items()}
+                        if hasattr(payload, "detach"):
+                            return payload.detach().cpu().numpy()
+                        if isinstance(payload, torch.Tensor):
+                            return payload.cpu().numpy()
+                        return payload
+
+                    rerun_obs = _to_numpy(prev_transition[TransitionKey.OBSERVATION])
+                    rerun_action_payload = _to_numpy(action_to_apply)
+                    if isinstance(rerun_action_payload, dict):
+                        log_rerun_data(observation=rerun_obs, action=rerun_action_payload)
+                    else:
+                        log_rerun_data(observation=rerun_obs, action={"action": rerun_action_payload})
+                except Exception:
+                    logger.debug("Failed to log rerun data", exc_info=True)
+
             dt_s = time.perf_counter() - loop_start
-            busy_wait(1 / config.fps - dt_s)
-            
+            busy_wait(max(0.0, (1 / config.fps) - dt_s))
+
             loop_s = time.perf_counter() - loop_start
-            # Update performance metrics
             try:
                 pm = aloha_state.get("performance_metrics", {})
                 prev_avg = float(pm.get("average_fps", 0.0) or 0.0)
                 fps_inst = 1.0 / loop_s if loop_s > 0 else 0.0
-                avg = (0.8 * prev_avg) + (0.2 * fps_inst)
-                pm["average_fps"] = avg
+                pm["average_fps"] = (0.8 * prev_avg) + (0.2 * fps_inst)
                 pm["frames_processed"] = float(pm.get("frames_processed", 0.0) or 0.0) + 1
-                over_ms = max(0.0, (loop_s - (1 / config.fps)) * 1000.0)
-                pm["latency_ms"] = over_ms
+                pm["latency_ms"] = max(0.0, (loop_s - (1 / config.fps)) * 1000.0)
                 pm["last_joint_update"] = time.time()
                 aloha_state["performance_metrics"] = pm
             except Exception:
-                pass
+                logger.debug("Failed to update performance metrics", exc_info=True)
 
-    except Exception as e:
-        logger.error(f"Error in ALOHA teleoperation worker: {e}", exc_info=True)
+    except Exception as exc:
+        logger.error("Error in ALOHA teleoperation worker: %s", exc, exc_info=True)
     finally:
         aloha_state["stage"] = "stopping"
-        # Stop camera streams before potentially disconnecting
+
         try:
             camera_streaming.stop_all_streams()
-        except Exception as e:
-            logger.debug(f"Error stopping camera streams: {e}")
+        except Exception as exc:
+            logger.debug("Error stopping camera streams: %s", exc)
 
-        # Shutdown rerun if it was initialized
         if config.display_data and _RERUN_AVAILABLE:
             try:
                 rr.rerun_shutdown()
-            except Exception as e:
-                logger.debug(f"Error shutting down rerun: {e}")
+            except Exception as exc:
+                logger.debug("Error shutting down rerun: %s", exc)
 
-        if 'robot' in locals() and aloha_state.get("owned_robot") and robot.is_connected:
+        if env is not None:
             try:
-                robot.disconnect()
-                logger.info("Disconnected owned robot instance after teleoperation")
-            except Exception as e:
-                logger.warning(f"Error disconnecting owned robot: {e}")
-        if 'teleop' in locals() and aloha_state.get("owned_robot"):
+                env.close()
+            except Exception as exc:
+                logger.warning("Error closing environment: %s", exc)
+
+        for teleop in teleop_dict.values():
             try:
                 teleop.disconnect()
-                logger.info("Disconnected owned teleoperator instance after teleoperation")
-            except Exception as e:
-                logger.warning(f"Error disconnecting owned teleoperator: {e}")
-            logger.info("Leaving shared robot connected (owned by RobotService)")
-        # Note: observation_thread removed - we now use synchronous observation fetching
-        if aloha_state.get("owned_robot"):
-            aloha_state["robot"] = None
-            aloha_state["teleop"] = None
+            except Exception as exc:
+                logger.debug("Error disconnecting teleoperator %s: %s", getattr(teleop, "id", "unknown"), exc)
+
+        aloha_state["robot"] = None
+        aloha_state["teleop"] = None
         aloha_state["owned_robot"] = False
         aloha_state["active"] = False
         aloha_state["stop_event"].clear()
@@ -481,27 +488,15 @@ async def start_aloha_teleoperation(request: AlohaStartRequest):
                 logger.info(f"Reducing FPS from {config.fps} to 30 for single-arm operation to improve performance")
                 config.fps = 30
         
-        # Determine reuse of existing robot_service robot, otherwise create new
-        reuse_existing = False
-        try:
-            # Import robot module to access global robot instance
-            from . import robot as robot_module
-            shared_robot = getattr(robot_module, "robot", None)
-            if shared_robot and getattr(shared_robot, "is_connected", False):
-                if aloha_state.get("robot") is not shared_robot:
-                    aloha_state["robot"] = shared_robot
-                reuse_existing = True
-                logger.info("Shared robot instance detected; will reuse for teleoperation")
-            else:
-                aloha_state["robot"] = None
-        except Exception:
-            # Fallback to create new robot instance
-            aloha_state["robot"] = None
-            reuse_existing = False
-
         # Start teleoperation state
         aloha_state["active"] = True
-        aloha_state["config"] = config.dict()
+        aloha_state["robot"] = None
+        aloha_state["teleop"] = None
+        aloha_state["owned_robot"] = False
+        config_payload = config.dict()
+        if isinstance(config_payload.get("operation_mode"), OperationMode):
+            config_payload["operation_mode"] = config.operation_mode.value
+        aloha_state["config"] = config_payload
         aloha_state["start_time"] = time.time()
         aloha_state["stop_event"].clear()
         aloha_state["stage"] = "initializing"
@@ -517,7 +512,7 @@ async def start_aloha_teleoperation(request: AlohaStartRequest):
         # Start worker thread (LeLab-style threading)
         aloha_state["control_thread"] = threading.Thread(
             target=aloha_teleoperation_worker,
-            args=(config, reuse_existing),
+            args=(config,),
             daemon=True
         )
         aloha_state["control_thread"].start()
@@ -528,16 +523,16 @@ async def start_aloha_teleoperation(request: AlohaStartRequest):
         except Exception:
             logger.debug("emit teleop status after start failed", exc_info=True)
 
-        logger.info(f"ALOHA teleoperation started with config: {config.dict()}")
+        logger.info(f"ALOHA teleoperation started with config: {config_payload}")
 
         return ApiResponse(
             status="success",
             message="ALOHA teleoperation started successfully",
             data={
                 "active": True,
-                "configuration": config.dict(),
+                "configuration": config_payload,
                 "start_time": aloha_state["start_time"],
-                "operation_mode": config.operation_mode
+                "operation_mode": config.operation_mode.value
             }
         )
         
@@ -589,6 +584,17 @@ async def stop_aloha_teleoperation():
         aloha_state["start_time"] = None
         aloha_state["control_thread"] = None
         aloha_state["active"] = False
+        aloha_state["stage"] = "idle"
+        aloha_state["teleop"] = None
+        aloha_state["robot"] = None
+        aloha_state["owned_robot"] = False
+        aloha_state["performance_metrics"] = {
+            "frames_processed": 0,
+            "average_fps": 0.0,
+            "latency_ms": 0.0,
+            "last_joint_update": 0.0,
+        }
+        aloha_state["stop_event"].clear()
         
         logger.info(f"ALOHA teleoperation stopped. Session duration: {session_duration:.2f}s")
 

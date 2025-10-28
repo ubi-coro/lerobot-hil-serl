@@ -1,13 +1,13 @@
 # hardware_profiles.toml
 [profiles.viperx_right.robot]
 type = "viperx"
-id = "follower_right"
+id = "right_v3"
 port = "/dev/ttyDXL_follower_right"
 calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/robots/viperx"
 
 [profiles.viperx_right.teleop]
 type = "widowx"
-id = "leader_right"
+id = "right_v3"
 port = "/dev/ttyDXL_leader_right"
 calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/teleoperators/widowx"
 
@@ -31,13 +31,13 @@ fps = 30
 
 [profiles.viperx_left.robot]
 type = "viperx"
-id = "follower_left"
+id = "left_v3"
 port = "/dev/ttyDXL_follower_left"
 calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/robots/viperx"
 
 [profiles.viperx_left.teleop]
 type = "widowx"
-id = "leader_left"
+id = "left_v3"
 port = "/dev/ttyDXL_leader_left"
 calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/teleoperators/widowx"
 
