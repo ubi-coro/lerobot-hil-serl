@@ -15,11 +15,15 @@ class UR5eSingleEnvConfig(TFHilSerlRobotEnvConfig):
         self.robot = URConfig(
             model="ur5e",
             robot_ip="192.168.1.10",
-            use_gripper=True
+            use_gripper=True,
+            soft_real_time=True,
+            verbose=True,
+            control_frequency=30.0,
+            wrench_limits=[100.0, 100.0, 100.0, 30.0, 30.0, 30.0]
         )
         self.teleop = SpacemouseConfig()
 
-        self.processor.task_frame.action_scale = 0.1
+        self.processor.task_frame.action_scale = [3.0, 3.0, 3.0, 1.5, 1.5, 1.5, 1.0]
 
         self.processor.hooks.time_action_processor = False
         self.processor.hooks.time_env_processor = False

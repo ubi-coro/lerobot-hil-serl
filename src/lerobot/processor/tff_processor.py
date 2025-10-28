@@ -1,18 +1,15 @@
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
-import einops
 import numpy as np
 import torch
-from torch import Tensor
 
 from lerobot.configs.types import PipelineFeatureType, PolicyFeature
-from lerobot.utils.constants import OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE, OBS_STR, DEFAULT_ROBOT_NAME
+from lerobot.utils.constants import OBS_IMAGE, OBS_IMAGES, OBS_STATE
 from . import EnvTransition, TransitionKey, PolicyAction, VanillaObservationProcessorStep
 from .hil_processor import TELEOP_ACTION_KEY, GRIPPER_KEY
 
-from .pipeline import ObservationProcessorStep, ProcessorStepRegistry, ProcessorStep, RobotActionProcessorStep
-from ..robots.ur.tff_controller import TaskFrameCommand
+from .pipeline import ProcessorStepRegistry, ProcessorStep
 from ..teleoperators import TeleopEvents
 
 
@@ -141,7 +138,7 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
                         if self.control_mask.get(name, [True]*6)[i]:
                             action_list.append(teleop_action.get(f"{ax}.vel", 0.0))
                     if self.use_gripper.get(name, False):
-                        action_list.append(teleop_action.get(f"{ax}.pos", 1.0))
+                        action_list.append(teleop_action.get(f"{GRIPPER_KEY}.pos", 1.0))
                 elif isinstance(teleop_action, np.ndarray):
                     action_list.extend(teleop_action.tolist())
                 else:
@@ -202,7 +199,6 @@ class ActionScalingProcessorStep(ProcessorStep):
         new_transition = transition.copy()
 
         action = new_transition[TransitionKey.ACTION]
-        print(action)
         action *= self.action_scale
         new_transition[TransitionKey.ACTION] = action
 

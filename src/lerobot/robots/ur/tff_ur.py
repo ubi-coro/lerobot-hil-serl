@@ -66,7 +66,10 @@ class TF_UR(Robot):
             self.gripper = RTDERobotiqController(
                 hostname=config.robot_ip,
                 shm_manager=self.shm,
-                frequency=config.gripper_frequency
+                frequency=config.gripper_frequency,
+                soft_real_time=config.soft_real_time,
+                rt_core=config.gripper_rt_core,
+                verbose=config.verbose
             )
         else:
             self.gripper = None
@@ -76,6 +79,7 @@ class TF_UR(Robot):
         # runtime vars
         self.logs = {}
         self.last_robot_action = TaskFrameCommand()
+        self.iter_idx = 0
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -195,7 +199,7 @@ class TF_UR(Robot):
             obs_dict[f"{joint_name}.q_pos"] = controller_data['ActualQ'][i]
 
         if self.gripper is not None:
-            obs_dict["gripper"] = self.gripper.get_state()["width"]
+            obs_dict["gripper.pos"] = float(self.gripper.get_state()["width"])
 
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
@@ -220,6 +224,13 @@ class TF_UR(Robot):
         Returns:
             the action sent to the motors, potentially clipped.
         """
+        if self.iter_idx == 0:
+            self.t_start = time.monotonic()
+
+        #t_cycle_end = self.t_start + (self.iter_idx + 1) * 1 / self.config.control_frequency
+        #t_command_target = t_cycle_end + 1 / self.config.control_frequency
+
+
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
@@ -234,11 +245,11 @@ class TF_UR(Robot):
                 self.task_frame.target[i] = action[f"{ax}.wrench"]
                 self.task_frame.mode[i] = AxisMode.FORCE
 
-        if self.gripper is not None and GRIPPER_KEY in action:
-            gripper_action = action[GRIPPER_KEY]
-            self.gripper.move(gripper_action, vel=self.config.gripper_vel, force=self.config.gripper_force)
+        if self.gripper is not None and f"{GRIPPER_KEY}.pos" in action:
+            gripper_action = action[f"{GRIPPER_KEY}.pos"]
+            self.gripper.move_smooth(gripper_action, force=self.config.gripper_force)
+            #self.gripper.move(gripper_action, vel=self.config.gripper_vel, force=self.config.gripper_force)
 
-        print(self.task_frame.target)
         self.controller.send_cmd(self.task_frame)
 
         return action

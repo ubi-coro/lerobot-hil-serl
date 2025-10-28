@@ -26,4 +26,9 @@ class SpacemouseConfig(TeleoperatorConfig):
     """KeyboardTeleopConfig"""
     device: Optional[str] = None
 
+    initial_gripper_pos: float = 0.0
+    gripper_close_button_idx: bool = 1
+    gripper_open_button_idx: bool = 0
+    gripper_continuous: bool = True
+
 

@@ -343,7 +343,6 @@ class RTDETFFController(mp.Process):
                     n_cmd = 0
 
                 for i in range(n_cmd):
-                    print("New message", wrench_W)
                     single = {k: msgs[k][i] for k in msgs}
                     cmd_id = int(single['cmd'])
                     if cmd_id == Command.STOP.value:
@@ -376,7 +375,6 @@ class RTDETFFController(mp.Process):
                         new_target = single.get('target', None)
                         if new_target is not None:
                             self.target = new_target.copy()
-                            print("New target", self.target)
 
                         # kp, kd gains
                         new_kp = single.get('kp', None)
@@ -502,6 +500,7 @@ class RTDETFFController(mp.Process):
                 self.apply_wrench_bounds(pose_F, desired_wrench=wrench_W, measured_wrench=measured_wrench_F)
 
                 # 5.8) command the task space wrench via forceMode(...)
+                wrench_W[:] = 0.0
                 if not self.force_on:
                     # If for some reason we dropped out of forceMode, re‐enter it
                     rtde_c.forceMode(
@@ -525,8 +524,8 @@ class RTDETFFController(mp.Process):
                 # 5.9) Jitter print every log_interval
                 if self.config.verbose and t_now >= next_log_time and len(hist) >= 10:
                     arr = np.array(hist)
-                    print(f"[RTDETFFController] Loop Jitter: μ={arr.mean() * 1000:.2f} ms  σ={arr.std() * 1000:.2f} ms  "
-                          f"min={arr.min() * 1000:.2f} ms  max={arr.max() * 1000:.2f} ms")
+                    #print(f"[RTDETFFController] Loop Jitter: μ={arr.mean() * 1000:.2f} ms  σ={arr.std() * 1000:.2f} ms  "
+                    #      f"min={arr.min() * 1000:.2f} ms  max={arr.max() * 1000:.2f} ms")
                     next_log_time = t_now + log_interval
 
                 # 5.10) After first iteration signal ready

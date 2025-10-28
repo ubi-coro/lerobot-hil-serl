@@ -14,18 +14,18 @@ logger = logging.getLogger(__name__)
 class SpaceMouse(Teleoperator, HasTeleopEvents):
     def __init__(self, config: 'SpaceMouseConfig'):
         self.id = config.id
+        self.config = config
 
         pyspacemouse.open(device=config.device)
-
+        self.process = None
         self.stop_event = multiprocessing.Event()
 
         # Manager to handle shared state between processes
         self.manager = multiprocessing.Manager()
         self.latest_data = self.manager.dict()
         self.latest_data["action"] = [0.0] * 6
-        self.latest_data["buttons"] = [0, 0, 0, 0]
-
-        self.process = None
+        self.latest_data["gripper_pos"] = [0] * 4
+        self._last_gripper_pos = config.initial_gripper_pos
 
     @property
     def action_features(self) -> dict[str, type]:
@@ -63,8 +63,28 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
 
     def get_action(self) -> dict[str, float]:
         start = time.perf_counter()
+
+        # write velocity action dict
         latest_action = self.latest_data.get("action", [0.0] * 6)
         action = {f"{ax}.vel": latest_action[i] for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"])}
+
+        # handle gripper action
+        latest_buttons = self.latest_data.get("buttons", [0] * 4)
+        close_gripper = latest_buttons[self.config.gripper_close_button_idx]
+        open_gripper = latest_buttons[self.config.gripper_open_button_idx]
+
+        if self.config.gripper_continuous:
+            if open_gripper:
+                self._last_gripper_pos = max([0.0, self._last_gripper_pos - self.config.gripper_gain])
+            elif close_gripper:
+                self._last_gripper_pos = min([1.0, self._last_gripper_pos + self.config.gripper_gain])
+        else:
+            if open_gripper:
+                self._last_gripper_pos = 0.0
+            elif close_gripper:
+                self._last_gripper_pos = 1.0
+        action["gripper.pos"] = self._last_gripper_pos
+
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read action: {dt_ms:.1f}ms")
         return action

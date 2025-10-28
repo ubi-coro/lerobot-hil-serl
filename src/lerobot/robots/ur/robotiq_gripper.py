@@ -1,5 +1,5 @@
 """Module to control Robotiq's grippers - tested with HAND-E"""
-
+import math
 import socket
 import threading
 import time
@@ -290,25 +290,36 @@ class RobotiqGripper:
         final_obj = cur_obj
         return final_pos, RobotiqGripper.ObjectStatus(final_obj)
 
+    def start_servo(self, speed=255, force=128):
+        """One-shot: arm internal servo loop."""
+        self._set_vars(OrderedDict([
+            (self.SPE, speed),
+            (self.FOR, force),
+            (self.GTO, 1)  # leave high afterwards
+        ]))
+
+    def push_position(self, position: int):
+        """Fast, non-blocking update of the target position."""
+        # we only send POS; no GTO, no speed/force
+        cmd = f"SET {self.POS} {position}\n"
+        self.socket.sendall(cmd.encode(self.ENCODING))
+        _ = self.socket.recv(3)  # swallow the tiny 'ack'
+
 
 if __name__ == "__main__":
-    ip = "172.22.22.2"
+    ip = "192.168.1.10"
 
-    def log_info(gripper):
-        print(f"Pos: {str(gripper.get_current_position()): >3}  "
-              f"Open: {gripper.is_open(): <2}  "
-              f"Closed: {gripper.is_closed(): <2}  ")
-
-
-    print("Creating gripper...")
     gripper = RobotiqGripper()
-    print("Connecting to gripper...")
     gripper.connect(ip, 63352)
-    print("Activating gripper...")
-    gripper.activate()
+    gripper.activate()  # once
+    gripper.start_servo()  # once
 
-    print("Testing gripper...")
-    gripper.move_and_wait_for_pos(255, 255, 255)
-    log_info(gripper)
-    gripper.move_and_wait_for_pos(0, 255, 255)
-    log_info(gripper)
+    rate_hz = 3
+    dt = 1.0 / rate_hz
+    t0 = time.time()
+
+    while time.time() - t0 < 6.28:  # one 2 π period
+        phase = time.time() - t0
+        pos = int(128 + 100 * math.sin(phase))
+        gripper.push_position(pos)
+        time.sleep(dt)
