@@ -21,8 +21,7 @@ from typing import Optional, Sequence, Any
 import numpy as np
 
 from lerobot.cameras import CameraConfig
-
-from ..config import RobotConfig
+from lerobot.robots import RobotConfig
 
 
 @RobotConfig.register_subclass("ur")

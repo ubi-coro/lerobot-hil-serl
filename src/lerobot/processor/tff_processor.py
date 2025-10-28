@@ -18,8 +18,6 @@ from ..teleoperators import TeleopEvents
 
 @dataclass
 @ProcessorStepRegistry.register(name="tf_observation_processor")
-
-
 class VanillaTFFProcessorStep(VanillaObservationProcessorStep):
     """
     Multi-robot TFF processor. Produces a LeRobot-conform dict with per-robot observations.
@@ -86,8 +84,8 @@ class VanillaTFFProcessorStep(VanillaObservationProcessorStep):
                 if f"{name}.{ax}.ee_wrench" in observation and self.add_ee_wrench_to_observation.get(name, False):
                     state_parts.append(observation[f"{name}.{ax}.ee_wrench"])
 
-            if f"{name}.{GRIPPER_KEY}" in observation and self.use_gripper.get(name, False):
-                state_parts.append(observation[f"{name}.{GRIPPER_KEY}"])
+            if f"{name}.{GRIPPER_KEY}.pos" in observation and self.use_gripper.get(name, False):
+                state_parts.append(observation[f"{name}.{GRIPPER_KEY}.pos"])
 
         if state_parts:
             processed_obs[f"{OBS_STATE}"] = torch.tensor(state_parts).type(torch.float32)
@@ -106,8 +104,14 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
     terminate_on_success: dict[str, bool] = field(default_factory=dict)
     control_mask: dict[str, list[bool]] = field(default_factory=dict)
 
+    def __post_init__(self):
+        self._intervention_occurred = False
+
     def __call__(self, transition: EnvTransition) -> EnvTransition:
-        new_transition = transition.copy()
+
+        action = transition.get(TransitionKey.ACTION)
+        assert isinstance(action, PolicyAction), f"Action should be a PolicyAction type got {type(action)}"
+        #assert len(action) == sum([len(self.teleoperators[name].action_features) for name in self.teleoperators])
 
         info = transition.get(TransitionKey.INFO, {})
         complementary_data = transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
@@ -119,37 +123,47 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
         success = info.get(TeleopEvents.SUCCESS, False)
         rerecord_episode = info.get(TeleopEvents.RERECORD_EPISODE, False)
 
+        new_transition = transition.copy()
+
+        # Terminate on intervention end to correctly store episode bounds
+        self._intervention_occurred = self._intervention_occurred | is_intervention
+        if self._intervention_occurred and not is_intervention:
+            info[TeleopEvents.INTERVENTION_COMPLETED] = True
+            terminate_episode = True
+
         if is_intervention and teleop_action_dict:
 
+            action_list = []
             for name, teleop_action in teleop_action_dict.items():
-                action_list = []
 
                 if isinstance(teleop_action, dict):
                     for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"]):
                         if self.control_mask.get(name, [True]*6)[i]:
                             action_list.append(teleop_action.get(f"{ax}.vel", 0.0))
                     if self.use_gripper.get(name, False):
-                        action_list.append(teleop_action.get(GRIPPER_KEY, 1.0))
+                        action_list.append(teleop_action.get(f"{ax}.pos", 1.0))
                 elif isinstance(teleop_action, np.ndarray):
                     action_list.extend(teleop_action.tolist())
                 else:
                     action_list.extend(teleop_action)
 
-            new_transition[TransitionKey.ACTION] = torch.tensor(action_list, dtype=torch.float32)
+            teleop_action_tensor = torch.tensor(action_list, dtype=action.dtype, device=action.device)
+            new_transition[TransitionKey.ACTION] = teleop_action_tensor
 
         # Termination / reward
-        new_transition[TransitionKey.DONE] = bool(terminate_episode) or any(
-            self.terminate_on_success.get(name, True) and success for name in teleop_action_dict
+        new_transition[TransitionKey.DONE] = bool(terminate_episode) or (
+                any(self.terminate_on_success.values()) and success
         )
         new_transition[TransitionKey.REWARD] = float(success)
 
         # Update info / complementary data
-        info = new_transition.get(TransitionKey.INFO, {})
         info[TeleopEvents.IS_INTERVENTION] = is_intervention
         info[TeleopEvents.RERECORD_EPISODE] = rerecord_episode
         info[TeleopEvents.SUCCESS] = success
         new_transition[TransitionKey.INFO] = info
 
+        # Update complementary data with teleop action
+        complementary_data = new_transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
         complementary_data[TELEOP_ACTION_KEY] = new_transition.get(TransitionKey.ACTION)
         new_transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
 
@@ -167,8 +181,50 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         return features
 
+    def reset(self) -> None:
+        self._intervention_occurred = False
 
 
+@dataclass
+@ProcessorStepRegistry.register("action_scaling_processor")
+class ActionScalingProcessorStep(ProcessorStep):
+    """
+    Multi-robot intervention processor.
+    """
+
+    action_scale: list[float] | np.ndarray
+
+    def __post_init__(self):
+        if not isinstance(self.action_scale, np.ndarray):
+            self.action_scale = np.array(self.action_scale)
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        new_transition = transition.copy()
+
+        action = new_transition[TransitionKey.ACTION]
+        print(action)
+        action *= self.action_scale
+        new_transition[TransitionKey.ACTION] = action
+
+        complementary_data = new_transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
+        if TELEOP_ACTION_KEY in complementary_data:
+            teleop_action = complementary_data[TELEOP_ACTION_KEY]
+            teleop_action *= self.action_scale
+            complementary_data[TELEOP_ACTION_KEY] = teleop_action
+            new_transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
+
+        return new_transition
+
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            "action_scale": self.action_scale,
+        }
+
+    def transform_features(
+            self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
 
 
 # current

@@ -17,22 +17,18 @@ and send orders to its motors.
 """
 import logging
 import time
-from copy import copy
 from functools import cached_property
 from multiprocessing.managers import SharedMemoryManager
 from typing import Any
 
-import numpy as np
-
-from lerobot.cameras.utils import make_cameras_from_configs
-from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
-
-from ..robot import Robot
-from .config_ur import URConfig
-from .rtde_robotiq_controller import RTDERobotiqController
-from .tff_controller import RTDETFFController, TaskFrameCommand, Command, AxisMode
-from .tff_mock_controller import RTDETFFMockController
-from ...processor.hil_processor import GRIPPER_KEY
+from lerobot.cameras import make_cameras_from_configs
+from lerobot.processor.hil_processor import GRIPPER_KEY
+from lerobot.robots import Robot
+from lerobot.robots.ur import URConfig
+from lerobot.robots.ur.rtde_robotiq_controller import RTDERobotiqController
+from lerobot.robots.ur.tff_controller import TaskFrameCommand, RTDETFFController, AxisMode
+from lerobot.robots.ur.tff_mock_controller import RTDETFFMockController
+from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnectedError
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +122,7 @@ class TF_UR(Robot):
 
         Note: this property should be able to be called regardless of whether the robot is connected or not.
         """
-        ft = self.tf.to_robot_action()
+        ft = self.task_frame.to_robot_action()
 
         if self.gripper is not None:
             ft["gripper.pos"] = float
@@ -242,6 +238,7 @@ class TF_UR(Robot):
             gripper_action = action[GRIPPER_KEY]
             self.gripper.move(gripper_action, vel=self.config.gripper_vel, force=self.config.gripper_force)
 
+        print(self.task_frame.target)
         self.controller.send_cmd(self.task_frame)
 
         return action

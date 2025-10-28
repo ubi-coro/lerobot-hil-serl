@@ -26,7 +26,7 @@ class GripperCommand:
     def to_queue_dict(self):
         d = asdict(self)
         d['cmd'] = int(self.cmd.value)
-        d['value'] = float(self.value)
+        d['pos'] = float(self.pos)
         d['vel'] = float(self.vel)
         d['force'] = float(self.force)
         return d

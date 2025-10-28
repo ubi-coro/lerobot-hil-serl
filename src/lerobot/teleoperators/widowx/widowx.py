@@ -13,21 +13,15 @@
 # limitations under the License.
 
 import logging
-import math
 import time
-from functools import cached_property
 from typing import Any
 
-from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
 from lerobot.motors.dynamixel import (
     DynamixelMotorsBus,
     OperatingMode,
 )
-from lerobot.robots import Robot
 from lerobot.robots.utils import ensure_safe_goal_position
-from lerobot.robots.viperx import ViperXConfig
-from lerobot.robots.viperx.viperx import gripper_to_linear
 from lerobot.teleoperators import Teleoperator, TeleopEvents
 from lerobot.teleoperators.widowx import WidowXConfig
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError

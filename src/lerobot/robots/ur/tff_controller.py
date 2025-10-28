@@ -111,7 +111,7 @@ class TaskFrameCommand:
         return cls(
             cmd=Command.SET,
             T_WF=np.zeros(6),
-            mode=[AxisMode.POS]*6,
+            mode=[AxisMode.PURE_VEL]*6,
             target=np.zeros(6),
             kp=np.full(6, 300.0),
             kd=np.full(6, 20.0),
@@ -343,6 +343,7 @@ class RTDETFFController(mp.Process):
                     n_cmd = 0
 
                 for i in range(n_cmd):
+                    print("New message", wrench_W)
                     single = {k: msgs[k][i] for k in msgs}
                     cmd_id = int(single['cmd'])
                     if cmd_id == Command.STOP.value:
@@ -375,6 +376,7 @@ class RTDETFFController(mp.Process):
                         new_target = single.get('target', None)
                         if new_target is not None:
                             self.target = new_target.copy()
+                            print("New target", self.target)
 
                         # kp, kd gains
                         new_kp = single.get('kp', None)
@@ -467,6 +469,7 @@ class RTDETFFController(mp.Process):
                         wrench_W[i] = self.kp[i] * pos_err_vec[i] + self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
                     elif mode_i == AxisMode.PURE_VEL:
                         vel_err = self.target[i] - v_F[i]
+                        #print("Vel Error", i, vel_err)
                         wrench_W[i] = self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
                     elif mode_i == AxisMode.FORCE:
                         wrench_W[i] = float(self.target[i])  # directly obey commanded force

@@ -1,11 +1,11 @@
 import torch
 
-from experiments.aloha_bimanual_v2.config import AlohaBimanualEnvConfigV2
+# from experiments.aloha_bimanual_v2.config import AlohaBimanualEnvConfigV2
 from lerobot.processor import create_transition, TransitionKey
 from lerobot.rl.gym_manipulator import step_env_and_process_transition
 from lerobot.robots.viperx import ViperXConfig, ViperX
 from lerobot.teleoperators import TeleopEvents
-from lerobot.teleoperators.gello import Gello
+#from lerobot.teleoperators.gello import Gello
 from lerobot.teleoperators.widowx import WidowXConfig, WidowX
 from lerobot.utils.constants import OBS_STATE
 from lerobot.utils.robot_utils import busy_wait
@@ -13,7 +13,7 @@ from lerobot.utils.robot_utils import busy_wait
 motor = "elbow"
 
 #gello = Gello(GellohaConfig(port="/dev/ttyUSB0"))
-#teleop = WidowX(WidowXConfig(port="/dev/ttyDXL_leader_left", id="left"))
+teleop = WidowX(WidowXConfig(port="/dev/ttyDXL_leader_left", id="left"))
 #robot = ViperX(ViperXConfig(port="/dev/ttyDXL_follower_left", id="left"))
 
 cfg = AlohaBimanualEnvConfigV2()

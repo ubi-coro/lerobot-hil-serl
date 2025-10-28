@@ -4,6 +4,8 @@ import gymnasium as gym
 from gymnasium import spaces
 from typing import Any
 
+from torch import Tensor
+
 from lerobot.cameras import make_cameras_from_configs, Camera
 from lerobot.robots.ur.tff_controller import TaskFrameCommand, AxisMode
 from lerobot.teleoperators import TeleopEvents
@@ -30,7 +32,8 @@ class TaskFrameEnv(gym.Env):
         self.robot_dict = robot_dict
         self.cameras = cameras if cameras else {}
         self.task_frame = task_frame if task_frame else {name: TaskFrameCommand.make_default_cmd() for name in robot_dict}
-        self.control_mask = control_mask if control_mask else {name: [1] * 6 for name in robot_dict}
+        control_mask = control_mask if control_mask else {name: [1] * 6 for name in robot_dict}
+        self.control_mask = {name: np.array(msk).astype(bool) for name, msk in control_mask.items()}
         self.use_gripper = use_gripper if use_gripper else {name: False for name in robot_dict}
         self.reset_pose = reset_pose if reset_pose else {name: None for name in robot_dict}
         self.reset_time_s = reset_time_s if reset_time_s else {name: 5.0 for name in robot_dict}
@@ -144,8 +147,11 @@ class TaskFrameEnv(gym.Env):
         self.episode_data = None
         return self._get_observation(), self._get_info()
 
-    def step(self, action: np.ndarray):
+    def step(self, action: np.ndarray | Tensor):
         """Step all robots with a flat action vector split per robot."""
+        if isinstance(action, Tensor):
+            action = action.detach().cpu().numpy()
+
         offset = 0
         for name, robot in self.robot_dict.items():
             n_ctrl = sum(self.control_mask[name])

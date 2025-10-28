@@ -47,7 +47,8 @@ from lerobot.processor.converters import identity_transition
 from lerobot.processor.hil_processor import AddFootswitchEventsAsInfoStep, AddKeyboardEventsAsInfoStep
 from lerobot.processor.robot_kinematic_processor import EEReferenceAndDelta, EEBoundsAndSafety, GripperVelocityToJoint, \
     InverseKinematicsRLStep
-from lerobot.processor.tff_processor import VanillaTFFProcessorStep, SixDofVelocityInterventionActionProcessorStep
+from lerobot.processor.tff_processor import VanillaTFFProcessorStep, SixDofVelocityInterventionActionProcessorStep, \
+    ActionScalingProcessorStep
 from lerobot.robots import RobotConfig, make_robot_from_config
 from lerobot.envs.robot_env import RobotEnv
 from lerobot.robots.ur.tff_controller import TaskFrameCommand
@@ -256,6 +257,7 @@ class ResetConfig:
 class TaskFrameConfig:
     command: TaskFrameCommand | dict[str, TaskFrameCommand] = field(default_factory=TaskFrameCommand.make_default_cmd)
     control_mask: list[int] | dict[str, list[int]] = field(default_factory=lambda: [1] * 6)
+    action_scale: float | list[float] | None = None
 
 
 @dataclass
@@ -354,6 +356,20 @@ class HilSerlRobotEnvConfig(EnvConfig):
 
     name: str = "real_robot"
 
+    def __post_init__(self):
+        # Handle multi robot configuration
+        robot_dict = self.robot if isinstance(self.robot, dict) else {DEFAULT_ROBOT_NAME: self.robot}
+        for name in robot_dict:
+            robot_dict[name].cameras = {}
+
+        # go through each processor and check if we need to turn scalar configs into configs for each robot
+        for attr in ["observation", "gripper", "reset", "inverse_kinematics", "task_frame"]:
+            _attr = getattr(self.processor, attr)
+            for fn in fields(_attr):
+                if is_union_with_dict(fn.type) and not isinstance(getattr(_attr, fn.name), dict):
+                    setattr(_attr, fn.name, {name: getattr(_attr, fn.name) for name in robot_dict})
+            setattr(self.processor, attr, _attr)
+
     @cached_property
     def action_dim(self):
         robot_dict = self.robot if isinstance(self.robot, dict) else {DEFAULT_ROBOT_NAME: self.robot}
@@ -397,7 +413,6 @@ class HilSerlRobotEnvConfig(EnvConfig):
         # Handle multi robot configuration
         robot_dict = self.robot if isinstance(self.robot, dict) else {DEFAULT_ROBOT_NAME: self.robot}
         for name in robot_dict:
-            robot_dict[name].cameras = {}
             robot_dict[name] = make_robot_from_config(robot_dict[name])
             robot_dict[name].connect()
 
@@ -411,14 +426,6 @@ class HilSerlRobotEnvConfig(EnvConfig):
         cameras = make_cameras_from_configs(self.cameras)
         for name in cameras:
             cameras[name].connect()
-
-        # go through each processor and check if we need to turn scalar configs into configs for each robot
-        for attr in ["observation", "gripper", "reset", "inverse_kinematics", "task_frame"]:
-            _attr = getattr(self.processor, attr)
-            for fn in fields(_attr):
-                if is_union_with_dict(fn.type) and not isinstance(getattr(_attr, fn.name), dict):
-                    setattr(_attr, fn.name, {name: getattr(_attr, fn.name) for name in robot_dict})
-            setattr(self.processor, attr, _attr)
 
         return robot_dict, teleop_dict, cameras
 
@@ -450,7 +457,7 @@ class HilSerlRobotEnvConfig(EnvConfig):
         # Get robot and motor information for kinematics
         joint_names = env._joint_names_dict
 
-        env_pipeline_steps = [
+        env_pipeline_steps: list = [
             VanillaObservationProcessorStep(device=device),
             JointVelocityProcessorStep(
                 enable=self.processor.observation.add_joint_velocity_to_observation,
@@ -515,7 +522,7 @@ class HilSerlRobotEnvConfig(EnvConfig):
                 )
             )
 
-        action_pipeline_steps = [AddTeleopEventsAsInfoStep(teleoperators=teleoperators)]
+        action_pipeline_steps: list = [AddTeleopEventsAsInfoStep(teleoperators=teleoperators)]
 
         if self.processor.events.key_mapping:
             action_pipeline_steps.append(AddKeyboardEventsAsInfoStep(mapping=self.processor.events.key_mapping))
@@ -562,7 +569,19 @@ class HilSerlRobotEnvConfig(EnvConfig):
             action_pipeline_steps.extend(inverse_kinematics_steps)
             action_pipeline_steps.append(RobotActionToPolicyActionProcessorStep(motor_names=joint_names))
 
-        # time the env pipeline with hooks
+        hooks = self._hooks(env_pipeline_steps, action_pipeline_steps)
+
+        return DataProcessorPipeline(
+            steps=env_pipeline_steps, to_transition=identity_transition, to_output=identity_transition,
+            before_step_hooks=hooks["env"]["before"], after_step_hooks=hooks["env"]["after"]
+        ), DataProcessorPipeline(
+            steps=action_pipeline_steps, to_transition=identity_transition, to_output=identity_transition,
+            before_step_hooks=hooks["action"]["before"], after_step_hooks=hooks["action"]["after"]
+        )
+
+    def _hooks(self, env_pipeline_steps, action_pipeline_steps):
+
+        # generically time processor pipelines with hooks
         if self.processor.hooks.time_action_processor or self.processor.hooks.time_env_processor:
             from lerobot.utils.control_utils import make_step_timing_hooks
 
@@ -588,18 +607,22 @@ class HilSerlRobotEnvConfig(EnvConfig):
         else:
             action_before_hooks, action_after_hooks = [], []
 
-        return DataProcessorPipeline(
-            steps=env_pipeline_steps, to_transition=identity_transition, to_output=identity_transition,
-            before_step_hooks=env_before_hooks, after_step_hooks=env_after_hooks
-        ), DataProcessorPipeline(
-            steps=action_pipeline_steps, to_transition=identity_transition, to_output=identity_transition,
-            before_step_hooks=action_before_hooks, after_step_hooks=action_after_hooks
-        )
+        return {
+            "env": {
+                "before": env_before_hooks,
+                "after": env_after_hooks
+            },
+            "action": {
+                "before": action_before_hooks,
+                "after": action_after_hooks
+            }
+        }
 
 
 @dataclass
 class TFHilSerlRobotEnvConfig(HilSerlRobotEnvConfig):
     """Configuration for the HILSerlRobotEnv environment."""
+
     @cached_property
     def action_dim(self):
         masks = self.processor.task_frame.control_mask
@@ -607,6 +630,18 @@ class TFHilSerlRobotEnvConfig(HilSerlRobotEnvConfig):
         gripper = self.processor.gripper.use_gripper
         gripper = gripper if isinstance(gripper, dict) else {DEFAULT_ROBOT_NAME: gripper}
         return sum([sum(m) for m in masks.values()]) + sum(gripper.values())
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        if self.processor.task_frame.action_scale is None:
+            self.processor.task_frame.action_scale = 1.0
+
+        if isinstance(self.processor.task_frame.action_scale, float):
+            s = self.processor.task_frame.action_scale
+            self.processor.task_frame.action_scale = [s] * self.action_dim
+
+        assert self.action_dim == len(self.processor.task_frame.action_scale)
 
     def make(self, device: str = "cpu") -> tuple[TaskFrameEnv, Any, Any]:
         robot_dict, teleop_dict, cameras = self._init_devices()
@@ -627,11 +662,13 @@ class TFHilSerlRobotEnvConfig(HilSerlRobotEnvConfig):
     def _processors(self, env: TaskFrameEnv, teleoperators, device) -> tuple[
         DataProcessorPipeline[EnvTransition, EnvTransition], DataProcessorPipeline[EnvTransition, EnvTransition]
     ]:
-        env_pipeline_steps = [
+        env_pipeline_steps: list = [
             VanillaTFFProcessorStep(
+                device=device,
+                ee_pos_mask=env.control_mask,
+                use_gripper=self.processor.gripper.use_gripper,
                 add_ee_velocity_to_observation=self.processor.observation.add_ee_velocity_to_observation,
                 add_ee_wrench_to_observation=self.processor.observation.add_ee_wrench_to_observation,
-                ee_pos_mask=env.control_mask,
             )
         ]
 
@@ -671,20 +708,32 @@ class TFHilSerlRobotEnvConfig(HilSerlRobotEnvConfig):
 
         env_pipeline_steps.extend([AddBatchDimensionProcessorStep(), DeviceProcessorStep(device=device)])
 
-        action_pipeline_steps = [
+        action_pipeline_steps: list = [AddTeleopEventsAsInfoStep(teleoperators=teleoperators)]
+
+        if self.processor.events.key_mapping:
+            action_pipeline_steps.append(AddKeyboardEventsAsInfoStep(mapping=self.processor.events.key_mapping))
+
+        if self.processor.events.foot_switch_mapping:
+            action_pipeline_steps.append(AddFootswitchEventsAsInfoStep(mapping=self.processor.events.foot_switch_mapping))
+
+        action_pipeline_steps.extend([
             AddTeleopActionAsComplimentaryDataStep(teleoperators=teleoperators),
-            AddTeleopEventsAsInfoStep(teleoperators=teleoperators),
-            AddFootswitchEventsAsInfoStep(mapping=self.processor.events.foot_switch_mapping),
             SixDofVelocityInterventionActionProcessorStep(
                 use_gripper=self.processor.gripper.use_gripper,
                 control_mask=self.processor.task_frame.control_mask,
                 terminate_on_success=self.processor.reset.terminate_on_success,
-            )
-        ]
+            ),
+            ActionScalingProcessorStep(action_scale=self.processor.task_frame.action_scale)
+        ])
 
-        return (
-            DataProcessorPipeline(env_pipeline_steps, to_transition=identity_transition, to_output=identity_transition),
-            DataProcessorPipeline(action_pipeline_steps, to_transition=identity_transition, to_output=identity_transition),
+        hooks = self._hooks(env_pipeline_steps, action_pipeline_steps)
+
+        return DataProcessorPipeline(
+            steps=env_pipeline_steps, to_transition=identity_transition, to_output=identity_transition,
+            before_step_hooks=hooks["env"]["before"], after_step_hooks=hooks["env"]["after"]
+        ), DataProcessorPipeline(
+            steps=action_pipeline_steps, to_transition=identity_transition, to_output=identity_transition,
+            before_step_hooks=hooks["action"]["before"], after_step_hooks=hooks["action"]["after"]
         )
 
 

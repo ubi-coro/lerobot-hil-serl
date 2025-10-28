@@ -163,6 +163,8 @@ class AddTeleopActionAsComplimentaryDataStep(ProcessorStep):
             raise ValueError("ComplementaryDataProcessorStep requires complementary data in the transition.")
 
         processed_complementary_data = complementary_data.copy()
+
+        # avoid unnecessary I/O by only reading when the intervention event is set
         if transition[TransitionKey.INFO].get(TeleopEvents.IS_INTERVENTION, False):
             processed_complementary_data[TELEOP_ACTION_KEY] = {}
             for name in self.teleoperators:
@@ -641,6 +643,8 @@ class InterventionActionProcessorStep(ProcessorStep):
                 teleop.send_feedback(feedback_action)
 
         else:
+            # todo: this takes forever (2-3ms -> 25-30ms) when recording normally, ie not interactive
+
             # torque leader on intervention end
             for name, teleop_action in self.teleoperators.items():
                 # torque leaders off on interventions
