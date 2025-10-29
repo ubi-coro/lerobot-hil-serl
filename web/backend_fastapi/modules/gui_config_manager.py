@@ -170,7 +170,7 @@ class GuiConfigManager:
         # Get all registered EnvConfig subclasses
         for name in EnvConfig.get_known_choices():
             try:
-        env_class = EnvConfig.get_choice_class(name)
+                env_class = EnvConfig.get_choice_class(name)
                 
                 # Skip GUI generic configs (they're not real experiments)
                 if name.startswith("gui_"):
