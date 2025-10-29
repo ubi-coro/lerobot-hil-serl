@@ -15,6 +15,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from lerobot.cameras import CameraConfig
 
@@ -26,6 +27,11 @@ from ..config import RobotConfig
 class BiViperXConfig(RobotConfig):
     left_arm_port: str
     right_arm_port: str
+
+    left_arm_id: str | None = None
+    right_arm_id: str | None = None
+    left_arm_calibration_dir: Path | None = None
+    right_arm_calibration_dir: Path | None = None
 
     # Optional per-arm settings
     left_arm_disable_torque_on_disconnect: bool = False

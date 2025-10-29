@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import datasetApi from '@/services/api/datasetApi';
+import { useRobotStore } from './robotStore';
 
 export const useDatasetStore = defineStore('dataset', {
   state: () => ({
@@ -49,7 +50,18 @@ export const useDatasetStore = defineStore('dataset', {
     async startRecording(config = {}) {
       try {
         this.recording.error = null;
-        const response = await datasetApi.startRecording(config);
+        const robotStore = useRobotStore();
+        const teleopConfig = robotStore.teleoperationConfig || {};
+        const operationMode = teleopConfig.operationMode
+          || robotStore.status?.teleoperation?.configuration?.operation_mode
+          || robotStore.status?.teleoperation?.configuration?.operationMode
+          || 'bimanual';
+        const payload = {
+          ...config,
+          operation_mode: operationMode,
+          interactive: typeof config.interactive === 'undefined' ? false : !!config.interactive
+        };
+        const response = await datasetApi.startRecording(payload);
         this.recording.active = true;
         this.recording.currentDataset = response.data.dataset_id;
         return response;

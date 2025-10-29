@@ -163,11 +163,14 @@ class GuiConfigManager:
             List of experiment metadata dicts with name, description, etc.
         """
         experiments = []
+        from experiment_config_mapper import ExperimentConfigMapper
+
+        ExperimentConfigMapper._ensure_experiments_registered()
         
         # Get all registered EnvConfig subclasses
-        for name in EnvConfig.get_all_choice_names():
+        for name in EnvConfig.get_known_choices():
             try:
-                env_class = EnvConfig.build_class_by_name(name)
+        env_class = EnvConfig.get_choice_class(name)
                 
                 # Skip GUI generic configs (they're not real experiments)
                 if name.startswith("gui_"):
@@ -204,7 +207,10 @@ class GuiConfigManager:
             ValueError: If experiment not found
         """
         try:
-            env_class = EnvConfig.build_class_by_name(experiment_name)
+            from experiment_config_mapper import ExperimentConfigMapper
+
+            ExperimentConfigMapper._ensure_experiments_registered()
+            env_class = EnvConfig.get_choice_class(experiment_name)
             return env_class()
         except Exception as e:
             raise ValueError(f"Could not load experiment '{experiment_name}': {e}") from e

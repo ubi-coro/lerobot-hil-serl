@@ -39,9 +39,15 @@ class BiWidowX(Teleoperator):
         super().__init__(config)
         self.config = config
 
+        left_arm_id = config.left_arm_id or (f"{config.id}_left" if config.id else None)
+        left_arm_calibration_dir = config.left_arm_calibration_dir or config.calibration_dir
+
+        right_arm_id = config.right_arm_id or (f"{config.id}_right" if config.id else None)
+        right_arm_calibration_dir = config.right_arm_calibration_dir or config.calibration_dir
+
         left_arm_config = WidowXConfig(
-            id=f"{config.id}_left" if config.id else None,
-            calibration_dir=config.calibration_dir,
+            id=left_arm_id,
+            calibration_dir=left_arm_calibration_dir,
             port=config.left_arm_port,
             max_relative_target=config.left_arm_max_relative_target,
             moving_time=config.left_arm_moving_time,
@@ -49,8 +55,8 @@ class BiWidowX(Teleoperator):
         )
 
         right_arm_config = WidowXConfig(
-            id=f"{config.id}_right" if config.id else None,
-            calibration_dir=config.calibration_dir,
+            id=right_arm_id,
+            calibration_dir=right_arm_calibration_dir,
             port=config.right_arm_port,
             max_relative_target=config.right_arm_max_relative_target,
             moving_time=config.right_arm_moving_time,

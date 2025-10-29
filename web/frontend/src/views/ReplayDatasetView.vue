@@ -117,6 +117,10 @@
               <input type="checkbox" v-model="cfg.displayData" @change="onChange" :disabled="isActive"/>
               Display Data
             </label>
+            <label>
+              <input type="checkbox" v-model="cfg.interactive" @change="onChange" :disabled="isActive"/>
+              Allow Interventions
+            </label>
           </div>
 
           <!-- Actions -->

@@ -62,8 +62,8 @@ fps = 30
 [profiles.bi_viperx.robot]
 type = "bi_viperx"
 id = "bi_viperx"
-left_arm = { port = "/dev/ttyDXL_follower_left", id = "bi_viperx_left", calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/robots/bi_viperx" }
-right_arm = { port = "/dev/ttyDXL_follower_right", id = "bi_viperx_right", calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/robots/bi_viperx" }
+left_arm = { port = "/dev/ttyDXL_follower_left", id = "left_v3", calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/robots/viperx" }
+right_arm = { port = "/dev/ttyDXL_follower_right", id = "right_v3", calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/robots/viperx" }
 
 [profiles.bi_viperx.robot.cameras.left]
 serial_number_or_name = "218622276088"
@@ -92,5 +92,28 @@ fps = 30
 [profiles.bi_viperx.teleop]
 type = "bi_widowx"
 id = "bi_widowx"
-left_arm = { port = "/dev/ttyDXL_leader_left", id = "bi_widowx_left", calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/teleoperators/bi_widowx" }
-right_arm = { port = "/dev/ttyDXL_leader_right", id = "bi_widowx_right", calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/teleoperators/bi_widowx" }
+left_arm = { port = "/dev/ttyDXL_leader_left", id = "left_v3", calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/teleoperators/widowx" }
+right_arm = { port = "/dev/ttyDXL_leader_right", id = "right_v3", calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/teleoperators/widowx" }
+
+# ------------------------------------------------------------------------
+# GUI Experiment Mappings
+#
+# These sections map GUI operation modes to experiment definitions from
+# `src/experiments`.  The backend uses them via `ExperimentConfigMapper`
+# to instantiate the fully configured environments (robot, teleop,
+# cameras, processors, etc.).
+#
+# "teleop"  entries are used for manual teleoperation / recording.
+# "demo"    entries are used for policy-driven demos or evaluation runs.
+# ------------------------------------------------------------------------
+
+[gui_map.teleop]
+bimanual = "aloha_bimanual_lemgo_v2"
+left = "aloha_bimanual_lemgo_v2_left"
+right = "aloha_bimanual_lemgo_v2_right"
+
+[gui_map.demo]
+bimanual = "aloha_bimanual_lemgo_v2_demo"
+
+[gui_defaults.policy_paths]
+aloha_bimanual_lemgo_v2_demo = "/media/jannick/DATA/aloha_model_lerobot/jannick-st/act-241025/pretrained_model"

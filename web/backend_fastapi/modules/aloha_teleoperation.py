@@ -44,7 +44,7 @@ except Exception:
         return None
 import shared
 from . import camera_streaming
-from .experiment_config_mapper import ExperimentConfigMapper
+from experiment_config_mapper import ExperimentConfigMapper
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.factory import make_policy, make_pre_post_processors
@@ -196,6 +196,7 @@ def aloha_teleoperation_worker(config: AlohaConfig):
     env_processor = None
     action_processor = None
     teleop_dict: dict[str, Any] = {}
+    borrowed_cameras = None
 
     try:
         op_mode_mapping = {
@@ -207,11 +208,40 @@ def aloha_teleoperation_worker(config: AlohaConfig):
         operation_key = op_mode_mapping[config.operation_mode]
         demo_enabled = bool(config.demo_mode or config.policy_path)
 
+        # Borrow cameras from robot module if available and requested
+        if config.show_cameras:
+            try:
+                from . import robot as robot_module
+                borrowed_cameras = robot_module.borrow_cameras("aloha_teleoperation")
+                if borrowed_cameras:
+                    logger.info(f"Successfully borrowed {len(borrowed_cameras)} cameras from robot module")
+                else:
+                    logger.warning("Cameras requested but not available from robot module")
+            except RuntimeError as e:
+                logger.error(f"Failed to borrow cameras: {e}")
+                borrowed_cameras = None
+            except Exception as e:
+                logger.debug(f"Could not borrow cameras from robot module: {e}")
+                borrowed_cameras = None
+
         env, env_processor, action_processor, env_cfg, mapping = ExperimentConfigMapper.create_env_from_gui_selection(
             operation_mode=operation_key,
             demo_mode=demo_enabled,
             policy_path_override=config.policy_path,
+            use_cameras=False,  # Never create new camera connections; use borrowed ones if available
         )
+
+        # If we successfully borrowed cameras, inject them into the environment
+        if borrowed_cameras:
+            logger.info("Injecting borrowed cameras into teleoperation environment")
+            if hasattr(env, 'cameras'):
+                env.cameras = borrowed_cameras
+            # Also inject into robot_dict if it exists (for bimanual setups)
+            if hasattr(env, 'robot_dict'):
+                for robot_name, robot_instance in env.robot_dict.items():
+                    if hasattr(robot_instance, 'cameras'):
+                        robot_instance.cameras = borrowed_cameras
+                        logger.debug(f"Injected cameras into robot: {robot_name}")
 
         action_dim = env_cfg.action_dim
 
@@ -312,7 +342,8 @@ def aloha_teleoperation_worker(config: AlohaConfig):
             loop_start = time.perf_counter()
 
             prev_transition = transition
-            info = {}
+            # Always mark as intervention for passive teleoperation (leaders stay torque-off)
+            info = {TeleopEvents.IS_INTERVENTION: True}
 
             if policy is not None and policy_cfg is not None:
                 policy_observation = {
@@ -432,6 +463,15 @@ def aloha_teleoperation_worker(config: AlohaConfig):
                 teleop.disconnect()
             except Exception as exc:
                 logger.debug("Error disconnecting teleoperator %s: %s", getattr(teleop, "id", "unknown"), exc)
+
+        # Return borrowed cameras to robot module
+        if borrowed_cameras:
+            try:
+                from . import robot as robot_module
+                robot_module.return_cameras("aloha_teleoperation")
+                logger.info("Cameras returned to robot module")
+            except Exception as e:
+                logger.warning(f"Could not return cameras to robot module: {e}")
 
         aloha_state["robot"] = None
         aloha_state["teleop"] = None

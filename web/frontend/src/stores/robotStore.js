@@ -155,39 +155,52 @@ export const useRobotStore = defineStore('robot', {
     },
 
     // Connect to robot
-  async connectRobot(operationMode = 'bimanual', connectOptions = {}) {
+    async connect(mode, profile = null, displayData = false, showCameras = true) {
+      if (this.isConnecting || this.isConnected) {
+        console.warn("Connect ignored: already connected or connecting.");
+        return;
+      }
+      this.isConnecting = true;
+      this.connectionError = null;
+      this.connectionStatus = "Connecting to robot hardware...";
+
+      // Force camera connection for the main robot instance
+      const connectPayload = {
+        robot_type: `aloha_${mode}`,
+        operation_mode: mode,
+        profile_name: profile,
+        show_cameras: true, // Always connect cameras on initial connection
+        display_data: displayData,
+        force_reconnect: true,
+      };
+
       try {
-        this.internalHasError = false;
-        this.internalErrorMessage = '';
-
-        const requestOptions = {
-          robot_type: connectOptions.robot_type || this.selectedRobotType || 'aloha_bimanual',
-          profile_name: connectOptions.profile_name || null,
-          show_cameras: connectOptions.show_cameras !== false,
-          display_data: !!connectOptions.display_data,
-          fps: connectOptions.fps || 30,
-          calibrate: !!connectOptions.calibrate,
-          force_reconnect: connectOptions.force_reconnect !== false,
-          overrides: connectOptions.overrides || []
-        };
-
-        const response = await robotApi.connect(operationMode, requestOptions);
+        const response = await robotApi.connect(connectPayload);
 
         if (response.data.status === 'success') {
-          this.status = { ...this.status, ...response.data.data };
+          this.status = {
+            ...this.status,
+            ...response.data.data,
+            connected: true
+          };
           console.log('Robot connected successfully');
+          this.isConnecting = false;
+          this.connectionStatus = null;
         } else {
           this.internalHasError = true;
           this.internalErrorMessage = response.data.message || 'Connection failed';
+          this.isConnecting = false;
         }
       } catch (error) {
-        console.error('Error connecting to robot:', error);
+        console.error('Error connecting robot:', error);
         this.internalHasError = true;
-        this.internalErrorMessage = error.response?.data?.message || 'Connection failed';
+        this.internalErrorMessage = error.response?.data?.message || 'Failed to connect to robot';
+        this.isConnecting = false;
+        this.connectionStatus = null;
       }
     },
 
-    // Disconnect robot
+    // Disconnect robot    // Disconnect robot
     async disconnectRobot() {
       try {
         const response = await robotApi.disconnect();

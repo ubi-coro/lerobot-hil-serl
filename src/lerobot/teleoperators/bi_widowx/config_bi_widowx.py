@@ -15,6 +15,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..config import TeleoperatorConfig
 
@@ -24,6 +25,11 @@ from ..config import TeleoperatorConfig
 class BiWidowXConfig(TeleoperatorConfig):
     left_arm_port: str
     right_arm_port: str
+
+    left_arm_id: str | None = None
+    right_arm_id: str | None = None
+    left_arm_calibration_dir: Path | None = None
+    right_arm_calibration_dir: Path | None = None
 
     # Optional per-arm settings (aligned with WidowXConfig)
     # /!\ FOR SAFETY, READ THIS /!\

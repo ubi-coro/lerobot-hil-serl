@@ -79,6 +79,9 @@ class ViperX(Robot):
                 "gripper": Motor(9, "xm430-w350", MotorNormMode.RANGE_0_1),
             }),
         )
+        if self.calibration:
+            # Ensure the bus knows about the cached calibration before any device IO.
+            self.bus.calibration = dict(self.calibration)
         self.cameras = make_cameras_from_configs(config.cameras)
         self._last_motor_obs = None
 
@@ -105,12 +108,18 @@ class ViperX(Robot):
 
     @property
     def is_connected(self) -> bool:
-        return self.bus.is_connected and all(cam.is_connected for cam in self.cameras.values())
+        # Robot is considered connected if bus is connected
+        # Cameras are optional (lazy loading)
+        return self.bus.is_connected
 
-    def connect(self, calibrate: bool = True) -> None:
+    def connect(self, calibrate: bool = True, connect_cameras: bool = True) -> None:
         """
         We assume that at connection time, arm is in a rest position,
         and torque can be safely disabled to run calibration.
+        
+        Args:
+            calibrate: Whether to run calibration if needed
+            connect_cameras: Whether to connect cameras (lazy loading for faster connection)
         """
         if self.is_connected:
             raise DeviceAlreadyConnectedError(f"{self} already connected")
@@ -129,8 +138,10 @@ class ViperX(Robot):
         if not self.is_calibrated and calibrate:
             self.calibrate()
 
-        for cam in self.cameras.values():
-            cam.connect()
+        # Lazy camera connection: only connect if requested
+        if connect_cameras:
+            for cam in self.cameras.values():
+                cam.connect()
 
         self.configure()
         self.get_observation()

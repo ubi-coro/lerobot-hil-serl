@@ -42,9 +42,15 @@ class BiViperX(Robot):
         super().__init__(config)
         self.config = config
 
+        left_arm_id = config.left_arm_id or (f"{config.id}_left" if config.id else None)
+        left_arm_calibration_dir = config.left_arm_calibration_dir or config.calibration_dir
+
+        right_arm_id = config.right_arm_id or (f"{config.id}_right" if config.id else None)
+        right_arm_calibration_dir = config.right_arm_calibration_dir or config.calibration_dir
+
         left_arm_config = ViperXConfig(
-            id=f"{config.id}_left" if config.id else None,
-            calibration_dir=config.calibration_dir,
+            id=left_arm_id,
+            calibration_dir=left_arm_calibration_dir,
             port=config.left_arm_port,
             disable_torque_on_disconnect=config.left_arm_disable_torque_on_disconnect,
             max_relative_target=config.left_arm_max_relative_target,
@@ -53,8 +59,8 @@ class BiViperX(Robot):
         )
 
         right_arm_config = ViperXConfig(
-            id=f"{config.id}_right" if config.id else None,
-            calibration_dir=config.calibration_dir,
+            id=right_arm_id,
+            calibration_dir=right_arm_calibration_dir,
             port=config.right_arm_port,
             disable_torque_on_disconnect=config.right_arm_disable_torque_on_disconnect,
             max_relative_target=config.right_arm_max_relative_target,
@@ -89,18 +95,27 @@ class BiViperX(Robot):
 
     @property
     def is_connected(self) -> bool:
+        # Robot is considered connected if arms are connected
+        # Cameras are optional (lazy loading)
         return (
             self.left_arm.bus.is_connected
             and self.right_arm.bus.is_connected
-            and all(cam.is_connected for cam in self.cameras.values())
         )
 
-    def connect(self, calibrate: bool = True) -> None:
-        self.left_arm.connect(calibrate)
-        self.right_arm.connect(calibrate)
+    def connect(self, calibrate: bool = True, connect_cameras: bool = True) -> None:
+        """Connect both arms and optionally cameras.
+        
+        Args:
+            calibrate: Whether to run calibration if needed
+            connect_cameras: Whether to connect cameras (lazy loading for faster connection)
+        """
+        self.left_arm.connect(calibrate, connect_cameras=False)  # Don't connect arm cameras
+        self.right_arm.connect(calibrate, connect_cameras=False)  # Don't connect arm cameras
 
-        for cam in self.cameras.values():
-            cam.connect()
+        # Lazy camera connection: only connect if requested
+        if connect_cameras:
+            for cam in self.cameras.values():
+                cam.connect()
 
     @property
     def is_calibrated(self) -> bool:

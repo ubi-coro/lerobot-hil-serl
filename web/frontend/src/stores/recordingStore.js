@@ -48,7 +48,8 @@ export const useRecordingStore = defineStore('recording', {
       resume: false,
   root: '',
   display_data: false,
-  policyPath: ''
+  policyPath: '',
+  interactive: false
     },
     mode: 'recording',
     status: {
@@ -136,6 +137,7 @@ export const useRecordingStore = defineStore('recording', {
       const savedRepo = localStorage.getItem('lerobot.recording.repo_id');
       const savedTask = localStorage.getItem('lerobot.recording.single_task');
       const savedPolicyPath = localStorage.getItem('lerobot.recording.policy_path');
+  const savedInteractive = localStorage.getItem('lerobot.recording.interactive');
       if (savedRoot && !this.config.root) {
         this.config.root = savedRoot;
         this.validationErrors = validateConfig(this.config, this.mode);
@@ -151,6 +153,9 @@ export const useRecordingStore = defineStore('recording', {
       if (savedPolicyPath && !this.config.policyPath) {
         this.config.policyPath = savedPolicyPath;
         this.validationErrors = validateConfig(this.config, this.mode);
+      }
+      if (savedInteractive !== null) {
+        this.config.interactive = savedInteractive === 'true';
       }
     },
     ensureSocketListeners() {
@@ -197,6 +202,9 @@ export const useRecordingStore = defineStore('recording', {
       if (typeof partial.policyPath !== 'undefined') {
         try { localStorage.setItem('lerobot.recording.policy_path', this.config.policyPath || ''); } catch (_) { /* ignore */ }
       }
+      if (typeof partial.interactive !== 'undefined') {
+        try { localStorage.setItem('lerobot.recording.interactive', this.config.interactive ? 'true' : 'false'); } catch (_) { /* ignore */ }
+      }
     },
     setMode(newMode) {
       if (newMode !== 'recording' && newMode !== 'replay') {
@@ -229,6 +237,13 @@ export const useRecordingStore = defineStore('recording', {
       const payload = { ...this.config, mode: this.mode };
       // enforce video true implicitly
       payload.video = true;
+      const teleopConfig = robotStore.teleoperationConfig || {};
+      const operationMode = teleopConfig.operationMode
+        || robotStore.status?.teleoperation?.configuration?.operation_mode
+        || robotStore.status?.teleoperation?.configuration?.operationMode
+        || 'bimanual';
+      payload.operation_mode = operationMode;
+      payload.interactive = !!this.config.interactive;
       sock.emit('start_recording', payload);
       // Mark this root as used so subsequent attempts without resume will show a validation error early.
       try {

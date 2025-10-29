@@ -87,6 +87,9 @@ class DisconnectRequest(BaseModel):
 # Runtime state
 # ---------------------------------------------------------------------------
 robot = None  # Exposed so other modules (teleoperation) can reuse the instance
+_cameras_borrowed = False  # Track if cameras are currently borrowed by another module
+_cameras_borrowed_by = None  # Track which module borrowed the cameras
+
 _robot_state: Dict[str, Any] = {
     "connected": False,
     "mock_mode": False,
@@ -231,7 +234,9 @@ async def connect_robot(request: ConnectRequest):
             )
 
         robot_instance = make_robot_from_config(robot_config)
-        robot_instance.connect(calibrate=request.calibrate)
+        # Lazy camera connection: don't connect cameras by default for faster startup
+        # Cameras will be connected on-demand (e.g., when teleoperation or preview starts)
+        robot_instance.connect(calibrate=request.calibrate, connect_cameras=False)
 
         robot = robot_instance
         _robot_state.update(
@@ -360,3 +365,69 @@ async def get_robot_configs():
         message="Robot configs retrieved",
         data=data,
     )
+
+
+# ---------------------------------------------------------------------------
+# Camera Borrowing API
+# ---------------------------------------------------------------------------
+
+def borrow_cameras(module_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Lend camera objects to another module (e.g., teleoperation).
+    
+    Args:
+        module_name: Name of the module borrowing the cameras (for tracking)
+        
+    Returns:
+        Dictionary of camera objects if available, None otherwise
+        
+    Raises:
+        RuntimeError: If cameras are already borrowed by another module
+    """
+    global _cameras_borrowed, _cameras_borrowed_by
+    
+    if not robot or not hasattr(robot, 'cameras') or not robot.cameras:
+        logger.warning(f"Module '{module_name}' tried to borrow cameras, but no cameras available")
+        return None
+    
+    if _cameras_borrowed and _cameras_borrowed_by != module_name:
+        raise RuntimeError(
+            f"Cameras are already borrowed by '{_cameras_borrowed_by}'. "
+            f"Cannot lend to '{module_name}'."
+        )
+    
+    _cameras_borrowed = True
+    _cameras_borrowed_by = module_name
+    logger.info(f"Cameras borrowed by module: {module_name}")
+    return robot.cameras
+
+
+def return_cameras(module_name: str) -> None:
+    """
+    Return borrowed cameras back to the robot module.
+    
+    Args:
+        module_name: Name of the module returning the cameras
+    """
+    global _cameras_borrowed, _cameras_borrowed_by
+    
+    if not _cameras_borrowed:
+        logger.debug(f"Module '{module_name}' returned cameras, but none were borrowed")
+        return
+    
+    if _cameras_borrowed_by != module_name:
+        logger.warning(
+            f"Module '{module_name}' tried to return cameras, "
+            f"but they were borrowed by '{_cameras_borrowed_by}'"
+        )
+        return
+    
+    _cameras_borrowed = False
+    _cameras_borrowed_by = None
+    logger.info(f"Cameras returned by module: {module_name}")
+
+
+def are_cameras_available() -> bool:
+    """Check if cameras are available for borrowing."""
+    return robot is not None and hasattr(robot, 'cameras') and bool(robot.cameras) and not _cameras_borrowed
+

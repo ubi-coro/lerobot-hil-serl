@@ -373,8 +373,8 @@ class HilSerlRobotEnvConfig(EnvConfig):
     def gym_kwargs(self) -> dict:
         return {}
 
-    def make(self, device: str = "cpu") -> tuple[RobotEnv, Any, Any]:
-        robot_dict, teleop_dict, cameras = self._init_devices()
+    def make(self, device: str = "cpu", connect_cameras: bool = True) -> tuple[RobotEnv, Any, Any]:
+        robot_dict, teleop_dict, cameras = self._init_devices(connect_cameras=connect_cameras)
 
         if self.processor.reset.teleop_on_reset:
             self.processor.reset.fixed_reset_joint_positions = {name: None for name in robot_dict}
@@ -390,7 +390,7 @@ class HilSerlRobotEnvConfig(EnvConfig):
 
         return env, *self._processors(env, teleop_dict, device)
 
-    def _init_devices(self):
+    def _init_devices(self, connect_cameras: bool = True):
         assert self.robot is not None, "Robot config must be provided for real robot environment"
         assert self.teleop is not None, "Teleop config must be provided for real robot environment"
 
@@ -407,10 +407,11 @@ class HilSerlRobotEnvConfig(EnvConfig):
             teleop_dict[name] = make_teleoperator_from_config(teleop_dict[name])
             teleop_dict[name].connect()
 
-        # Handle cameras
+        # Handle cameras - Lazy connection: only connect if requested
         cameras = make_cameras_from_configs(self.cameras)
-        for name in cameras:
-            cameras[name].connect()
+        if connect_cameras:
+            for name in cameras:
+                cameras[name].connect()
 
         # go through each processor and check if we need to turn scalar configs into configs for each robot
         for attr in ["observation", "gripper", "reset", "inverse_kinematics", "task_frame"]:

@@ -32,25 +32,29 @@ import threading
 import time
 import logging
 import asyncio
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.datasets.pipeline_features import aggregate_pipeline_dataset_features, create_initial_features
-from lerobot.datasets.utils import combine_feature_dicts
 from lerobot.datasets.video_utils import VideoEncodingManager
-from lerobot.processor import make_default_processors
-from lerobot.scripts.lerobot_record import record_loop as core_record_loop
-from lerobot.policies.policy_utils import load_policy_checkpoint
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.policies.factory import make_policy, make_pre_post_processors
+from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.processor import ProcessorStep, TransitionKey, EnvTransition
+from lerobot.share.record import record_loop as shared_record_loop
+from lerobot.share.utils import get_pipeline_dataset_features
+from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.control_utils import (
     sanity_check_dataset_name,
     sanity_check_dataset_robot_compatibility,
 )
-from lerobot.utils.utils import log_say
+from lerobot.utils.utils import log_say, get_safe_torch_device
+from lerobot.processor.rename_processor import rename_stats
+
+from ..experiment_config_mapper import ExperimentConfigMapper, ExperimentMapping
 
 logger = logging.getLogger(__name__)
-def has_method(obj: object, name: str) -> bool:
-    return callable(getattr(obj, name, None))
 
 
 @dataclass
@@ -80,6 +84,8 @@ class RecordControlConfig:
     play_sounds: bool = False
     mode: str = "recording"  # "recording" or "replay"
     policyPath: Optional[str] = None  # Path to pretrained_model for replay mode
+    operation_mode: str = "bimanual"
+    interactive: bool = False
     # Optional future fields we may ignore safely
     save_eval: bool = True
 
@@ -130,6 +136,13 @@ class ApiEventAdapter(dict):
             if key in self:
                 self[key] = not self[key]
 
+    def consume(self, key: str) -> bool:
+        with self._lock:
+            value = bool(self.get(key, False))
+            if value:
+                self[key] = False
+            return value
+
     def reset(self):  # override to keep thread safety
         with self._lock:
             self["exit_early"] = False
@@ -141,6 +154,40 @@ class ApiEventAdapter(dict):
         return
 
 
+@dataclass
+class ApiCommandActionProcessorStep(ProcessorStep):
+    """Inject GUI-issued commands into the processor pipeline as teleop events."""
+
+    events: ApiEventAdapter
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        new_transition = transition.copy()
+        info = dict(new_transition.get(TransitionKey.INFO, {}))
+        should_terminate = False
+
+        if self.events.consume("stop_recording"):
+            info[TeleopEvents.STOP_RECORDING] = True
+            should_terminate = True
+
+        if self.events.consume("rerecord_episode"):
+            info[TeleopEvents.RERECORD_EPISODE] = True
+            info[TeleopEvents.TERMINATE_EPISODE] = True
+            should_terminate = True
+
+        if self.events.consume("exit_early"):
+            info.setdefault(TeleopEvents.TERMINATE_EPISODE, True)
+            should_terminate = True
+
+        if should_terminate:
+            new_transition[TransitionKey.DONE] = True
+            new_transition[TransitionKey.TRUNCATED] = True
+
+        if info:
+            new_transition[TransitionKey.INFO] = info
+
+        return new_transition
+
+
 class RecordingWorkerState:
     def __init__(self):
         self.active: bool = False
@@ -149,6 +196,10 @@ class RecordingWorkerState:
         self.events: Optional[ApiEventAdapter] = None
         self.cfg: Optional[RecordControlConfig] = None
         self.dataset: Optional[LeRobotDataset] = None
+        self.env = None
+        self.env_processor = None
+        self.action_processor = None
+        self.mapping: Optional[ExperimentMapping] = None
         self.episode_index: int = 0
         self.total_frames: int = 0
         self.episode_frames: int = 0
@@ -212,101 +263,38 @@ class RecordingWorkerState:
 
 recording_worker = RecordingWorkerState()
 
-
-def _get_robot_instance():
-    """Attempt to reuse an existing connected robot instance."""
-    # Teleoperation robot reuse
-    if aloha_state and aloha_state.get("robot") is not None:
-        robot = aloha_state["robot"]
-        try:
-            if robot.is_connected:
-                return robot, False
-        except Exception:  # pragma: no cover
-            pass
-    # Reuse unified robot module instance (preferred path)
-    if robot_module:
-        shared_robot = getattr(robot_module, "robot", None)
-        try:
-            if shared_robot and getattr(shared_robot, "is_connected", False):
-                try:
-                    cam_count = len(getattr(shared_robot, "cameras", {}) or {})
-                    logger.info(
-                        "Robot instance ready (type=%s, cameras=%d)",
-                        getattr(shared_robot, "robot_type", getattr(shared_robot, "name", "?")),
-                        cam_count,
-                    )
-                except Exception:
-                    logger.debug("Failed to introspect shared robot cameras", exc_info=True)
-                return shared_robot, False
-        except Exception:  # pragma: no cover
-            logger.debug("Shared robot lookup failed", exc_info=True)
-
-        # Legacy robot service reuse (fallback while transitioning modules)
-        robot_service = getattr(robot_module, "robot_service", None)
-        if robot_service is not None:
-            robot = getattr(robot_service, "robot", None)
-            try:
-                if robot and getattr(robot, "is_connected", False):
-                    return robot, False
-            except Exception:  # pragma: no cover
-                logger.debug("Legacy robot_service reuse failed", exc_info=True)
-    # Otherwise fail (no autonomous robot creation here)
-    raise RuntimeError(
-        "No connected robot available. Connect via teleoperation or robot endpoint before starting recording."
-    )
-
-
 def start_recording_via_api(config: Dict[str, Any]):
     if recording_worker.active:
         raise RuntimeError("Recording already active")
 
-    # Minimal required fields validation
     required = ["repo_id", "single_task", "fps", "episode_time_s", "num_episodes"]
-    missing = [k for k in required if k not in config]
+    missing = [field for field in required if field not in config]
     if missing:
         raise ValueError(f"Missing required config fields: {missing}")
-    
-    # Validate replay mode requirements
-    mode = config.get("mode", "recording")
-    if mode == "replay":
-        policy_path = config.get("policyPath")
-        if not policy_path:
-            raise ValueError("policyPath is required for replay mode")
-        if not policy_path.endswith("pretrained_model"):
-            raise ValueError("policyPath should end with 'pretrained_model'")
 
-    # Sanitize numeric fields to avoid None-related crashes (e.g., coming from JSON null)
-    def _num(x, default=None):
-        return default if x is None else x
-
-    def _pos_int(x, default=None):
+    def _pos_int(value, default=None):
         try:
-            return int(x)
+            return int(value)
         except Exception:
             return default
 
-    def _pos_float(x, default=None):
+    def _pos_float(value, default=None):
         try:
-            # Accept ints or strings that represent numbers
-            return float(x)
+            return float(value)
         except Exception:
             return default
 
     warmup_time_s = _pos_float(config.get("warmup_time_s"), 10.0)
     episode_time_s = _pos_float(config.get("episode_time_s"), 30.0)
     reset_time_s = _pos_float(config.get("reset_time_s"), 10.0)
-    fps_val = config.get("fps")
-    if fps_val is None:
-        raise ValueError("fps must be provided and non-null")
-    fps_val = _pos_int(fps_val, None)
+
+    fps_val = _pos_int(config.get("fps"), None)
     if fps_val is None or fps_val <= 0:
         raise ValueError(f"Invalid fps value: {config.get('fps')} (must be a positive integer)")
 
     num_img_writer_proc = _pos_int(config.get("num_image_writer_processes", 0), 0)
     num_img_writer_threads_per_cam = _pos_int(config.get("num_image_writer_threads_per_camera", 4), 4)
-    video_batch_size = _pos_int(config.get("video_encoding_batch_size", 1), 1)
-    if video_batch_size is None or video_batch_size < 1:
-        video_batch_size = 1
+    video_batch_size = max(1, _pos_int(config.get("video_encoding_batch_size", 1), 1) or 1)
 
     rename_map_val = config.get("rename_map") or {}
     if not isinstance(rename_map_val, dict):
@@ -314,19 +302,15 @@ def start_recording_via_api(config: Dict[str, Any]):
 
     play_sounds = bool(config.get("play_sounds", False))
 
-    # Sanitize num_episodes
-    num_episodes_val = config.get("num_episodes", 1)
-    if num_episodes_val is None:
+    num_episodes_val = _pos_int(config.get("num_episodes", 1), 1)
+    if num_episodes_val < 1:
         num_episodes_val = 1
-    else:
-        try:
-            num_episodes_val = int(num_episodes_val)
-            if num_episodes_val < 1:
-                num_episodes_val = 1
-        except Exception:
-            num_episodes_val = 1
 
-    # Build local RecordControlConfig (Phase 1 subset)
+    operation_mode = config.get("operation_mode")
+    if not operation_mode and aloha_state and aloha_state.get("config"):
+        operation_mode = aloha_state["config"].get("operation_mode")
+    normalized_mode = ExperimentConfigMapper.normalize_operation_mode(operation_mode)
+
     cfg = RecordControlConfig(
         repo_id=config["repo_id"],
         single_task=config["single_task"],
@@ -349,46 +333,36 @@ def start_recording_via_api(config: Dict[str, Any]):
         play_sounds=play_sounds,
         mode=config.get("mode", "recording"),
         policyPath=config.get("policyPath"),
+        operation_mode=normalized_mode,
+        interactive=bool(config.get("interactive", False)),
     )
 
-    # Ensure no None values in cfg to prevent TypeErrors
-    if cfg.num_episodes is None:
-        cfg.num_episodes = 1
-    if cfg.episode_time_s is None:
-        cfg.episode_time_s = 30.0
-    if cfg.warmup_time_s is None:
-        cfg.warmup_time_s = 10.0
-    if cfg.reset_time_s is None:
-        cfg.reset_time_s = 10.0
-    if cfg.fps is None:
-        cfg.fps = 30
-    if cfg.video is None:
-        cfg.video = True
-    if cfg.push_to_hub is None:
-        cfg.push_to_hub = False
-    if cfg.private is None:
-        cfg.private = False
-    if cfg.resume is None:
-        cfg.resume = False
-    if cfg.display_data is None:
-        cfg.display_data = False
-    if cfg.video_encoding_batch_size is None or cfg.video_encoding_batch_size < 1:
-        cfg.video_encoding_batch_size = 1
-    if cfg.rename_map is None:
-        cfg.rename_map = {}
-    if cfg.play_sounds is None:
-        cfg.play_sounds = False
+    cfg.num_episodes = cfg.num_episodes or 1
+    cfg.episode_time_s = cfg.episode_time_s or 30.0
+    cfg.warmup_time_s = cfg.warmup_time_s or 10.0
+    cfg.reset_time_s = cfg.reset_time_s or 10.0
+    cfg.video = True if cfg.video is None else cfg.video
+    cfg.push_to_hub = bool(cfg.push_to_hub)
+    cfg.private = bool(cfg.private)
+    cfg.resume = bool(cfg.resume)
+    cfg.display_data = bool(cfg.display_data)
+    cfg.rename_map = cfg.rename_map or {}
+    cfg.play_sounds = bool(cfg.play_sounds)
 
-    # Guard against concurrent teleoperation stopping hazards (optional)
+    demo_mode = cfg.mode == "replay"
+    mapping = ExperimentConfigMapper.resolve_mapping(cfg.operation_mode, demo_mode, cfg.policyPath)
+    if demo_mode and not (mapping.supports_policy or cfg.policyPath):
+        raise ValueError(f"Replay mode for '{cfg.operation_mode}' requires a configured policy path.")
+    if not cfg.policyPath and mapping.default_policy_path:
+        cfg.policyPath = mapping.default_policy_path
+    if cfg.policyPath and not cfg.policyPath.endswith("pretrained_model"):
+        raise ValueError("policyPath should end with 'pretrained_model'")
+
     if aloha_state and aloha_state.get("active"):
         raise RuntimeError("Cannot start recording while teleoperation is active. Please stop teleoperation first.")
 
-    robot, owned = _get_robot_instance()
-    logger.info("Starting API recording using existing robot instance (owned=%s)", owned)
-
     events = ApiEventAdapter()
-    stop_event = recording_worker.stop_event
-    stop_event.clear()
+    recording_worker.stop_event.clear()
 
     recording_worker.active = True
     recording_worker.cfg = cfg
@@ -397,61 +371,104 @@ def start_recording_via_api(config: Dict[str, Any]):
     recording_worker.total_frames = 0
     recording_worker.episode_frames = 0
     recording_worker.episode_start_t = None
+    recording_worker.mapping = mapping
     with recording_worker.status_lock:
         recording_worker.phase = "transition"
         recording_worker.phase_start_t = None
         recording_worker.phase_total_s = None
 
-    # Worker function replicating record() orchestration with adapter
     def _worker():
+        env = None
+        env_processor = None
+        action_processor = None
+        dataset: Optional[LeRobotDataset] = None
+        policy: Optional[PreTrainedPolicy] = None
+        preprocessor = None
+        postprocessor = None
+        policy_cfg: Optional[PreTrainedConfig] = None
+        policy_device = get_safe_torch_device("cpu")
+        use_amp = False
+        last_info: Dict[str, Any] = {}
+        borrowed_cameras = None
+        
         try:
-            # Create or load dataset
-            # Handle existing root directory edge-cases early
+            # Borrow cameras from robot module if available
             try:
-                from pathlib import Path
-                root_path = Path(cfg.root) if cfg.root is not None else None
-                if root_path and root_path.exists():
-                    if not cfg.resume:
-                        # If empty directory, remove it so LeRobot can create it
-                        if root_path.is_dir() and not any(root_path.iterdir()):
-                            try:
-                                root_path.rmdir()
-                                logger.info("Removed empty dataset root to allow creation: %s", root_path)
-                            except Exception:
-                                pass
-                        else:
-                            # If it looks like an existing dataset, require explicit resume
-                            if (root_path / "meta" / "info.json").exists():
-                                raise RuntimeError(
-                                    "Existing dataset detected at %s. Enable 'Resume' to continue adding episodes or choose a different root." % root_path
-                                )
-                            else:
-                                raise RuntimeError(
-                                    f"Dataset root exists and is not empty: {root_path}. "
-                                    "Choose a different root or enable Resume."
-                                )
-            except Exception as pre_e:
-                raise
+                from . import robot as robot_module
+                borrowed_cameras = robot_module.borrow_cameras("recording_worker")
+                if borrowed_cameras:
+                    logger.info(f"Successfully borrowed {len(borrowed_cameras)} cameras from robot module for recording")
+                else:
+                    logger.warning("Cameras not available from robot module for recording")
+            except RuntimeError as e:
+                logger.error(f"Failed to borrow cameras: {e}")
+                borrowed_cameras = None
+            except Exception as e:
+                logger.debug(f"Could not borrow cameras from robot module: {e}")
+                borrowed_cameras = None
+            
+            root_path = Path(cfg.root) if cfg.root else None
+            if root_path and root_path.exists() and not cfg.resume:
+                if root_path.is_dir() and not any(root_path.iterdir()):
+                    try:
+                        root_path.rmdir()
+                        logger.info("Removed empty dataset root to allow creation: %s", root_path)
+                    except Exception:
+                        pass
+                else:
+                    if (root_path / "meta" / "info.json").exists():
+                        raise RuntimeError(
+                            f"Existing dataset detected at {root_path}. Enable 'Resume' or pick a different root."
+                        )
+                    raise RuntimeError(
+                        f"Dataset root exists and is not empty: {root_path}. Choose a different root or enable Resume."
+                    )
 
-            # Build dataset features using the same pipeline aggregation as CLI recorder
-            (
-                teleop_action_processor,
-                robot_action_processor,
-                robot_observation_processor,
-            ) = make_default_processors()
+            policy_cfg_for_name = None
+            if demo_mode:
+                resolved_policy_path = cfg.policyPath or mapping.default_policy_path
+                if not resolved_policy_path:
+                    raise RuntimeError("Replay mode active but no policy path available.")
+                policy_cfg_for_name = PreTrainedConfig.from_pretrained(resolved_policy_path)
+                policy_cfg_for_name.pretrained_path = resolved_policy_path
+                cfg.policyPath = resolved_policy_path
 
-            dataset_features = combine_feature_dicts(
-                aggregate_pipeline_dataset_features(
-                    pipeline=teleop_action_processor,
-                    initial_features=create_initial_features(action=robot.action_features),
-                    use_videos=cfg.video,
-                ),
-                aggregate_pipeline_dataset_features(
-                    pipeline=robot_observation_processor,
-                    initial_features=create_initial_features(observation=robot.observation_features),
-                    use_videos=cfg.video,
-                ),
+            sanity_check_dataset_name(cfg.repo_id, policy_cfg_for_name)
+
+            env, env_processor, action_processor, env_cfg, mapping_local = ExperimentConfigMapper.create_env_from_gui_selection(
+                cfg.operation_mode,
+                demo_mode,
+                cfg.policyPath,
+                use_cameras=False,  # Never create new camera connections; use borrowed ones if available
             )
+            
+            # If we successfully borrowed cameras, inject them into the environment
+            if borrowed_cameras:
+                logger.info("Injecting borrowed cameras into recording environment")
+                if hasattr(env, 'cameras'):
+                    env.cameras = borrowed_cameras
+                # Also inject into robot_dict if it exists (for bimanual setups)
+                if hasattr(env, 'robot_dict'):
+                    for robot_name, robot_instance in env.robot_dict.items():
+                        if hasattr(robot_instance, 'cameras'):
+                            robot_instance.cameras = borrowed_cameras
+                            logger.debug(f"Injected cameras into robot: {robot_name}")
+            
+            recording_worker.env = env
+            recording_worker.env_processor = env_processor
+            recording_worker.action_processor = action_processor
+            recording_worker.mapping = mapping_local
+
+            action_processor.steps.append(ApiCommandActionProcessorStep(events))
+
+            dataset_features = get_pipeline_dataset_features(
+                env=env,
+                env_processor=env_processor,
+                action_dim=env_cfg.action_dim,
+                use_video=cfg.video,
+            )
+
+            camera_count = len(getattr(env, "cameras", {}) or {})
 
             if cfg.resume:
                 dataset = LeRobotDataset(
@@ -459,38 +476,32 @@ def start_recording_via_api(config: Dict[str, Any]):
                     root=cfg.root,
                     batch_encoding_size=cfg.video_encoding_batch_size,
                 )
-                if len(getattr(robot, "cameras", {}) or {}) > 0:
+                if camera_count > 0:
                     dataset.start_image_writer(
                         num_processes=cfg.num_image_writer_processes,
-                        num_threads=cfg.num_image_writer_threads_per_camera * len(robot.cameras),
+                        num_threads=cfg.num_image_writer_threads_per_camera * camera_count,
                     )
-                sanity_check_dataset_robot_compatibility(dataset, robot, cfg.fps, dataset_features)
+                sanity_check_dataset_robot_compatibility(dataset, env_cfg.type, cfg.fps, dataset_features)
                 try:
-                    # Store existing episodes so UI can show a total baseline
                     recording_worker.existing_dataset_episodes = int(getattr(dataset, "num_episodes", 0))
                 except Exception:
                     recording_worker.existing_dataset_episodes = None
             else:
-                sanity_check_dataset_name(cfg.repo_id, None)
                 dataset = LeRobotDataset.create(
                     repo_id=cfg.repo_id,
                     fps=cfg.fps,
-                    features=dataset_features,
                     root=cfg.root,
-                    robot_type=getattr(robot, "name", None),
+                    robot_type=env_cfg.type,
+                    features=dataset_features,
                     use_videos=cfg.video,
                     image_writer_processes=cfg.num_image_writer_processes,
-                    image_writer_threads=cfg.num_image_writer_threads_per_camera
-                    * len(getattr(robot, "cameras", {}) or {}),
+                    image_writer_threads=cfg.num_image_writer_threads_per_camera * camera_count,
                     batch_encoding_size=cfg.video_encoding_batch_size,
                 )
-
-            recording_worker.dataset = dataset
-            if not cfg.resume:
-                # New dataset starts with zero existing episodes
                 recording_worker.existing_dataset_episodes = 0
 
-            # Monkeypatch frame counting
+            recording_worker.dataset = dataset
+
             orig_add_frame = dataset.add_frame
 
             def add_frame_hook(frame):
@@ -501,200 +512,194 @@ def start_recording_via_api(config: Dict[str, Any]):
 
             dataset.add_frame = add_frame_hook  # type: ignore
 
-            if not robot.is_connected:
-                robot.connect()
+            if demo_mode:
+                policy_cfg = policy_cfg_for_name or PreTrainedConfig.from_pretrained(cfg.policyPath)
+                policy_cfg.pretrained_path = cfg.policyPath
+                policy_device = get_safe_torch_device(getattr(policy_cfg, "device", "cpu") or "cpu")
+                policy_cfg.device = str(policy_device)
+                use_amp = bool(getattr(policy_cfg, "use_amp", False))
+                policy = make_policy(policy_cfg, ds_meta=dataset.meta)
+                preprocessor, postprocessor = make_pre_post_processors(
+                    policy_cfg=policy_cfg,
+                    pretrained_path=policy_cfg.pretrained_path,
+                    dataset_stats=rename_stats(dataset.meta.stats, cfg.rename_map),
+                    preprocessor_overrides={
+                        "device_processor": {"device": str(policy_device)},
+                        "rename_observations_processor": {"rename_map": cfg.rename_map},
+                    },
+                    postprocessor_overrides={
+                        "device_processor": {"device": str(policy_device)},
+                    },
+                )
+                policy.reset()
 
-            # Load policy if in replay mode
-            policy = None
-            preprocessor = None
-            postprocessor = None
-            if cfg.mode == "replay" and cfg.policyPath:
-                try:
-                    from lerobot.policies.factory import make_policy, make_pre_post_processors
-                    from lerobot.processor.rename_processor import rename_stats
-                    from lerobot.configs.policies import PreTrainedConfig
-                    
-                    logger.info(f"Loading policy from {cfg.policyPath}")
-                    
-                    # Load policy config and instantiate policy
-                    policy_cfg = PreTrainedConfig.from_pretrained(cfg.policyPath)
-                    policy_cfg.pretrained_path = cfg.policyPath
-                    policy = make_policy(policy_cfg, ds_meta=dataset.meta)
-                    
-                    # Create preprocessor and postprocessor
-                    preprocessor, postprocessor = make_pre_post_processors(
-                        policy_cfg=policy_cfg,
-                        pretrained_path=cfg.policyPath,
-                        dataset_stats=rename_stats(dataset.meta.stats, cfg.rename_map),
-                        preprocessor_overrides={
-                            "device_processor": {"device": policy_cfg.device},
-                            "rename_observations_processor": {"rename_map": cfg.rename_map},
-                        },
-                    )
-                    
-                    logger.info(f"Policy loaded successfully: {type(policy).__name__}")
-                    logger.info(f"Preprocessor: {type(preprocessor).__name__}, Postprocessor: {type(postprocessor).__name__}")
-                except Exception as policy_e:
-                    raise RuntimeError(f"Failed to load policy and processors: {policy_e}")
-
-            # Proactive camera preflight to surface RealSense issues early and clearly
             try:
-                # Guard against None: pick a safe timeout derived from warmup or a minimum window
-                warmup_timeout = cfg.warmup_time_s if cfg.warmup_time_s is not None else 10
-                try:
-                    warmup_timeout_int = int(warmup_timeout)
-                except Exception:
-                    warmup_timeout_int = 10
-                _preflight_cameras(robot, timeout_s=min(10, max(3, warmup_timeout_int)))
+                warmup_timeout = int(cfg.warmup_time_s or 10)
+                _preflight_cameras(env, timeout_s=min(10, max(3, warmup_timeout)))
             except Exception as cam_e:
                 raise RuntimeError(
-                    f"Camera preflight failed: {cam_e}. "
-                    "Verify your Intel RealSense cameras stream frames (try 'realsense-viewer'), "
-                    "ensure USB3 ports and cables, and that no other process is using the cameras."
-                )
+                    f"Camera preflight failed: {cam_e}. Ensure cameras are connected and not used elsewhere."
+                ) from cam_e
+
+            teleop_reset_cfg = getattr(getattr(env_cfg, "processor", None), "reset", None)
+            teleop_on_reset = bool(getattr(teleop_reset_cfg, "teleop_on_reset", False))
 
             with VideoEncodingManager(dataset):
-                # Warmup (no dataset writing)
-                log_say("Warmup record", cfg.play_sounds)
-                with recording_worker.status_lock:
-                    recording_worker.phase = "warmup"
-                    recording_worker.phase_total_s = float(cfg.warmup_time_s or 0)
-                    recording_worker.phase_start_t = time.perf_counter()
-                core_record_loop(
-                    robot=robot,
-                    events=events,
-                    fps=cfg.fps,
-                    teleop_action_processor=teleop_action_processor,
-                    robot_action_processor=robot_action_processor,
-                    robot_observation_processor=robot_observation_processor,
-                    dataset=None,
-                    teleop=None,
-                    policy=None,
-                    preprocessor=None,
-                    postprocessor=None,
-                    control_time_s=cfg.warmup_time_s,
-                    single_task=cfg.single_task,
-                    display_data=cfg.display_data,
-                )
-
-                if has_method(robot, "teleop_safety_stop"):
-                    robot.teleop_safety_stop()
-
-                # Episodes loop
-                while recording_worker.episode_index < cfg.num_episodes and not events["stop_recording"]:
-                    events.reset()
+                if teleop_on_reset:
                     with recording_worker.status_lock:
-                        recording_worker.episode_frames = 0
-                        recording_worker.episode_start_t = time.perf_counter()
+                        recording_worker.phase = "warmup"
+                        recording_worker.phase_total_s = float(cfg.warmup_time_s or 0)
+                        recording_worker.phase_start_t = time.perf_counter()
+                    last_info = shared_record_loop(
+                        env=env,
+                        fps=cfg.fps,
+                        action_dim=env_cfg.action_dim,
+                        action_processor=action_processor,
+                        env_processor=env_processor,
+                        dataset=None,
+                        policy=None,
+                        preprocessor=None,
+                        postprocessor=None,
+                        control_time_s=cfg.warmup_time_s,
+                        single_task=cfg.single_task,
+                        robot_type=env_cfg.type,
+                        display_data=cfg.display_data,
+                        device="cpu",
+                        use_amp=False,
+                        interactive=False,
+                    )
+                    events.reset()
+
+                recorded_episodes = 0
+                while recorded_episodes < cfg.num_episodes and not last_info.get(
+                    TeleopEvents.STOP_RECORDING, False
+                ):
+                    with recording_worker.status_lock:
                         recording_worker.phase = "recording"
                         recording_worker.phase_total_s = float(cfg.episode_time_s or 0)
-                        recording_worker.phase_start_t = recording_worker.episode_start_t
+                        recording_worker.phase_start_t = time.perf_counter()
+                        recording_worker.episode_frames = 0
+                        recording_worker.episode_start_t = time.perf_counter()
 
-                    log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
-                    core_record_loop(
-                        robot=robot,
-                        events=events,
+                    last_info = shared_record_loop(
+                        env=env,
                         fps=cfg.fps,
-                        teleop_action_processor=teleop_action_processor,
-                        robot_action_processor=robot_action_processor,
-                        robot_observation_processor=robot_observation_processor,
+                        action_dim=env_cfg.action_dim,
+                        action_processor=action_processor,
+                        env_processor=env_processor,
                         dataset=dataset,
-                        teleop=None,
                         policy=policy,
                         preprocessor=preprocessor,
                         postprocessor=postprocessor,
                         control_time_s=cfg.episode_time_s,
                         single_task=cfg.single_task,
+                        robot_type=env_cfg.type,
                         display_data=cfg.display_data,
+                        device=str(policy_device),
+                        use_amp=use_amp,
+                        interactive=cfg.interactive,
                     )
 
-                    # Reset phase (skip for last unless rerecord). Snapshot rerecord to survive events.reset().
-                    rerecord_req = bool(events["rerecord_episode"])
-                    if not events["stop_recording"] and (
-                        (recording_worker.episode_index < cfg.num_episodes - 1) or rerecord_req
-                    ):
-                        log_say("Reset the environment", cfg.play_sounds)
-                        # Clear exit_early etc. but preserve local rerecord_req for logic below
-                        events.reset()
-                        with recording_worker.status_lock:
-                            recording_worker.phase = "resetting"
-                            recording_worker.phase_total_s = float(cfg.reset_time_s or 0)
-                            recording_worker.phase_start_t = time.perf_counter()
-                        core_record_loop(
-                            robot=robot,
-                            events=events,
-                            fps=cfg.fps,
-                            teleop_action_processor=teleop_action_processor,
-                            robot_action_processor=robot_action_processor,
-                            robot_observation_processor=robot_observation_processor,
-                            dataset=None,
-                            teleop=None,
-                            policy=None,
-                            preprocessor=None,
-                            postprocessor=None,
-                            control_time_s=cfg.reset_time_s,
-                            single_task=cfg.single_task,
-                            display_data=cfg.display_data,
-                        )
-
-                    if rerecord_req:
+                    if last_info.get(TeleopEvents.RERECORD_EPISODE, False):
                         log_say("Re-record episode", cfg.play_sounds)
                         dataset.clear_episode_buffer()
-                        # Do not advance episode index; restart same episode in next loop iteration
+                        events.reset()
                         continue
 
-                    # Use episode_buffer size to determine if we captured any frames in this episode
-                    ep_size = 0
-                    try:
-                        ep_size = int(getattr(dataset, "episode_buffer", {}).get("size", 0))
-                    except Exception:
-                        ep_size = 0
-
-                    if ep_size > 0:
-                        # Indicate processing while saving episode (encoding, parquet, etc.)
+                    episode_size = int(dataset.episode_buffer.get("size", 0))
+                    if episode_size > 0:
                         with recording_worker.status_lock:
                             recording_worker.phase = "processing"
                             recording_worker.phase_total_s = None
                             recording_worker.phase_start_t = time.perf_counter()
                         dataset.save_episode()
-                        recording_worker.episode_index += 1
+                        recorded_episodes += 1
+                        recording_worker.episode_index = recorded_episodes
                     else:
-                        log_say("No frames captured this episode, re-recording", cfg.play_sounds)
-                        # If we ended up with no frames and no explicit rerecord request, force rerecord
-                        # to avoid advancing the episode counter silently.
+                        log_say("Dataset is empty, re-record episode", cfg.play_sounds)
+                        events.reset()
                         continue
 
-                log_say("Stop recording", cfg.play_sounds)
+                    if recorded_episodes < cfg.num_episodes and not last_info.get(
+                        TeleopEvents.STOP_RECORDING, False
+                    ):
+                        with recording_worker.status_lock:
+                            recording_worker.phase = "resetting"
+                            recording_worker.phase_total_s = float(cfg.reset_time_s or 0)
+                            recording_worker.phase_start_t = time.perf_counter()
+                        last_info = shared_record_loop(
+                            env=env,
+                            fps=cfg.fps,
+                            action_dim=env_cfg.action_dim,
+                            action_processor=action_processor,
+                            env_processor=env_processor,
+                            dataset=None,
+                            policy=None,
+                            preprocessor=None,
+                            postprocessor=None,
+                            control_time_s=cfg.reset_time_s,
+                            single_task=cfg.single_task,
+                            robot_type=env_cfg.type,
+                            display_data=cfg.display_data,
+                            device="cpu",
+                            use_amp=False,
+                            interactive=False,
+                        )
+                        events.reset()
+
+                if last_info.get(TeleopEvents.STOP_RECORDING, False):
+                    log_say("Stop recording", cfg.play_sounds)
 
             if cfg.push_to_hub:
-                try:
-                    # Indicate pushing phase without duration
-                    with recording_worker.status_lock:
-                        recording_worker.phase = "pushing"
-                        recording_worker.phase_total_s = None
-                        recording_worker.phase_start_t = time.perf_counter()
-                    dataset.push_to_hub(tags=cfg.tags, private=cfg.private)
-                except Exception as e:  # pragma: no cover
-                    logger.warning(f"Push to hub failed: {e}")
+                with recording_worker.status_lock:
+                    recording_worker.phase = "pushing"
+                    recording_worker.phase_total_s = None
+                    recording_worker.phase_start_t = time.perf_counter()
+                dataset.push_to_hub(tags=cfg.tags, private=cfg.private)
 
-        except Exception as e:
-            logger.error(f"Recording worker error: {e}", exc_info=True)
-            # Keep robot connection as-is for GUI; just proceed to cleanup
-            # Emit error event if possible
+        except Exception as exc:
+            logger.error("Recording worker error: %s", exc, exc_info=True)
             sio = shared.get_socketio() if shared else None
             if sio:
                 try:
-                    coro = sio.emit("recording_error", {"error": str(e)})
+                    coro = sio.emit("recording_error", {"error": str(exc)})
                     _schedule_coro(coro)
                 except Exception:
                     pass
         finally:
+            if hasattr(dataset, "close"):
+                try:
+                    dataset.close()
+                except Exception:
+                    logger.debug("Dataset close failed", exc_info=True)
+            if hasattr(env, "close") and env is not None:
+                try:
+                    env.close()
+                except Exception:
+                    logger.debug("Env close failed", exc_info=True)
+            
+            # Return borrowed cameras to robot module
+            if borrowed_cameras:
+                try:
+                    from . import robot as robot_module
+                    robot_module.return_cameras("recording_worker")
+                    logger.info("Cameras returned to robot module from recording")
+                except Exception as e:
+                    logger.warning(f"Could not return cameras to robot module: {e}")
+            
             with recording_worker.status_lock:
                 recording_worker.active = False
                 recording_worker.phase = "idle"
                 recording_worker.phase_start_t = None
                 recording_worker.phase_total_s = None
-            # Final status emit
+            recording_worker.env = None
+            recording_worker.env_processor = None
+            recording_worker.action_processor = None
+            recording_worker.mapping = None
+            recording_worker.dataset = None
+            recording_worker.existing_dataset_episodes = None
+            events.set_flag("stop_recording", False)
+
             sio = shared.get_socketio() if shared else None
             if sio:
                 try:
@@ -703,9 +708,9 @@ def start_recording_via_api(config: Dict[str, Any]):
                 except Exception:
                     pass
 
-    t = threading.Thread(target=_worker, name="RecordingWorker", daemon=True)
-    recording_worker.thread = t
-    t.start()
+    thread = threading.Thread(target=_worker, name="RecordingWorker", daemon=True)
+    recording_worker.thread = thread
+    thread.start()
 
 
 def stop_recording_via_api():
