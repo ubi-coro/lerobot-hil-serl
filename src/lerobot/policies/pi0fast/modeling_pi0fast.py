@@ -172,8 +172,8 @@ class PI0FASTPolicy(PreTrainedPolicy):
         for motor_idx in [1, 2, 8, 9]:
             state[:, motor_idx] *= -1
         # Reverse the gripper transformation that is being applied by the Aloha runtime.
-        for motor_idx in [6, 13]:
-            state[:, motor_idx] = aloha_gripper_to_angular(state[:, motor_idx])
+        #for motor_idx in [6, 13]:
+        #    state[:, motor_idx] = aloha_gripper_to_angular(state[:, motor_idx])
         return state
 
     def _pi_aloha_encode_actions(self, actions):
@@ -181,8 +181,8 @@ class PI0FASTPolicy(PreTrainedPolicy):
         for motor_idx in [1, 2, 8, 9]:
             actions[:, :, motor_idx] *= -1
         # Reverse the gripper transformation that is being applied by the Aloha runtime.
-        for motor_idx in [6, 13]:
-            actions[:, :, motor_idx] = aloha_gripper_from_angular(actions[:, :, motor_idx])
+        #for motor_idx in [6, 13]:
+        #    actions[:, :, motor_idx] = aloha_gripper_from_angular(actions[:, :, motor_idx])
         return actions
 
     def _pi_aloha_encode_actions_inv(self, actions):
@@ -190,8 +190,8 @@ class PI0FASTPolicy(PreTrainedPolicy):
         for motor_idx in [1, 2, 8, 9]:
             actions[:, :, motor_idx] *= -1
         # Reverse the gripper transformation that is being applied by the Aloha runtime.
-        for motor_idx in [6, 13]:
-            actions[:, :, motor_idx] = aloha_gripper_from_angular_inv(actions[:, :, motor_idx])
+        #for motor_idx in [6, 13]:
+        #    actions[:, :, motor_idx] = aloha_gripper_from_angular_inv(actions[:, :, motor_idx])
         return actions
 
     @torch.no_grad()

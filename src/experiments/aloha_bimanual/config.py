@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from lerobot.teleoperators.widowx import WidowXConfig
 @dataclass
 @EnvConfig.register_subclass("aloha_bimanual")
 class AlohaBimanualEnvConfig(HilSerlRobotEnvConfig):
+    benchmark: bool = False
 
     def __post_init__(self):
         self.robot = {
@@ -62,11 +64,32 @@ class AlohaBimanualEnvConfig(HilSerlRobotEnvConfig):
             TeleopEvents.RERECORD_EPISODE: keyboard.Key.left
         }
 
+        if self.benchmark:
+            self.processor.hooks.time_env_processor = True
+            self.processor.hooks.time_action_processor = True
+
 
 @dataclass
-@DatasetRecordConfig.register_subclass("aloha_bimanual")
-class AlohaBimanualDatasetConfig(DatasetRecordConfig):
+@EnvConfig.register_subclass("aloha_bimanual_safe")
+class AlohaBimanualSafeEnvConfig(AlohaBimanualEnvConfig):
+    max_relative_target: float = 0.25
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        for name in self.robot:
+            self.robot[name].max_relative_target = self.max_relative_target
+
+        for name in self.teleop:
+            self.teleop[name].max_relative_target = self.max_relative_target
+
+
+@dataclass
+@DatasetRecordConfig.register_subclass("aloha_test")
+class AlohaTestConfig(DatasetRecordConfig):
     repo_id: str = "test/aloha_bimanual"
     single_task: str = "Fold the hoodie"
     root: str = "/media/nvme1/jstranghoener/lerobot/data/test/aloha_bimanual"
 
+    def __post__init(self):
+        self.root += time.strftime("%Y%m%d-%H%M%S")

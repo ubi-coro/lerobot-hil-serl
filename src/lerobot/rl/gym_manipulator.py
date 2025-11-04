@@ -117,36 +117,42 @@ def step_env_and_process_transition(
     Returns:
         Processed transition with updated state.
     """
+    exit_early = False
 
-    # Create action transition
-    transition = create_transition(action=action, info=info)
-    processed_action_transition = action_processor(transition)
-    processed_action = processed_action_transition[TransitionKey.ACTION]
+    # Process action
+    action_transition = create_transition(action=action, info=info)
+    processed_action_transition = action_processor(action_transition)
 
-    obs, reward, terminated, truncated, info = env.step(processed_action)
+    if processed_action_transition.get(TransitionKey.DONE, False):
+        exit_early = True
+        return processed_action_transition, exit_early
 
-    reward = reward + processed_action_transition[TransitionKey.REWARD]
-    terminated = terminated or processed_action_transition[TransitionKey.DONE]
-    truncated = truncated or processed_action_transition[TransitionKey.TRUNCATED]
+    # Step env
+    obs, reward, terminated, truncated, info = env.step(processed_action_transition[TransitionKey.ACTION])
+
+    # Read out info and possibly overwrite action
     complementary_data = processed_action_transition[TransitionKey.COMPLEMENTARY_DATA].copy()
     info.update(processed_action_transition[TransitionKey.INFO].copy())
 
-    if info.get(TeleopEvents.IS_INTERVENTION, False):
-        action_to_record = complementary_data.get(TELEOP_ACTION_KEY, transition[TransitionKey.ACTION])
+    # Determine which action to store
+    if info.get(TeleopEvents.IS_INTERVENTION, False) and TELEOP_ACTION_KEY in complementary_data:
+        action_to_record = complementary_data[TELEOP_ACTION_KEY]
     else:
-        action_to_record = transition[TransitionKey.ACTION]
+        action_to_record = action_transition[TransitionKey.ACTION]
 
+    # Create and process transition
     new_transition = create_transition(
         observation=obs,
         action=action_to_record,
-        reward=reward,
-        done=terminated,
-        truncated=truncated,
+        reward=reward + processed_action_transition[TransitionKey.REWARD],
+        done=terminated or processed_action_transition[TransitionKey.DONE],
+        truncated=truncated or processed_action_transition[TransitionKey.TRUNCATED],
         info=info,
         complementary_data=complementary_data,
     )
     new_transition = env_processor(new_transition)
-    return new_transition
+
+    return new_transition, exit_early
 
 
 def control_loop(

@@ -109,7 +109,6 @@ def apply_calibration(new_state: Tensor, num_robots: int = 1) -> Tensor:
             ticks += homing_offset
             deg = ticks / (RESOLUTION // 2) * HALF_TURN_DEGREE
             old_state.append(deg)
-
     return torch.tensor(old_state, dtype=dtype, device=device)
 
 

@@ -2,9 +2,15 @@ import types
 import typing
 from typing import get_origin, get_args
 
+from examples.lekiwi.evaluate import policy
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import PolicyFeature, FeatureType, PipelineFeatureType
 from lerobot.datasets.pipeline_features import create_initial_features, strip_prefix, PREFIXES_TO_STRIP
+from lerobot.envs import EnvConfig
 from lerobot.envs.robot_env import RobotEnv
+from lerobot.policies.factory import make_policy
+from lerobot.policies.sac.configuration_sac import SACConfig, PolicyConfig
+from lerobot.policies.sac.modeling_sac import SACPolicy
 from lerobot.processor import DataProcessorPipeline
 from lerobot.utils.constants import ACTION, OBS_STATE, OBS_IMAGES, REWARD, DONE
 
@@ -46,6 +52,20 @@ def get_pipeline_dataset_features(
             }
 
     return features
+
+
+def make_rl_policy(policy_cfg: PreTrainedConfig | None, env_cfg: EnvConfig):
+    if policy_cfg is None:
+        return None
+
+    policy = make_policy(policy_cfg, env_cfg=env_cfg)
+
+    if isinstance(policy, SACPolicy):
+        raise ValueError("Only sac supported atm")
+
+    return policy
+
+
 
 
 def is_union_with_dict(field_type) -> bool:
