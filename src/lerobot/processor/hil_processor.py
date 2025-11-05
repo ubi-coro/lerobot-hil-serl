@@ -602,7 +602,6 @@ class InterventionActionProcessorStep(ProcessorStep):
         self._intervention_occurred = self._intervention_occurred  | is_intervention
         if self._intervention_occurred and not is_intervention:
             info[TeleopEvents.INTERVENTION_COMPLETED] = True
-            terminate_episode = True
 
         # Override action if intervention is active
         if is_intervention and teleop_action_dict is not None:

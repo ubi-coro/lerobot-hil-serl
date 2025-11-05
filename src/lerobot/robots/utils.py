@@ -13,10 +13,7 @@
 # limitations under the License.
 
 import logging
-from datetime import time
-from functools import cached_property
 from pprint import pformat
-from typing import Any, Type
 
 from lerobot.robots import RobotConfig
 
@@ -77,7 +74,10 @@ def get_robot_cls_from_config(config: RobotConfig) -> Type[Robot]:
 
         return TF_UR
     else:
-        raise ValueError(config.type)
+        try:
+            return cast(Robot, make_device_from_device_class(config))
+        except Exception as e:
+            raise ValueError(f"Error creating robot with config {config}: {e}") from e
 
 
 # TODO(pepijn): Move to pipeline step to make sure we don't have to do this in the robot code and send action to robot is clean for use in dataset

@@ -102,30 +102,29 @@ def step_env_and_process_transition(
     action: torch.Tensor,
     env_processor: DataProcessorPipeline[EnvTransition, EnvTransition],
     action_processor: DataProcessorPipeline[EnvTransition, EnvTransition],
-    info: {}
+    info: {},
+    exit_early_on_intervention_end: bool = False
 ) -> EnvTransition:
     """
     Execute one step with processor pipeline.
 
     Args:
         env: The robot environment
-        transition: Current transition state
         action: Action to execute
         env_processor: Environment processor
         action_processor: Action processor
+        info: info dict
+        exit_early_on_intervention_end: whether to abort early when an intervention ends
 
     Returns:
         Processed transition with updated state.
     """
-    exit_early = False
-
     # Process action
     action_transition = create_transition(action=action, info=info)
     processed_action_transition = action_processor(action_transition)
 
-    if processed_action_transition.get(TransitionKey.DONE, False):
-        exit_early = True
-        return processed_action_transition, exit_early
+    if exit_early_on_intervention_end and processed_action_transition[TransitionKey.INFO].get(TeleopEvents.INTERVENTION_COMPLETED, False):
+        return processed_action_transition
 
     # Step env
     obs, reward, terminated, truncated, info = env.step(processed_action_transition[TransitionKey.ACTION])
@@ -152,7 +151,7 @@ def step_env_and_process_transition(
     )
     new_transition = env_processor(new_transition)
 
-    return new_transition, exit_early
+    return new_transition
 
 
 def control_loop(
@@ -294,7 +293,7 @@ def control_loop(
             episode_idx += 1
 
             if dataset is not None:
-                if transition[TransitionKey.INFO].get("rerecord_episode", False):
+                if transition[TransitionKey.INFO].get(TeleopEvents.RERECORD_EPISODE, False):
                     logging.info(f"Re-recording episode {episode_idx}")
                     dataset.clear_episode_buffer()
                     episode_idx -= 1

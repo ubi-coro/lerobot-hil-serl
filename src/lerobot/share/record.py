@@ -240,28 +240,28 @@ def record_loop(
             # Dummy action, expected to be overwritten by teleop action
             action = torch.tensor([0.0] * action_dim, dtype=torch.float32)
 
-        new_transition, exit_early = step_env_and_process_transition(
+        new_transition = step_env_and_process_transition(
             env=env,
             action=action,
             env_processor=env_processor,
             action_processor=action_processor,
-            info=info
+            info=info,
+            exit_early_on_intervention_end=True  # we want skip stepping the environment if an intervention ends
         )
-
-        if exit_early:
-            processed_action_transition = new_transition
-            info.update(processed_action_transition[TransitionKey.INFO].copy())
-            episode_time = time.perf_counter() - episode_start_time
-            logging.info(
-                f"Intervention ended after {episode_step} steps in {episode_time:.1f}s with reward {transition[TransitionKey.REWARD]}"
-            )
-            return info
 
         action = new_transition[TransitionKey.ACTION]
         reward = new_transition[TransitionKey.REWARD]
         done = new_transition.get(TransitionKey.DONE, False)
         truncated = new_transition.get(TransitionKey.TRUNCATED, False)
         info = new_transition.get(TransitionKey.INFO, {})
+
+        # exit on episode end
+        if info.get(TeleopEvents.INTERVENTION_COMPLETED, False):
+            episode_time = time.perf_counter() - episode_start_time
+            logging.info(
+                f"Intervention ended after {episode_step} steps in {episode_time:.1f}s with reward {transition[TransitionKey.REWARD]}"
+            )
+            return info
 
         # (8) Store transition. When interactive, only store frames on interventions
         # store o_t, a_t, r_t+1

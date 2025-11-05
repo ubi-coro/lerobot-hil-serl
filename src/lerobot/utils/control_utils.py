@@ -33,6 +33,7 @@ from einops import einops
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import DEFAULT_FEATURES
 from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.policies.utils import prepare_observation_for_inference
 from lerobot.processor import PolicyAction, PolicyProcessorPipeline
 from lerobot.robots import Robot
 
@@ -87,7 +88,6 @@ def predict_action(
 
     Args:
         observation: A dictionary of NumPy arrays representing the robot's current observation.
-                     For images, the format is expected to be (H, W, C).
         policy: The `PreTrainedPolicy` model to use for action prediction.
         device: The `torch.device` (e.g., 'cuda' or 'cpu') to run inference on.
         preprocessor: The `PolicyProcessorPipeline` for preprocessing observations.
@@ -99,15 +99,22 @@ def predict_action(
     Returns:
         A `torch.Tensor` containing the predicted action, ready for the robot.
     """
-    t0 = time.perf_counter()
     observation = copy(observation)
     with (
         torch.inference_mode(),
         torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
     ):
+        # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
+        #observation = prepare_observation_for_inference(observation, device, task, robot_type)
+
         for name in observation:
             if isinstance(observation[name], str):
                 continue
+
+            #observation[name] = torch.from_numpy(observation[name])
+            #if "image" in name:
+            #    observation[name] = observation[name].type(torch.float32) / 255
+            #    observation[name] = observation[name].permute(2, 0, 1).contiguous()
 
             observation[name] = observation[name].to(device)
             observation[name] = observation[name].unsqueeze(0)

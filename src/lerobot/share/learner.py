@@ -49,6 +49,7 @@ import os
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
+from copy import copy
 from pathlib import Path
 from pprint import pformat
 
@@ -70,6 +71,7 @@ from lerobot.rl.buffer import ReplayBuffer, concatenate_batch_transitions
 from lerobot.rl.process import ProcessSignalHandler
 from lerobot.rl.wandb_utils import WandBLogger
 from lerobot.robots import so100_follower  # noqa: F401
+from lerobot.share.disk_buffer import OnDiskReplayBuffer
 from lerobot.teleoperators import gamepad, so101_leader  # noqa: F401
 from lerobot.teleoperators.utils import TeleopEvents
 from lerobot.transport import services_pb2_grpc
@@ -330,7 +332,7 @@ def add_actor_information_and_train(
     batch_size = cfg.batch_size
     offline_replay_buffer = None
 
-    if cfg.dataset is not None:
+    if cfg.dataset.root is not None:
         offline_replay_buffer = initialize_offline_replay_buffer(
             cfg=cfg,
             device=device,
@@ -339,12 +341,11 @@ def add_actor_information_and_train(
         batch_size: int = batch_size // 2  # We will sample from both replay buffer
 
     logging.info("Starting learner thread")
-    interaction_message = None
     optimization_step = resume_optimization_step if resume_optimization_step is not None else 0
     interaction_step_shift = resume_interaction_step if resume_interaction_step is not None else 0
 
     dataset_repo_id = None
-    if cfg.dataset is not None:
+    if cfg.dataset.repo_id is not None:
         dataset_repo_id = cfg.dataset.repo_id
 
     # Initialize iterators
@@ -934,7 +935,7 @@ def log_training_info(cfg: TrainRLServerPipelineConfig, policy: nn.Module) -> No
 
 def initialize_replay_buffer(
     cfg: TrainRLServerPipelineConfig, device: str, storage_device: str
-) -> ReplayBuffer:
+) -> ReplayBuffer | OnDiskReplayBuffer:
     """
     Initialize a replay buffer, either empty or from a dataset if resuming.
 
@@ -947,8 +948,22 @@ def initialize_replay_buffer(
         ReplayBuffer: Initialized replay buffer
     """
 
-    if cfg.dataset.in_memory:
-        return OnDiskReplayBuffer(cfg, device)
+    if not cfg.dataset.in_memory:
+        ds_cfg = copy(cfg.dataset)
+
+        # overwrite root for online transitions
+        ds_cfg.repo_id = cfg.output_dir.split(".")[-1] + "/online_dataset"
+        ds_cfg.root = os.path.join(cfg.output_dir, "online_dataset")
+
+        return OnDiskReplayBuffer(
+            ds_cfg=ds_cfg,
+            policy_cfg=cfg.policy,
+            fps=cfg.env.fps,
+            robot_type=cfg.env.type,
+            device=device,
+            num_workers=cfg.num_workers,
+            resume=cfg.resume  # we want to error out if the dataset exists unintentionally
+        )
 
     else:
         if not cfg.resume:
@@ -965,9 +980,7 @@ def initialize_replay_buffer(
             dataset_path = os.path.join(cfg.output_dir, "dataset")
 
             # NOTE: In RL is possible to not have a dataset.
-            repo_id = None
-            if cfg.dataset is not None:
-                repo_id = cfg.dataset.repo_id
+            repo_id = cfg.dataset.repo_id
             dataset = LeRobotDataset(
                 repo_id=repo_id,
                 root=dataset_path,
@@ -981,41 +994,11 @@ def initialize_replay_buffer(
                 optimize_memory=True,
             )
 
-
-    if not cfg.resume:
-
-
-
-        else:
-            # Create an empty LeRobotDataset
-            dataset = LeRobotDataset.create(
-                repo_id=repo_id,
-                fps=fps,
-                root=root,
-                robot_type=None,
-                features=features,
-                use_videos=True,
-            )
-            # pass to buffer
-
-
-
-
-    if cfg.dataset.in_memory:
-
-    else:
-        return OnDiskReplayBuffer(
-            cfg=cfg,
-            dataset=dataset
-        )
-
-
-
 def initialize_offline_replay_buffer(
     cfg: TrainRLServerPipelineConfig,
     device: str,
     storage_device: str,
-) -> ReplayBuffer:
+) -> ReplayBuffer | OnDiskReplayBuffer:
     """
     Initialize an offline replay buffer from a dataset.
 
@@ -1027,27 +1010,41 @@ def initialize_offline_replay_buffer(
     Returns:
         ReplayBuffer: Initialized offline replay buffer
     """
-    if not cfg.resume:
-        logging.info("make_dataset offline buffer")
-        offline_dataset = make_dataset(cfg)
-    else:
-        logging.info("load offline dataset")
-        dataset_offline_path = os.path.join(cfg.output_dir, "dataset_offline")
-        offline_dataset = LeRobotDataset(
-            repo_id=cfg.dataset.repo_id,
-            root=dataset_offline_path,
+    if not cfg.dataset.in_memory:
+        ds_cfg = copy(cfg.dataset)
+
+        return OnDiskReplayBuffer(
+            ds_cfg=ds_cfg,
+            policy_cfg=cfg.policy,
+            fps=cfg.env.fps,
+            robot_type=cfg.env.type,
+            device=device,
+            num_workers=cfg.num_workers,
+            resume=True
         )
 
-    logging.info("Convert to a offline replay buffer")
-    offline_replay_buffer = ReplayBuffer.from_lerobot_dataset(
-        offline_dataset,
-        device=device,
-        state_keys=cfg.policy.input_features.keys(),
-        storage_device=storage_device,
-        optimize_memory=True,
-        capacity=cfg.policy.offline_buffer_capacity,
-    )
-    return offline_replay_buffer
+    else:
+        if not cfg.resume:
+            logging.info("make_dataset offline buffer")
+            offline_dataset = make_dataset(cfg)
+        else:
+            logging.info("load offline dataset")
+            dataset_offline_path = os.path.join(cfg.output_dir, "dataset_offline")
+            offline_dataset = LeRobotDataset(
+                repo_id=cfg.dataset.repo_id,
+                root=dataset_offline_path,
+            )
+
+        logging.info("Convert to a offline replay buffer")
+        offline_replay_buffer = ReplayBuffer.from_lerobot_dataset(
+            offline_dataset,
+            device=device,
+            state_keys=cfg.policy.input_features.keys(),
+            storage_device=storage_device,
+            optimize_memory=True,
+            capacity=cfg.policy.offline_buffer_capacity,
+        )
+        return offline_replay_buffer
 
 
 # Utilities/Helpers functions
@@ -1184,6 +1181,7 @@ def process_transitions(
         transition_list = transition_queue.get()
         transition_list = bytes_to_transitions(buffer=transition_list)
 
+        intervention_occured = False
         for transition in transition_list:
             transition = move_transition_to_device(transition=transition, device=device)
 
@@ -1199,11 +1197,18 @@ def process_transitions(
             replay_buffer.add(**transition)
 
             # Add to offline buffer if it's an intervention
-            if dataset_repo_id is not None and transition.get("complementary_info", {}).get(
-                TeleopEvents.IS_INTERVENTION
-            ):
+            if dataset_repo_id is not None and transition.get("complementary_info", {}).get(TeleopEvents.IS_INTERVENTION):
+                intervention_occured = True
                 offline_replay_buffer.add(**transition)
 
+            elif intervention_occured:
+                # we reached the end of an intervention segment. This should trigger an episode end on the underlying dataset
+                # reminder: we dont need to call this again at the end, since the transition is either
+                # a) the last one, which has a done or truncated flag
+                # b) not the last one, ie a non-intervention transition is the last one, which would trigger a write too
+                if hasattr(offline_replay_buffer, "save_episode"):
+                    offline_replay_buffer.save_episode()
+                intervention_occured = False
 
 def process_interaction_messages(
     interaction_message_queue: Queue,
