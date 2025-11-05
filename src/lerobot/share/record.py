@@ -321,19 +321,18 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     if cfg.display_data:
         init_rerun(session_name="recording")
 
+    # make env
     env, env_processor, action_processor = cfg.env.make(device="cpu" if cfg.policy is None else cfg.policy.device)
-
-    dataset_features = get_pipeline_dataset_features(env, env_processor, action_dim=cfg.env.action_dim, use_video=cfg.dataset.video)
 
     # handle timing
     reset_cfg: ResetConfig = cfg.env.processor.reset
-
     if reset_cfg.reset_time_s is not None:
         teleop_on_reset = True
         reset_cfg.reset_time_s = cfg.dataset.reset_time_s
     else:
         teleop_on_reset = reset_cfg.teleop_on_reset
 
+    # make dataset
     if cfg.resume:
         dataset = LeRobotDataset(
             cfg.dataset.repo_id,
@@ -346,7 +345,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 num_processes=cfg.dataset.num_image_writer_processes,
                 num_threads=cfg.dataset.num_image_writer_threads_per_camera * len(env.cameras),
             )
-        sanity_check_dataset_robot_compatibility(dataset, cfg.env.type, cfg.dataset.fps, dataset_features)
+        sanity_check_dataset_robot_compatibility(dataset, cfg.env.type, cfg.dataset.fps, cfg.env.features)
     else:
         # Create empty dataset or load existing saved episodes
         sanity_check_dataset_name(cfg.dataset.repo_id, cfg.policy)
@@ -355,7 +354,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             cfg.dataset.fps,
             root=cfg.dataset.root,
             robot_type=cfg.env.type,
-            features=dataset_features,
+            features=cfg.env.features,
             use_videos=cfg.dataset.video,
             image_writer_processes=cfg.dataset.num_image_writer_processes,
             image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * len(cfg.env.cameras),

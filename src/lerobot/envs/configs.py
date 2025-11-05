@@ -354,6 +354,9 @@ class HilSerlRobotEnvConfig(EnvConfig):
 
     name: str = "real_robot"
 
+    def __post_init__(self):
+        self.features =
+
     @cached_property
     def action_dim(self):
         robot_dict = self.robot if isinstance(self.robot, dict) else {DEFAULT_ROBOT_NAME: self.robot}

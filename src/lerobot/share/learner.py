@@ -946,33 +946,69 @@ def initialize_replay_buffer(
     Returns:
         ReplayBuffer: Initialized replay buffer
     """
+
+    if cfg.dataset.in_memory:
+        return OnDiskReplayBuffer(cfg, device)
+
+    else:
+        if not cfg.resume:
+            return ReplayBuffer(
+                capacity=cfg.policy.online_buffer_capacity,
+                device=device,
+                state_keys=cfg.policy.input_features.keys(),
+                storage_device=storage_device,
+                optimize_memory=True,
+            )
+
+        else:
+            logging.info("Resume training load the online dataset")
+            dataset_path = os.path.join(cfg.output_dir, "dataset")
+
+            # NOTE: In RL is possible to not have a dataset.
+            repo_id = None
+            if cfg.dataset is not None:
+                repo_id = cfg.dataset.repo_id
+            dataset = LeRobotDataset(
+                repo_id=repo_id,
+                root=dataset_path,
+            )
+
+            return ReplayBuffer.from_lerobot_dataset(
+                lerobot_dataset=dataset,
+                capacity=cfg.policy.online_buffer_capacity,
+                device=device,
+                state_keys=cfg.policy.input_features.keys(),
+                optimize_memory=True,
+            )
+
+
     if not cfg.resume:
-        return ReplayBuffer(
-            capacity=cfg.policy.online_buffer_capacity,
-            device=device,
-            state_keys=cfg.policy.input_features.keys(),
-            storage_device=storage_device,
-            optimize_memory=True,
+
+
+
+        else:
+            # Create an empty LeRobotDataset
+            dataset = LeRobotDataset.create(
+                repo_id=repo_id,
+                fps=fps,
+                root=root,
+                robot_type=None,
+                features=features,
+                use_videos=True,
+            )
+            # pass to buffer
+
+
+
+
+    if cfg.dataset.in_memory:
+
+    else:
+        return OnDiskReplayBuffer(
+            cfg=cfg,
+            dataset=dataset
         )
 
-    logging.info("Resume training load the online dataset")
-    dataset_path = os.path.join(cfg.output_dir, "dataset")
-
-    # NOTE: In RL is possible to not have a dataset.
-    repo_id = None
-    if cfg.dataset is not None:
-        repo_id = cfg.dataset.repo_id
-    dataset = LeRobotDataset(
-        repo_id=repo_id,
-        root=dataset_path,
-    )
-    return ReplayBuffer.from_lerobot_dataset(
-        lerobot_dataset=dataset,
-        capacity=cfg.policy.online_buffer_capacity,
-        device=device,
-        state_keys=cfg.policy.input_features.keys(),
-        optimize_memory=True,
-    )
 
 
 def initialize_offline_replay_buffer(

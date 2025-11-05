@@ -350,9 +350,8 @@ def act_with_policy(
             episode_intervention_steps += 1
 
         complementary_info = {
-            "discrete_penalty": torch.tensor(
-                [new_transition[TransitionKey.COMPLEMENTARY_DATA].get("discrete_penalty", 0.0)]
-            ),
+            TeleopEvents.IS_INTERVENTION: info.get(TeleopEvents.IS_INTERVENTION, False),
+            "discrete_penalty": torch.tensor([new_transition[TransitionKey.COMPLEMENTARY_DATA].get("discrete_penalty", 0.0)])
         }
 
         # Create transition for learner (convert to old format)
@@ -388,8 +387,8 @@ def act_with_policy(
 
             # Check complementary info
             episode_info = {"Episodic reward": sum_reward_episode}
-            if "success" in info:
-                episode_info["Success"] = int(info["success"])
+            if TeleopEvents.SUCCESS in info:
+                episode_info[TeleopEvents.SUCCESS] = int(info[TeleopEvents.SUCCESS])
             if "first_success_step" in info:
                 episode_info["Cycle Time [s]"] = int(info["first_success_step"]) / cfg.env.fps
             else:
