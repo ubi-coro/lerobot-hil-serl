@@ -304,19 +304,20 @@ def act_with_policy(
         # Time policy inference and check if it meets FPS requirement
         with policy_timer:
             # Extract observation from transition for policy
-            action = predict_action(
+            action, inference_info = predict_action(
                 observation=observation,
                 policy=policy,
                 device=get_safe_torch_device(device),
                 preprocessor=preprocessor,
                 postprocessor=postprocessor,
+                use_amp=policy.config.use_amp
             )
         policy_fps = policy_timer.fps_last
 
         log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
 
         # Use the new step function
-        new_transition, _ = step_env_and_process_transition(
+        new_transition = step_env_and_process_transition(
             env=env,
             action=action,
             env_processor=env_processor,
@@ -346,7 +347,7 @@ def act_with_policy(
             episode_intervention_steps += 1
 
         complementary_info = {
-            TeleopEvents.IS_INTERVENTION: info.get(TeleopEvents.IS_INTERVENTION, False),
+            TeleopEvents.IS_INTERVENTION.value: info.get(TeleopEvents.IS_INTERVENTION, False),
             "discrete_penalty": torch.tensor([new_transition[TransitionKey.COMPLEMENTARY_DATA].get("discrete_penalty", 0.0)])
         }
 

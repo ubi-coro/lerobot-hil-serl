@@ -20,6 +20,8 @@ class MockEnvConfig(HilSerlRobotEnvConfig):
     use_aloha_cameras: bool = False
 
     def __post_init__(self):
+        self.fps = 10
+
         self.robot = {
             "left": MockRobotConfig(n_motors=6),
             "right": MockRobotConfig(n_motors=6)
@@ -59,8 +61,8 @@ class MockEnvConfig(HilSerlRobotEnvConfig):
                 )
             }
 
-        self.processor.hooks.time_action_processor = True
-        self.processor.hooks.time_env_processor = True
+        self.processor.hooks.time_action_processor = False
+        self.processor.hooks.time_env_processor = False
         self.processor.hooks.log_every = 1
         self.processor.gripper.use_gripper = False
         self.processor.reset.terminate_on_success = True

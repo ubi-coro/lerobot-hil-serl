@@ -444,7 +444,7 @@ class SACPolicy(
         # calculate temperature loss
         with torch.no_grad():
             dist = self.actor(observations, observation_features)
-        temperature_loss = (-self.log_alpha.exp() * (dist.log_prob(dist.rsample()) + self.config.target_entropy)).mean()
+        temperature_loss = (-self.log_alpha.exp() * (dist.log_prob(dist.rsample()) + self.target_entropy)).mean()
         return temperature_loss
 
     def compute_loss_bc(
@@ -785,6 +785,9 @@ class SACObservationEncoder(nn.Module):
         Returns:
             Dictionary mapping image keys to their corresponding encoded features
         """
+        if not self.image_keys:
+            return {}
+
         batched = torch.cat([obs[k] for k in self.image_keys], dim=0)
         out = self.image_encoder(batched)
         chunks = torch.chunk(out, len(self.image_keys), dim=0)
@@ -939,7 +942,7 @@ class CriticEnsemble(nn.Module):
     ) -> torch.Tensor:
         device = get_device_from_parameters(self)
         # Move each tensor in observations to device
-        observations = {k: v.to(device) for k, v in observations.items()}
+        observations = {k: v.to(device) for k, v in observations.items() if isinstance(v, torch.Tensor)}
 
         obs_enc = self.encoder(observations, cache=observation_features)
         actions = actions.to(device)

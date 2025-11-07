@@ -454,7 +454,7 @@ def add_actor_information_and_train(
         # Sample for the last update in the UTD ratio
         batch = next(online_iterator)
 
-        if dataset_repo_id is not None:
+        if cfg.dataset.root is not None:
             batch_offline = next(offline_iterator)
             batch = concatenate_batch_transitions(
                 left_batch_transitions=batch, right_batch_transition=batch_offline
@@ -1197,7 +1197,7 @@ def process_transitions(
             replay_buffer.add(**transition)
 
             # Add to offline buffer if it's an intervention
-            if dataset_repo_id is not None and transition.get("complementary_info", {}).get(TeleopEvents.IS_INTERVENTION):
+            if dataset_repo_id is not None and transition.get("complementary_info", {}).get(TeleopEvents.IS_INTERVENTION.value):
                 intervention_occured = True
                 offline_replay_buffer.add(**transition)
 

@@ -176,7 +176,6 @@ def record_loop(
     robot_type: str| None = None,
     display_data: bool = False,
     device: str = "cuda",
-    use_amp: bool = False,
     interactive: bool = False
 ):
     if control_time_s is None:
@@ -230,7 +229,7 @@ def record_loop(
                 device=get_safe_torch_device(device),
                 preprocessor=preprocessor,
                 postprocessor=postprocessor,
-                use_amp=use_amp,
+                use_amp=policy.config.use_amp,
                 task=single_task,
                 robot_type=robot_type
             )
