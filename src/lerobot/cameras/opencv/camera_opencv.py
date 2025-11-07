@@ -117,6 +117,7 @@ class OpenCVCamera(Camera):
         self.fps = config.fps
         self.color_mode = config.color_mode
         self.warmup_s = config.warmup_s
+        self.focus = config.focus
 
         self.videocapture: cv2.VideoCapture | None = None
 
@@ -175,8 +176,9 @@ class OpenCVCamera(Camera):
         if warmup:
             start_time = time.time()
             while time.time() - start_time < self.warmup_s:
-                self.read()
+                self.read(raise_on_error=False)
                 time.sleep(0.1)
+            self.read(raise_on_error=True)
 
         logger.info(f"{self} connected.")
 
@@ -207,6 +209,7 @@ class OpenCVCamera(Camera):
         if self.videocapture is None:
             raise DeviceNotConnectedError(f"{self} videocapture is not initialized")
 
+        self.videocapture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         default_width = int(round(self.videocapture.get(cv2.CAP_PROP_FRAME_WIDTH)))
         default_height = int(round(self.videocapture.get(cv2.CAP_PROP_FRAME_HEIGHT)))
 
@@ -341,7 +344,7 @@ class OpenCVCamera(Camera):
 
         return found_cameras_info
 
-    def read(self, color_mode: ColorMode | None = None) -> NDArray[Any]:
+    def read(self, color_mode: ColorMode | None = None, raise_on_error: bool = True) -> NDArray[Any]:
         """
         Reads a single frame synchronously from the camera.
 
@@ -375,7 +378,10 @@ class OpenCVCamera(Camera):
         ret, frame = self.videocapture.read()
 
         if not ret or frame is None:
-            raise RuntimeError(f"{self} read failed (status={ret}).")
+            if raise_on_error:
+                raise RuntimeError(f"{self} read failed (status={ret}).")
+            else:
+                return frame
 
         processed_frame = self._postprocess_image(frame, color_mode)
 

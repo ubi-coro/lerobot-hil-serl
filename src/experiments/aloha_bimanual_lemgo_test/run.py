@@ -1,5 +1,5 @@
-from experiments.aloha_bimanual_test.config import AlohaSingleDatasetConfig
-from experiments.aloha_bimanual_test.config import AlohaSingleEnvConfig
+from experiments.aloha_bimanual.config import AlohaSingleDatasetConfig
+from experiments.aloha_bimanual.config import AlohaSingleEnvConfig
 
 
 if __name__ == "__main__":

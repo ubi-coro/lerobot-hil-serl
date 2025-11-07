@@ -24,7 +24,7 @@ from huggingface_hub.errors import HfHubHTTPError
 
 from lerobot import envs
 from lerobot.configs import parser
-from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig
+from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig, DatasetBufferConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.optim import OptimizerConfig
 from lerobot.optim.schedulers import LRSchedulerConfig
@@ -192,4 +192,4 @@ class TrainPipelineConfig(HubMixin):
 class TrainRLServerPipelineConfig(TrainPipelineConfig):
     # NOTE: In RL, we don't need an offline dataset
     # TODO: Make `TrainPipelineConfig.dataset` optional
-    dataset: DatasetBufferConfig = DatasetBufferConfig()  # type: ignore[assignment] # because the parent class has made it's type non-optional
+    dataset: DatasetBufferConfig  # type: ignore[assignment] # because the parent class has made it's type non-optional

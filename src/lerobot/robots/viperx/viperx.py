@@ -123,8 +123,11 @@ class ViperX(Robot):
         self.bus.enable_torque()
 
         if self.calibration:
-            with self.bus.torque_disabled():
+            try:
                 self.bus.write_calibration(self.calibration)
+            except RuntimeError:
+                with self.bus.torque_disabled():
+                    self.bus.write_calibration(self.calibration)
 
         if not self.is_calibrated and calibrate:
             self.calibrate()
@@ -143,23 +146,23 @@ class ViperX(Robot):
     def calibrate(self) -> None:
         with self.bus.torque_disabled():
             self.calibration = {
-                "waist": MotorCalibration(id=1, drive_mode=0, homing_offset=0, range_min=0, range_max=4095),
-                "shoulder": MotorCalibration(id=2, drive_mode=1, homing_offset=0, range_min=0, range_max=4095),
+                "waist": MotorCalibration(id=1, drive_mode=4, homing_offset=0, range_min=0, range_max=4095),
+                "shoulder": MotorCalibration(id=2, drive_mode=5, homing_offset=0, range_min=0, range_max=4095),
                 "shoulder_shadow": MotorCalibration(
-                    id=3, drive_mode=0, homing_offset=0, range_min=0, range_max=4095
+                    id=3, drive_mode=4, homing_offset=0, range_min=0, range_max=4095
                 ),
                 "elbow": MotorCalibration(id=4, drive_mode=1, homing_offset=0, range_min=0, range_max=4095),
                 "elbow_shadow": MotorCalibration(
-                    id=5, drive_mode=0, homing_offset=0, range_min=0, range_max=4095
+                    id=5, drive_mode=4, homing_offset=0, range_min=0, range_max=4095
                 ),
                 "forearm_roll": MotorCalibration(
-                    id=6, drive_mode=0, homing_offset=0, range_min=0, range_max=4095
+                    id=6, drive_mode=4, homing_offset=0, range_min=0, range_max=4095
                 ),
-                "wrist_angle": MotorCalibration(id=7, drive_mode=1, homing_offset=0, range_min=0, range_max=4095),
+                "wrist_angle": MotorCalibration(id=7, drive_mode=5, homing_offset=0, range_min=0, range_max=4095),
                 "wrist_rotate": MotorCalibration(
-                    id=8, drive_mode=0, homing_offset=0, range_min=0, range_max=4095
+                    id=8, drive_mode=4, homing_offset=0, range_min=0, range_max=4095
                 ),
-                "gripper": MotorCalibration(id=9, drive_mode=0, homing_offset=0, range_min=0, range_max=4095),
+                "gripper": MotorCalibration(id=9, drive_mode=4, homing_offset=0, range_min=0, range_max=4095),
             }
 
             print(
@@ -175,33 +178,46 @@ class ViperX(Robot):
             logger.info(f"Calibration saved to {self.calibration_fpath}")
 
     def configure(self) -> None:
+        """
+        Read current motor registers (with torque ON). If all match our desired
+        configuration, skip the torque-off writes. Otherwise, torque-off and apply.
+        """
+        # --- 1) Read current + compute desired
+        current = self._read_current_motor_settings()
+        desired = self._desired_motor_settings()
+
+        if self._settings_match(current, desired):
+            logger.info(f"{self}: motor settings already match; skipping torque-off configuration.")
+            return
+
+        logger.info(f"{self}: applying motor configuration (requires torque-off).")
         with self.bus.torque_disabled():
-            self.bus.configure_motors()
+            # Return delay time for all motors
+            self.bus.configure_motors(return_delay_time=0)
 
-            # Set secondary/shadow ID for shoulder and elbow. These joints have two motors.
-            # As a result, if only one of them is required to move to a certain position,
-            # the other will follow. This is to avoid breaking the motors.
-            self.bus.write("Secondary_ID", "shoulder_shadow", 2)
-            self.bus.write("Secondary_ID", "elbow_shadow", 4)
+            # Secondary IDs for shadow motors
+            if "shoulder_shadow" in self.bus.motors:
+                self.bus.write("Secondary_ID", "shoulder_shadow", 2)
+            if "elbow_shadow" in self.bus.motors:
+                self.bus.write("Secondary_ID", "elbow_shadow", 4)
 
-            # Set a velocity limit of 131 as advised by Trossen Robotics
-            # TODO(aliberts): remove as it's actually useless in position control
-            # self.bus.write("Velocity_Limit", 131)
-
+            # Drive_Mode: set bit2 (time-based profiles) while preserving other bits
             for motor in self.bus.motors:
+                dm = self.bus.read("Drive_Mode", motor)
+                dm |= (1 << 2)
+                self.bus.write("Drive_Mode", motor, dm)
 
-                # Set the drive mode to time-based profile to set moving time via velocity profiles
-                drive_mode = self.bus.read('Drive_Mode', motor)
-                drive_mode |= 1 << 2  # set third bit to enable time-based profiles
-                self.bus.write('Drive_Mode', motor, drive_mode)
-
+            # Operating Mode
+            for motor in self.bus.motors:
                 if motor != "gripper":
                     self.bus.write("Operating_Mode", motor, OperatingMode.EXTENDED_POSITION.value)
                 else:
                     self.bus.write("Operating_Mode", "gripper", OperatingMode.CURRENT_POSITION.value)
 
-                # Set time profile after setting operation mode
-                self.bus.write("Profile_Velocity", motor, int(self.config.moving_time * 1000))
+            # Profile velocity (ms)
+            pv = int(self.config.moving_time * 1000)
+            for motor in self.bus.motors:
+                self.bus.write("Profile_Velocity", motor, pv)
 
     def get_observation(self) -> dict[str, Any]:
         """The returned observations do not have a batch dimension."""
@@ -271,3 +287,102 @@ class ViperX(Robot):
             cam.disconnect()
 
         logger.info(f"{self} disconnected.")
+
+    def _read_current_motor_settings(self) -> dict[str, dict[str, int]]:
+        """
+        Snapshot current settings while torque is ON.
+        Returns a dict: {setting_name: {motor_name: value}} for fast comparisons.
+        """
+        snap: dict[str, dict[str, int]] = {}
+
+        # Common per-motor regs
+        for reg in ("Return_Delay_Time", "Drive_Mode", "Operating_Mode", "Profile_Velocity"):
+            snap[reg] = self.bus.sync_read(reg)
+
+        # Only relevant motors for Secondary_ID
+        sec = {}
+        if "shoulder_shadow" in self.bus.motors:
+            sec["shoulder_shadow"] = self.bus.read("Secondary_ID", "shoulder_shadow")
+        if "elbow_shadow" in self.bus.motors:
+            sec["elbow_shadow"] = self.bus.read("Secondary_ID", "elbow_shadow")
+        snap["Secondary_ID"] = sec
+
+        return snap
+
+    def _desired_motor_settings(self) -> dict[str, dict[str, int]]:
+        """
+        Compute desired settings exactly as configure() would apply.
+        NOTE: For Drive_Mode, we only *require* that bit2 (time-based profiles) is set.
+        We don't force other bits here; comparison will be bitwise.
+        """
+        desired: dict[str, dict[str, int]] = {}
+
+        # Return delay time set by bus.configure_motors(return_delay_time=0)
+        desired["Return_Delay_Time"] = {m: 0 for m in self.bus.motors}
+
+        # Drive mode: ensure bit 2 set (time-based profile)
+        # We'll compare with a mask rather than exact equality.
+        desired["Drive_Mode"] = {}  # placeholder; comparison uses bit mask only
+
+        # Operating mode
+        desired["Operating_Mode"] = {}
+        for m in self.bus.motors:
+            if m == "gripper":
+                desired["Operating_Mode"][m] = OperatingMode.CURRENT_POSITION.value
+            else:
+                desired["Operating_Mode"][m] = OperatingMode.EXTENDED_POSITION.value
+
+        # Profile velocity from moving_time (seconds) -> ms
+        pv = int(self.config.moving_time * 1000)
+        desired["Profile_Velocity"] = {m: pv for m in self.bus.motors}
+
+        # Secondary IDs
+        desired["Secondary_ID"] = {}
+        if "shoulder_shadow" in self.bus.motors:
+            desired["Secondary_ID"]["shoulder_shadow"] = 2
+        if "elbow_shadow" in self.bus.motors:
+            desired["Secondary_ID"]["elbow_shadow"] = 4
+
+        return desired
+
+    def _settings_match(self, current: dict[str, dict[str, int]], desired: dict[str, dict[str, int]]) -> bool:
+        """
+        Compare current vs desired. For Drive_Mode, require bit2 set (mask check).
+        For others, require exact equality.
+        """
+        # 1) Return_Delay_Time exact
+        for m, want in desired["Return_Delay_Time"].items():
+            have = current["Return_Delay_Time"].get(m)
+            if have != want:
+                logger.debug(f"Mismatch Return_Delay_Time[{m}]: have={have}, want={want}")
+                return False
+
+        # 2) Secondary_ID where applicable
+        for m, want in desired["Secondary_ID"].items():
+            have = current["Secondary_ID"].get(m)
+            if have != want:
+                logger.debug(f"Mismatch Secondary_ID[{m}]: have={have}, want={want}")
+                return False
+
+        # 3) Drive_Mode: bit2 (time-profile) must be set
+        mask = 1 << 2
+        for m, have in current["Drive_Mode"].items():
+            if (have & mask) == 0:
+                logger.debug(f"Mismatch Drive_Mode[{m}]: bit2 not set (have=0b{have:b})")
+                return False
+
+        # 4) Operating_Mode exact
+        for m, want in desired["Operating_Mode"].items():
+            have = current["Operating_Mode"].get(m)
+            if have != want:
+                logger.debug(f"Mismatch Operating_Mode[{m}]: have={have}, want={want}")
+                return False
+
+        # 5) Profile_Velocity exact
+        for m, want in desired["Profile_Velocity"].items():
+            have = current["Profile_Velocity"].get(m)
+            if have != want:
+                logger.debug(f"Mismatch Profile_Velocity[{m}]: have={have}, want={want}")
+                return False
+
+        return True

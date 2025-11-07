@@ -129,6 +129,7 @@ def step_env_and_process_transition(
     # Step env
     obs, reward, terminated, truncated, info = env.step(processed_action_transition[TransitionKey.ACTION])
 
+
     # Read out info and possibly overwrite action
     complementary_data = processed_action_transition[TransitionKey.COMPLEMENTARY_DATA].copy()
     info.update(processed_action_transition[TransitionKey.INFO].copy())

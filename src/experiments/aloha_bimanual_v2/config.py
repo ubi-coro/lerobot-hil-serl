@@ -10,7 +10,6 @@ from lerobot.envs.configs import HilSerlRobotEnvConfig, EnvConfig
 from lerobot.envs.robot_env import RobotEnv
 from lerobot.processor.migrate_calibration_processor import MigrateCalibrationObsProcessorStep, MigrateInterventionActionProcessorStep
 from lerobot.robots.viperx import ViperXConfig
-from lerobot.share.configs import DatasetRecordConfig
 from lerobot.teleoperators import TeleopEvents
 from lerobot.teleoperators.widowx import WidowXConfig
 

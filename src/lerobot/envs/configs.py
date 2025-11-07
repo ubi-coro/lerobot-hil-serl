@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import abc
+import logging
 from dataclasses import dataclass, field, fields
 from functools import cached_property
 from typing import Any
@@ -51,10 +52,10 @@ from lerobot.processor.tff_processor import VanillaTFFProcessorStep, SixDofVeloc
 from lerobot.robots import RobotConfig, make_robot_from_config
 from lerobot.envs.robot_env import RobotEnv
 from lerobot.robots.ur.tff_controller import TaskFrameCommand
-from lerobot.share.utils import is_union_with_dict
+from lerobot.envs.utils import is_union_with_dict
 from lerobot.teleoperators import make_teleoperator_from_config, TeleopEvents
 from lerobot.teleoperators.config import TeleoperatorConfig
-from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE, DEFAULT_ROBOT_NAME
 
 
 @dataclass
@@ -418,9 +419,6 @@ class HilSerlRobotEnvConfig(EnvConfig):
 
     name: str = "real_robot"
 
-    def __post_init__(self):
-        self.features =
-
     @cached_property
     def action_dim(self):
         robot_dict = self.robot if isinstance(self.robot, dict) else {DEFAULT_ROBOT_NAME: self.robot}
@@ -428,10 +426,10 @@ class HilSerlRobotEnvConfig(EnvConfig):
 
         _action_dim = 0
         for name in robot_dict:
-            gripper = gripper if isinstance(gripper, bool) else gripper[name]
+            _gripper = gripper if isinstance(gripper, bool) else gripper[name]
             _action_dim += 6 # we cannot access this here, so we need to make assumptions, ie 6 joints / dofs
 
-            if gripper:
+            if _gripper:
                 _action_dim += 1
 
         return _action_dim
@@ -582,7 +580,12 @@ class HilSerlRobotEnvConfig(EnvConfig):
                 )
             )
 
-        action_pipeline_steps = [AddTeleopEventsAsInfoStep(teleoperators=teleoperators)]
+        action_pipeline_steps = []
+
+        try:
+            AddTeleopEventsAsInfoStep(teleoperators=teleoperators)
+        except TypeError:
+            pass
 
         if self.processor.events.key_mapping:
             action_pipeline_steps.append(AddKeyboardEventsAsInfoStep(mapping=self.processor.events.key_mapping))

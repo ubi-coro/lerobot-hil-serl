@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-
+import types
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +18,7 @@ import os
 import warnings
 from collections.abc import Mapping, Sequence
 from functools import singledispatch
-from typing import Any
+from typing import Any, get_origin, get_args, Union
 
 import einops
 import gymnasium as gym
@@ -28,7 +28,6 @@ from huggingface_hub import hf_hub_download, snapshot_download
 from torch import Tensor
 
 from lerobot.configs.types import FeatureType, PolicyFeature
-from lerobot.envs.configs import EnvConfig
 from lerobot.utils.constants import OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE
 from lerobot.utils.utils import get_channel_first_image_shape
 
@@ -87,7 +86,7 @@ def preprocess_observation(observations: dict[str, np.ndarray]) -> dict[str, Ten
     return return_observations
 
 
-def env_to_policy_features(env_cfg: EnvConfig) -> dict[str, PolicyFeature]:
+def env_to_policy_features(env_cfg: 'EnvConfig') -> dict[str, PolicyFeature]:
     # TODO(aliberts, rcadene): remove this hardcoding of keys and just use the nested keys as is
     # (need to also refactor preprocess_observation and externalize normalization from policies)
     policy_features = {}
@@ -172,6 +171,11 @@ def _close_single_env(env: Any) -> None:
     except Exception as exc:
         print(f"Exception while closing env {env}: {exc}")
 
+def is_union_with_dict(field_type) -> bool:
+    origin = get_origin(field_type)
+    if origin is types.UnionType or origin is Union:
+        return any(get_origin(arg) is dict for arg in get_args(field_type))
+    return False
 
 @singledispatch
 def close_envs(obj: Any) -> None:

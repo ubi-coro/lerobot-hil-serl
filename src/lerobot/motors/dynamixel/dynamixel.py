@@ -192,10 +192,14 @@ class DynamixelMotorsBus(MotorsBus):
 
     def write_calibration(self, calibration_dict: dict[str, MotorCalibration], cache: bool = True) -> None:
         for motor, calibration in calibration_dict.items():
-            self.write("Homing_Offset", motor, calibration.homing_offset)
-            self.write("Min_Position_Limit", motor, calibration.range_min)
-            self.write("Max_Position_Limit", motor, calibration.range_max)
-            self.write("Drive_Mode", motor, calibration.drive_mode)
+            if self.read("Homing_Offset", motor) != calibration.homing_offset:
+                self.write("Homing_Offset", motor, calibration.homing_offset)
+            if self.read("Min_Position_Limit", motor) != calibration.range_min:
+                self.write("Min_Position_Limit", motor, calibration.range_min)
+            if self.read("Max_Position_Limit", motor) != calibration.range_max:
+                self.write("Max_Position_Limit", motor, calibration.range_max)
+            if self.read("Drive_Mode", motor) != calibration.drive_mode:
+                self.write("Drive_Mode", motor, calibration.drive_mode)
 
         if cache:
             self.calibration = calibration_dict
