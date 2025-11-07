@@ -72,7 +72,7 @@ def test_sac_config_default_initialization():
     assert config.online_buffer_capacity == 100000
     assert config.offline_buffer_capacity == 100000
     assert config.async_prefetch is False
-    assert config.online_step_before_learning == 100
+    assert config.training_starts == 100
     assert config.policy_update_freq == 1
 
     # SAC algorithm parameters

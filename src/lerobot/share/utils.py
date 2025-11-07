@@ -57,7 +57,7 @@ def make_rl_policy(policy_cfg: Any | None, env_cfg: Any):
 
     policy = make_policy(policy_cfg, env_cfg=env_cfg)
 
-    if isinstance(policy, SACPolicy):
+    if not isinstance(policy, SACPolicy):
         raise ValueError("Only sac supported atm")
 
     return policy

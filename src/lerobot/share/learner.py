@@ -287,8 +287,8 @@ def add_actor_information_and_train(
     device = get_safe_torch_device(try_device=cfg.policy.device, log=True)
     storage_device = get_safe_torch_device(try_device=cfg.policy.storage_device)
     clip_grad_norm_value = cfg.policy.grad_clip_norm
-    online_step_before_learning = cfg.policy.online_step_before_learning
-    utd_ratio = cfg.policy.utd_ratio
+    training_starts = cfg.policy.training_starts
+    utd_ratio = cfg.policy.cta_ratio
     fps = cfg.env.fps
     log_freq = cfg.log_freq
     save_freq = cfg.save_freq
@@ -378,7 +378,7 @@ def add_actor_information_and_train(
         )
 
         # Wait until the replay buffer has enough samples to start training
-        if len(replay_buffer) < online_step_before_learning:
+        if len(replay_buffer) < training_starts:
             continue
 
         if online_iterator is None:
@@ -952,8 +952,8 @@ def initialize_replay_buffer(
         ds_cfg = copy(cfg.dataset)
 
         # overwrite root for online transitions
-        ds_cfg.repo_id = cfg.output_dir.split(".")[-1] + "/online_dataset"
-        ds_cfg.root = os.path.join(cfg.output_dir, "online_dataset")
+        ds_cfg.repo_id = str(cfg.output_dir).split(".")[-1] + "/online_dataset"
+        ds_cfg.root = os.path.join(str(cfg.output_dir), "online_dataset")
 
         return OnDiskReplayBuffer(
             ds_cfg=ds_cfg,

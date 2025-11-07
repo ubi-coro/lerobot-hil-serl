@@ -16,9 +16,8 @@
 # limitations under the License.
 
 import math
-from collections.abc import Callable
 from dataclasses import asdict
-from typing import Literal
+from typing import Callable, List, Literal, Optional
 
 import einops
 import numpy as np
@@ -27,14 +26,21 @@ import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor
 from torch.distributions import MultivariateNormal, TanhTransform, Transform, TransformedDistribution, Distribution
+from triton.language import tensor
 
-from lerobot.policies.pretrained import PreTrainedPolicy
-from lerobot.policies.sac.configuration_sac import SACConfig, is_image_feature
-from lerobot.policies.utils import get_device_from_parameters
-from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_STATE
+from lerobot.common.policies.normalize import Normalize, Unnormalize
+from lerobot.common.policies.pretrained import PreTrainedPolicy
+from lerobot.common.policies.sac.configuration_sac import SACConfig
+from lerobot.common.policies.utils import get_device_from_parameters
 
 DISCRETE_DIMENSION_INDEX = -1  # Gripper is always the last dimension
 
+
+# todo:
+# init
+# loss
+# inference
+# training script
 
 class SACPolicy(
     PreTrainedPolicy,
@@ -45,6 +51,7 @@ class SACPolicy(
     def __init__(
         self,
         config: SACConfig | None = None,
+        dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
         super().__init__(config)
         config.validate_features()
@@ -102,12 +109,7 @@ class SACPolicy(
         pass
 
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
-        """Predict a chunk of actions given environment observations."""
-        raise NotImplementedError("SACPolicy does not support action chunking. It returns single actions!")
-
-    @torch.no_grad()
-    def select_action(self, batch: dict[str, Tensor], deterministic: bool = True, use_dgn: bool = True, step: int | None = None) -> tuple[Tensor, dict]:
+    def select_action(self, batch: dict[str, Tensor], deterministic: bool = True, use_dgn: bool = True, step: Optional[int] = None) -> tuple[Tensor, dict]:
         """Select action for inference/evaluation"""
         if self.config.use_bc_dagger or not self.config.noise_config.enable:
             use_dgn = False
@@ -115,7 +117,7 @@ class SACPolicy(
         observation_features = None
         if self.shared_encoder:
             # Cache and normalize image features
-            observation_features = self.actor.encoder.get_cached_image_features(batch)
+            observation_features = self.actor.encoder.get_cached_image_features(batch, normalize=True)
 
         dist = self.actor(batch, observation_features)
 
@@ -124,6 +126,8 @@ class SACPolicy(
             # action = dist.rsample()  # would be in line with hil-serl argmax
         else:
             action = dist.rsample()
+
+        action = self.unnormalize_outputs({"action": action})["action"]
 
         inference_infos = {}
         q_value, _ = self.critic_forward(
@@ -206,7 +210,7 @@ class SACPolicy(
             The computed loss tensor
         """
         # Extract common components from batch
-        actions: Tensor = batch[ACTION]
+        actions: Tensor = batch["action"]
         observations: dict[str, Tensor] = batch["state"]
         observation_features: Tensor = batch.get("observation_feature")
 
@@ -287,7 +291,7 @@ class SACPolicy(
         for target_param, param in zip(
             self.critic_target.parameters(),
             self.critic_ensemble.parameters(),
-            strict=True,
+            strict=False,
         ):
             target_param.data.copy_(
                 param.data * self.config.critic_target_update_weight
@@ -297,7 +301,7 @@ class SACPolicy(
             for target_param, param in zip(
                 self.discrete_critic_target.parameters(),
                 self.discrete_critic.parameters(),
-                strict=True,
+                strict=False,
             ):
                 target_param.data.copy_(
                     param.data * self.config.critic_target_update_weight
@@ -319,7 +323,9 @@ class SACPolicy(
     ) -> tuple[torch.Tensor, dict[str, Tensor]]:
         with torch.no_grad():
             action_dist = self.actor(next_observations, next_observation_features)
-            next_action_preds = action_dist.rsample()
+            sample_actions = action_dist.rsample()
+
+            next_action_preds = self.unnormalize_outputs({"action": sample_actions})["action"]
 
             # 2- compute q targets
             q_targets = self.critic_forward(
@@ -330,7 +336,6 @@ class SACPolicy(
             )
 
             # subsample critics to prevent overfitting if use high UTD (update to date)
-            # TODO: Get indices before forward pass to avoid unnecessary computation
             if self.config.num_subsample_critics is not None:
                 indices = torch.randperm(self.config.num_critics)
                 indices = indices[: self.config.num_subsample_critics]
@@ -339,7 +344,7 @@ class SACPolicy(
             # critics subsample size
             min_q, _ = q_targets.min(dim=0)  # Get values from min operation
             if self.config.use_backup_entropy:
-                min_q = min_q - (self.temperature * action_dist.log_prob(action_dist.rsample()))
+                min_q = min_q - (self.temperature * action_dist.log_prob(sample_actions))
 
             td_target = rewards + (1 - done) * self.config.discount * min_q
 
@@ -456,11 +461,12 @@ class SACPolicy(
         dist = self.actor(observations, observation_features)
         policy_actions = dist.mode()
 
+        target_actions = self.normalize_targets({"action": actions})["action"]
         if self.config.policy_kwargs.use_tanh_squash:
-            actions = torch.clip(actions, -1+1e-6, 1-1e-6)
+            target_actions = torch.clip(target_actions, -1+1e-6, 1-1e-6)
 
-        log_probs = dist.log_prob(actions)
-        mse = ((actions - policy_actions) ** 2).sum(-1).mean()
+        log_probs = dist.log_prob(target_actions)
+        mse = ((target_actions - policy_actions) ** 2).sum(-1).mean()
         bc_loss = -log_probs.mean()
 
         return bc_loss, {"mse": mse}
@@ -471,7 +477,8 @@ class SACPolicy(
         observation_features: Tensor | None = None,
     ) -> Tensor:
         dist = self.actor(observations, observation_features)
-        policy_actions = dist.rsample()
+        sample_actions = dist.rsample()
+        policy_actions: Tensor = self.unnormalize_outputs({"action": sample_actions})["action"]
 
         q_preds = self.critic_forward(
             observations=observations,
@@ -481,18 +488,18 @@ class SACPolicy(
         )
         min_q_preds = q_preds.min(dim=0)[0]
 
-        actor_loss = ((self.temperature * dist.log_prob(policy_actions)) - min_q_preds).mean()
+        actor_loss = ((self.temperature * dist.log_prob(sample_actions)) - min_q_preds).mean()
         return actor_loss
 
     def compute_loss_noise(
         self,
         actions,
         observations,
-        observation_features: Tensor | None = None,
+        observation_features: Optional[Tensor] = None,
     ) -> tuple[Tensor, float]:
         with torch.no_grad():
             dist = self.actor(observations, observation_features)
-            mean_actions = dist.rsample()
+            mean_actions = self.unnormalize_outputs({"action": dist.rsample()})["action"]
 
         noised_actions, noise_dist, _ = self.add_structured_noise(mean_actions, observations, observation_features, step=0)
 
@@ -512,7 +519,7 @@ class SACPolicy(
 
         return noise_loss, dgn_improvement_ratio
 
-    def add_structured_noise(self, mean_actions: Tensor, observations: dict[str, Tensor] , observation_features: Tensor | None = None, step: int | None = 0):
+    def add_structured_noise(self, mean_actions: Tensor, observations: dict[str, Tensor] , observation_features: Tensor | None = None, step: Optional[int] = 0):
         batch_size = mean_actions.shape[0]
         action_dim = mean_actions.shape[1]
 
@@ -565,16 +572,40 @@ class SACPolicy(
         actions_final = self.unnormalize_outputs({"action": action_normalized})["action"]
         return actions_final, noise_dist, eps
 
+    def _init_normalization(self, dataset_stats):
+        """Initialize input/output normalization modules."""
+        self.normalize_inputs = nn.Identity()
+        self.normalize_targets = nn.Identity()
+        self.unnormalize_outputs = nn.Identity()
+        if self.config.dataset_stats:
+            params = _convert_normalization_params_to_tensor(self.config.dataset_stats)
+            self.normalize_inputs = Normalize(
+                self.config.input_features, self.config.normalization_mapping, params
+            )
+            stats = dataset_stats or params
+            self.normalize_targets = Normalize(
+                self.config.output_features, self.config.normalization_mapping, stats
+            )
+            self.unnormalize_outputs = Unnormalize(
+                self.config.output_features, self.config.normalization_mapping, stats
+            )
+
     def _init_encoders(self):
         """Initialize shared or separate encoders for actor and critic."""
         self.shared_encoder = self.config.shared_encoder
-        self.encoder_critic = SACObservationEncoder(self.config)
+        self.encoder_critic = SACObservationEncoder(self.config, self.normalize_inputs)
         self.encoder_actor = (
-            self.encoder_critic if self.shared_encoder else SACObservationEncoder(self.config)
+            self.encoder_critic
+            if self.shared_encoder
+            else SACObservationEncoder(self.config, self.normalize_inputs)
         )
 
         if self.config.noise_config.enable:
-            self.encoder_noise = self.encoder_critic if self.shared_encoder else SACObservationEncoder(self.config)
+            self.encoder_noise = (
+                self.encoder_critic
+                if self.shared_encoder
+                else SACObservationEncoder(self.config, self.normalize_inputs)
+            )
 
     def _init_critics(self, continuous_action_dim):
         """Build critic ensemble, targets, and optional discrete critic."""
@@ -585,7 +616,9 @@ class SACPolicy(
             )
             for _ in range(self.config.num_critics)
         ]
-        self.critic_ensemble = CriticEnsemble(encoder=self.encoder_critic, ensemble=heads)
+        self.critic_ensemble = CriticEnsemble(
+            encoder=self.encoder_critic, ensemble=heads, output_normalization=self.normalize_targets
+        )
         target_heads = [
             CriticHead(
                 input_dim=self.encoder_critic.output_dim + continuous_action_dim,
@@ -593,12 +626,13 @@ class SACPolicy(
             )
             for _ in range(self.config.num_critics)
         ]
-        self.critic_target = CriticEnsemble(encoder=self.encoder_critic, ensemble=target_heads)
+        self.critic_target = CriticEnsemble(
+            encoder=self.encoder_critic, ensemble=target_heads, output_normalization=self.normalize_targets
+        )
         self.critic_target.load_state_dict(self.critic_ensemble.state_dict())
 
-        if self.config.use_torch_compile:
-            self.critic_ensemble = torch.compile(self.critic_ensemble)
-            self.critic_target = torch.compile(self.critic_target)
+        self.critic_ensemble = self.critic_ensemble # torch.compile(self.critic_ensemble)
+        self.critic_target = self.critic_target #torch.compile(self.critic_target)
 
         if self.config.num_discrete_actions is not None:
             self._init_discrete_critics()
@@ -623,7 +657,6 @@ class SACPolicy(
 
     def _init_actor(self, continuous_action_dim):
         """Initialize policy actor network and default target entropy."""
-        # NOTE: The actor select only the continuous action part
         self.actor = Policy(
             encoder=self.encoder_actor,
             network=MLP(input_dim=self.encoder_actor.output_dim, **asdict(self.config.actor_network_kwargs)),
@@ -631,11 +664,9 @@ class SACPolicy(
             encoder_is_shared=self.shared_encoder,
             **asdict(self.config.policy_kwargs),
         )
-
-        self.target_entropy = self.config.target_entropy
-        if self.target_entropy is None:
+        if self.config.target_entropy is None:
             dim = continuous_action_dim + (1 if self.config.num_discrete_actions is not None else 0)
-            self.target_entropy = -dim / 2
+            self.config.target_entropy = -dim / 2
 
     def _init_temperature(self):
         """Set up temperature parameter and initial log_alpha."""
@@ -666,23 +697,25 @@ class SACPolicy(
         )
 
 
+
 class SACObservationEncoder(nn.Module):
     """Encode image and/or state vector observations."""
 
-    def __init__(self, config: SACConfig) -> None:
+    def __init__(self, config: SACConfig, input_normalizer: nn.Module) -> None:
         super().__init__()
         self.config = config
+        self.input_normalization = input_normalizer
         self._init_image_layers()
         self._init_state_layers()
         self._compute_output_dim()
 
     def _init_image_layers(self) -> None:
-        self.image_keys = [k for k in self.config.input_features if is_image_feature(k)]
+        self.image_keys = [k for k in self.config.input_features if k.startswith("observation.image")]
         self.has_images = bool(self.image_keys)
         if not self.has_images:
             return
 
-        if self.config.vision_encoder_name is not None:
+        if self.config.vision_encoder_name:
             self.image_encoder = PretrainedImageEncoder(self.config)
         else:
             self.image_encoder = DefaultImageEncoder(self.config)
@@ -716,17 +749,17 @@ class SACObservationEncoder(nn.Module):
             )
 
     def _init_state_layers(self) -> None:
-        self.has_env = OBS_ENV_STATE in self.config.input_features
-        self.has_state = OBS_STATE in self.config.input_features
+        self.has_env = "observation.environment_state" in self.config.input_features
+        self.has_state = "observation.state" in self.config.input_features
         if self.has_env:
-            dim = self.config.input_features[OBS_ENV_STATE].shape[0]
+            dim = self.config.input_features["observation.environment_state"].shape[0]
             self.env_encoder = nn.Sequential(
                 nn.Linear(dim, self.config.latent_dim),
                 nn.LayerNorm(self.config.latent_dim),
                 nn.Tanh(),
             )
         if self.has_state:
-            dim = self.config.input_features[OBS_STATE].shape[0]
+            dim = self.config.input_features["observation.state"].shape[0]
             self.state_encoder = nn.Sequential(
                 nn.Linear(dim, self.config.latent_dim),
                 nn.LayerNorm(self.config.latent_dim),
@@ -744,17 +777,18 @@ class SACObservationEncoder(nn.Module):
         self._out_dim = out
 
     def forward(
-        self, obs: dict[str, Tensor], cache: dict[str, Tensor] | None = None, detach: bool = False
+        self, obs: dict[str, Tensor], cache: Optional[dict[str, Tensor]] = None, detach: bool = False
     ) -> Tensor:
+        obs = self.input_normalization(obs)
         parts = []
         if self.has_images:
             if cache is None:
-                cache = self.get_cached_image_features(obs)
+                cache = self.get_cached_image_features(obs, normalize=False)
             parts.append(self._encode_images(cache, detach))
         if self.has_env:
-            parts.append(self.env_encoder(obs[OBS_ENV_STATE]))
+            parts.append(self.env_encoder(obs["observation.environment_state"]))
         if self.has_state:
-            parts.append(self.state_encoder(obs[OBS_STATE]))
+            parts.append(self.state_encoder(obs["observation.state"]))
         if parts:
             return torch.cat(parts, dim=-1)
 
@@ -762,7 +796,7 @@ class SACObservationEncoder(nn.Module):
             "No parts to concatenate, you should have at least one image or environment state or state"
         )
 
-    def get_cached_image_features(self, obs: dict[str, Tensor]) -> dict[str, Tensor]:
+    def get_cached_image_features(self, obs: dict[str, Tensor], normalize: bool = False) -> dict[str, Tensor]:
         """Extract and optionally cache image features from observations.
 
         This function processes image observations through the vision encoder once and returns
@@ -774,17 +808,29 @@ class SACObservationEncoder(nn.Module):
         - The vision encoder forward pass is typically the main computational bottleneck during training and inference
         - Caching these features can provide 2-4x speedup in training and inference
 
+        Normalization behavior:
+        - When called from inside forward(): set normalize=False since inputs are already normalized
+        - When called from outside forward(): set normalize=True to ensure proper input normalization
+
         Usage patterns:
-        - Called in select_action()
-        - Called in learner.py's get_observation_features() to pre-compute features for all policy components
-        - Called internally by forward()
+        - Called in select_action() with normalize=True
+        - Called in learner_server_sac.py's get_observation_features() to pre-compute features for all policy components
+        - Called internally by forward() with normalize=False
 
         Args:
             obs: Dictionary of observation tensors containing image keys
+            normalize: Whether to normalize observations before encoding
+                      Set to True when calling directly from outside the encoder's forward method
+                      Set to False when calling from within forward() where inputs are already normalized
 
         Returns:
             Dictionary mapping image keys to their corresponding encoded features
         """
+        if not self.image_keys:
+            return {}
+
+        if normalize:
+            obs = self.input_normalization(obs)
         batched = torch.cat([obs[k] for k in self.image_keys], dim=0)
         out = self.image_encoder(batched)
         chunks = torch.chunk(out, len(self.image_keys), dim=0)
@@ -847,7 +893,7 @@ class MLP(nn.Module):
         hidden_dims: list[int],
         activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.SiLU(),
         activate_final: bool = False,
-        dropout_rate: float | None = None,
+        dropout_rate: Optional[float] = None,
         final_activation: Callable[[torch.Tensor], torch.Tensor] | str | None = None,
     ):
         super().__init__()
@@ -884,8 +930,8 @@ class CriticHead(nn.Module):
         hidden_dims: list[int],
         activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.SiLU(),
         activate_final: bool = False,
-        dropout_rate: float | None = None,
-        init_final: float | None = None,
+        dropout_rate: Optional[float] = None,
+        init_final: Optional[float] = None,
         final_activation: Callable[[torch.Tensor], torch.Tensor] | str | None = None,
     ):
         super().__init__()
@@ -915,7 +961,8 @@ class CriticEnsemble(nn.Module):
     Args:
         encoder (SACObservationEncoder): encoder for observations.
         ensemble (List[CriticHead]): list of critic heads.
-        init_final (float | None): optional initializer scale for final layers.
+        output_normalization (nn.Module): normalization layer for actions.
+        init_final (Optional[float]): optional initializer scale for final layers.
 
     Forward returns a tensor of shape (num_critics, batch_size) containing Q-values.
     """
@@ -923,12 +970,14 @@ class CriticEnsemble(nn.Module):
     def __init__(
         self,
         encoder: SACObservationEncoder,
-        ensemble: list[CriticHead],
-        init_final: float | None = None,
+        ensemble: List[CriticHead],
+        output_normalization: nn.Module,
+        init_final: Optional[float] = None,
     ):
         super().__init__()
         self.encoder = encoder
         self.init_final = init_final
+        self.output_normalization = output_normalization
         self.critics = nn.ModuleList(ensemble)
 
     def forward(
@@ -940,9 +989,13 @@ class CriticEnsemble(nn.Module):
         device = get_device_from_parameters(self)
         # Move each tensor in observations to device
         observations = {k: v.to(device) for k, v in observations.items()}
+        # NOTE: We normalize actions it helps for sample efficiency
+        actions: dict[str, torch.tensor] = {"action": actions}
+        # NOTE: Normalization layer took dict in input and outputs a dict that why
+        actions = self.output_normalization(actions)["action"]
+        actions = actions.to(device)
 
         obs_enc = self.encoder(observations, cache=observation_features)
-        actions = actions.to(device)
 
         inputs = torch.cat([obs_enc, actions], dim=-1)
 
@@ -965,8 +1018,8 @@ class DiscreteCritic(nn.Module):
         output_dim: int = 3,
         activations: Callable[[torch.Tensor], torch.Tensor] | str = nn.SiLU(),
         activate_final: bool = False,
-        dropout_rate: float | None = None,
-        init_final: float | None = None,
+        dropout_rate: Optional[float] = None,
+        init_final: Optional[float] = None,
         final_activation: Callable[[torch.Tensor], torch.Tensor] | str | None = None,
     ):
         super().__init__()
@@ -1004,10 +1057,10 @@ class Policy(nn.Module):
         encoder: SACObservationEncoder,
         network: nn.Module,
         action_dim: int,
-        std_min: float = -5,
-        std_max: float = 2,
-        fixed_std: torch.Tensor | None = None,
-        init_final: float | None = None,
+        std_min: float = 1e-5,
+        std_max: float = 10.0,
+        fixed_std: Optional[torch.Tensor] = None,
+        init_final: Optional[float] = None,
         use_tanh_squash: bool = False,
         encoder_is_shared: bool = False,
     ):
@@ -1083,7 +1136,7 @@ class Policy(nn.Module):
 class DefaultImageEncoder(nn.Module):
     def __init__(self, config: SACConfig):
         super().__init__()
-        image_key = next(key for key in config.input_features if is_image_feature(key))
+        image_key = next(key for key in config.input_features.keys() if key.startswith("observation.image"))  # noqa: SIM118
         self.image_enc_layers = nn.Sequential(
             nn.Conv2d(
                 in_channels=config.input_features[image_key].shape[0],
@@ -1114,6 +1167,7 @@ class DefaultImageEncoder(nn.Module):
             ),
             nn.ReLU(),
         )
+        # Get first image key from input features
 
     def forward(self, x):
         x = self.image_enc_layers(x)
@@ -1267,3 +1321,15 @@ class TanhMultivariateNormalDiag(TransformedDistribution):
             x = transform(x)
 
         return x
+
+
+def _convert_normalization_params_to_tensor(normalization_params: dict) -> dict:
+    converted_params = {}
+    for outer_key, inner_dict in normalization_params.items():
+        converted_params[outer_key] = {}
+        for key, value in inner_dict.items():
+            converted_params[outer_key][key] = torch.tensor(value)
+            if "image" in outer_key:
+                converted_params[outer_key][key] = converted_params[outer_key][key].view(3, 1, 1)
+
+    return converted_params

@@ -66,7 +66,7 @@ def run_learner(
             pass  # No transitions available, continue
 
         # Train if we have enough data
-        if len(online_buffer) >= policy_learner.config.online_step_before_learning:
+        if len(online_buffer) >= policy_learner.config.training_starts:
             # Sample from online buffer (autonomous + human data)
             online_batch = online_buffer.sample(batch_size // 2)
 

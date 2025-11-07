@@ -88,5 +88,5 @@ def make_sac_pre_post_processors(
             name=POLICY_POSTPROCESSOR_DEFAULT_NAME,
             to_transition=policy_action_to_transition,
             to_output=transition_to_policy_action,
-        ),
+        )
     )

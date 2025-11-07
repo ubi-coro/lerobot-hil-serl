@@ -34,6 +34,14 @@ def is_image_feature(key: str) -> bool:
     """
     return key.startswith(OBS_IMAGE)
 
+@dataclass
+class DataGuidedNoiseConfig:
+    enable: bool = True
+    initial_eps: float = 0.8
+    tau: float = 10_000
+    predict_residual: bool = False
+    update_freq: int = 100
+    update_steps: int = 50
 
 @dataclass
 class ConcurrencyConfig:
@@ -124,7 +132,7 @@ class SACConfig(PreTrainedConfig):
     # Device to store the model on
     storage_device: str = "cpu"
     # Name of the vision encoder model (Set to "helper2424/resnet10" for hil serl resnet10)
-    vision_encoder_name: str | None = None
+    vision_encoder_name: str | None = "helper2424/resnet10"
     # Whether to freeze the vision encoder during training
     freeze_vision_encoder: bool = True
     # Hidden dimension size for the image encoder
@@ -146,11 +154,15 @@ class SACConfig(PreTrainedConfig):
     # Whether to use asynchronous prefetching for the buffers
     async_prefetch: bool = False
     # Number of steps before learning starts
-    online_step_before_learning: int = 100
+    training_starts: int = 100
+    # Number of random steps before executing the policy
+    random_steps: int = 0
     # Frequency of policy updates
     policy_update_freq: int = 1
 
     # SAC algorithm parameters
+    # Whether to train with bc loss
+    use_bc_dagger: bool = False
     # Discount factor for the SAC algorithm
     discount: float = 0.99
     # Initial temperature value
@@ -165,10 +177,12 @@ class SACConfig(PreTrainedConfig):
     actor_lr: float = 3e-4
     # Learning rate for the temperature parameter
     temperature_lr: float = 3e-4
+    # Learning rate for the noise network
+    noise_lr: float = 3e-4
     # Weight for the critic target update
     critic_target_update_weight: float = 0.005
-    # Update-to-data ratio for the UTD algorithm (If you want enable utd_ratio, you need to set it to >1)
-    utd_ratio: int = 1
+    # critic-to-policy update ratio (If you want enable cta_ratio, you need to set it to >1)
+    cta_ratio: int = 1
     # Hidden dimension size for the state encoder
     state_encoder_hidden_dim: int = 256
     # Dimension of the latent space
@@ -191,7 +205,7 @@ class SACConfig(PreTrainedConfig):
     discrete_critic_network_kwargs: CriticNetworkConfig = field(default_factory=CriticNetworkConfig)
     # Configuration for actor-learner architecture
     actor_learner_config: ActorLearnerConfig = field(default_factory=ActorLearnerConfig)
-    # Configuration for concurrency settings (you can use threads or processes for the actor and learner)
+    noise_config: DataGuidedNoiseConfig  = field(default_factory=DataGuidedNoiseConfig)
     concurrency: ConcurrencyConfig = field(default_factory=ConcurrencyConfig)
 
     # Optimizations
@@ -208,6 +222,7 @@ class SACConfig(PreTrainedConfig):
                 "actor": {"lr": self.actor_lr},
                 "critic": {"lr": self.critic_lr},
                 "temperature": {"lr": self.temperature_lr},
+                "noise": {"lr": self.noise_lr}
             },
         )
 

@@ -107,10 +107,6 @@ def actor_cli(cfg: TrainRLServerPipelineConfig):
         mp.set_start_method("spawn")
         display_pid = True
 
-    if cfg.env.root is not None:
-        now = datetime.datetime.now()
-        cfg.output_dir = os.path.join(cfg.env.root, "run", f"actor-{now:%Y-%m-%d}-{now:%H-%M-%S}")
-
     # Create logs directory to ensure it exists
     log_dir = os.path.join(cfg.output_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
@@ -775,4 +771,5 @@ def use_threads(cfg: TrainRLServerPipelineConfig) -> bool:
 
 
 if __name__ == "__main__":
+    import experiments
     actor_cli()

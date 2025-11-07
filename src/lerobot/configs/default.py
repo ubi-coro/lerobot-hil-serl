@@ -64,7 +64,7 @@ class DatasetBufferConfig(DatasetConfig):
     # Rename map for the observation to override the image and state keys
     rename_map: dict[str, str] = field(default_factory=dict)
     # Keep an in-memory replay buffer and only write to disk when checkpointing
-    in_memory: bool = False
+    in_memory: bool = True
     # Whether to overwrite repo_id and interpret root as dir containing folders, only works for disk (no in-memory) buffers
     load_dir: bool = True
 
