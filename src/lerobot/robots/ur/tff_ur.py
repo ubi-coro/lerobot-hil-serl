@@ -67,7 +67,7 @@ class TF_UR(Robot):
                 hostname=config.robot_ip,
                 shm_manager=self.shm,
                 frequency=config.gripper_frequency,
-                soft_real_time=config.soft_real_time,
+                soft_real_time=config.gripper_soft_real_time,
                 rt_core=config.gripper_rt_core,
                 verbose=config.verbose
             )
@@ -79,7 +79,6 @@ class TF_UR(Robot):
         # runtime vars
         self.logs = {}
         self.last_robot_action = TaskFrameCommand()
-        self.iter_idx = 0
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -149,6 +148,7 @@ class TF_UR(Robot):
             raise DeviceAlreadyConnectedError(f"{self} already connected")
 
         self.controller.start()
+        self.controller.zero_ft()
         if self.gripper is not None:
             self.gripper.start()
 
@@ -157,7 +157,6 @@ class TF_UR(Robot):
 
         self.configure()
         logger.info(f"{self} connected.")
-
 
     @property
     def is_calibrated(self) -> bool:
@@ -199,7 +198,7 @@ class TF_UR(Robot):
             obs_dict[f"{joint_name}.q_pos"] = controller_data['ActualQ'][i]
 
         if self.gripper is not None:
-            obs_dict["gripper.pos"] = float(self.gripper.get_state()["width"])
+            obs_dict["gripper.pos"] = float(self.gripper.get_state()["width"]) / 255.0
 
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
@@ -224,12 +223,6 @@ class TF_UR(Robot):
         Returns:
             the action sent to the motors, potentially clipped.
         """
-        if self.iter_idx == 0:
-            self.t_start = time.monotonic()
-
-        #t_cycle_end = self.t_start + (self.iter_idx + 1) * 1 / self.config.control_frequency
-        #t_command_target = t_cycle_end + 1 / self.config.control_frequency
-
 
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
@@ -246,13 +239,15 @@ class TF_UR(Robot):
                 self.task_frame.mode[i] = AxisMode.FORCE
 
         if self.gripper is not None and f"{GRIPPER_KEY}.pos" in action:
+            self.send_gripper_action(action[f"{GRIPPER_KEY}.pos"])
             gripper_action = action[f"{GRIPPER_KEY}.pos"]
-            self.gripper.move_smooth(gripper_action, force=self.config.gripper_force)
-            #self.gripper.move(gripper_action, vel=self.config.gripper_vel, force=self.config.gripper_force)
 
         self.controller.send_cmd(self.task_frame)
 
         return action
+
+    def send_gripper_action(self, gripper_action: float):
+        self.gripper.move(gripper_action, vel=self.config.gripper_vel, force=self.config.gripper_force)
 
     def disconnect(self):
         if not self.is_connected:

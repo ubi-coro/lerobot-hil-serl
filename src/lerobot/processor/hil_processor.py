@@ -25,14 +25,16 @@ import evdev
 import numpy as np
 import torch
 import torchvision.transforms.functional as F  # noqa: N812
+from torch import Tensor
 from tqdm import tqdm
 
 from lerobot.configs.types import PipelineFeatureType, PolicyFeature
 from lerobot.teleoperators.teleoperator import Teleoperator
 from lerobot.teleoperators.utils import TeleopEvents
 
-from .core import EnvTransition, PolicyAction, TransitionKey
-from .pipeline import (
+from lerobot.processor.core import EnvTransition, PolicyAction, TransitionKey
+from lerobot.processor.pipeline import (
+    ActionProcessorStep,
     ComplementaryDataProcessorStep,
     InfoProcessorStep,
     ObservationProcessorStep,
@@ -493,31 +495,32 @@ class GripperPenaltyProcessorStep(ComplementaryDataProcessorStep):
         max_gripper_pos: Dict of robot_name -> max gripper pos (for normalization).
     """
 
-    use_gripper: dict[str, bool] = field(default_factory=dict)
-    penalty: dict[str, float] = field(default_factory=dict)
+    gripper_idc: dict[str, int | None] = field(default_factory=dict)
+    penalty: dict[str, float | None] = field(default_factory=dict)
     max_gripper_pos: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self):
+        assert self.gripper_idc.keys() == self.penalty.keys() == self.max_gripper_pos.keys()
+        self._robot_names = self.gripper_idc.keys()
 
     def complementary_data(self, complementary_data: dict) -> dict:
         """
         Calculates gripper penalties for each robot and adds them to complementary_data.
         """
-        action_dict = self.transition.get(TransitionKey.ACTION)
-
-        # If actions are not a dict (single robot), bail out gracefully
-        if not isinstance(action_dict, dict):
-            return complementary_data
+        action = self.transition.get(TransitionKey.ACTION)
 
         new_cd = dict(complementary_data)
         robot_penalty = 0.0
-        for name, action in action_dict.items():
-            current_gripper_pos = complementary_data.get.get(f"{name}.{GRIPPER_KEY}", None)
+        for name in self._robot_names:
+            current_gripper_pos = complementary_data.get(f"{name}.{GRIPPER_KEY}.pos", None)
 
-            if current_gripper_pos is None or action is None or len(action) == 0:
+            if self.gripper_idc[name] is None or self.penalty[name] is None or current_gripper_pos is None:
                 continue
 
-            # last element of action is gripper command
-            gripper_action = action[-1].item() if isinstance(action, torch.Tensor) else action[-1]
-            max_pos = self.max_gripper_pos.get(name, 30.0)
+            current_gripper_pos = complementary_data.get.get(f"{name}.{GRIPPER_KEY}.pos", None)
+            gripper_idx = int(self.gripper_idc[name])
+            gripper_action = action[gripper_idx].item()
+            max_pos = self.max_gripper_pos[name]
 
             gripper_action_normalized = gripper_action / max_pos
             gripper_state_normalized = current_gripper_pos / max_pos
@@ -527,7 +530,7 @@ class GripperPenaltyProcessorStep(ComplementaryDataProcessorStep):
                 or (gripper_state_normalized > 0.75 and gripper_action_normalized < 0.5)
             )
 
-            robot_penalty += self.penalty.get(name, -0.01) * int(penalty_trigger)
+            robot_penalty += self.penalty[name] * int(penalty_trigger)
 
         new_cd[DISCRETE_PENALTY_KEY] = robot_penalty
 
@@ -535,6 +538,7 @@ class GripperPenaltyProcessorStep(ComplementaryDataProcessorStep):
 
     def get_config(self) -> dict[str, Any]:
         return {
+            "gripper_idc": self.gripper_idc,
             "penalty": self.penalty,
             "max_gripper_pos": self.max_gripper_pos,
         }
@@ -544,6 +548,56 @@ class GripperPenaltyProcessorStep(ComplementaryDataProcessorStep):
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+
+@dataclass
+@ProcessorStepRegistry.register("gripper_offset_processor")
+class GripperOffsetProcessorStep(ActionProcessorStep):
+    """
+    Applies a penalty for inefficient gripper usage on multiple robots.
+
+    For each robot:
+      - Penalizes actions that try to close an already closed gripper
+        or open an already open one.
+      - Penalties are added to complementary_data with robot-specific keys.
+
+    Attributes:
+        penalty: Negative reward value applied per violation.
+        max_gripper_pos: Dict of robot_name -> max gripper pos (for normalization).
+    """
+
+    gripper_idc: dict[str, int | None] = field(default_factory=dict)
+    offset: dict[str, float | None] = field(default_factory=dict)
+
+    def __post_init__(self):
+        assert self.gripper_idc.keys() == self.offset.keys()
+        self._robot_names = self.gripper_idc.keys()
+
+    def action(self, action: Tensor) -> Tensor:
+        """
+        Calculates gripper penalties for each robot and adds them to complementary_data.
+        """
+        for name in self._robot_names:
+            if self.gripper_idc[name] is None or self.offset[name] is None:
+                continue
+            gripper_idx = int(self.gripper_idc[name])
+            action[gripper_idx] = action[gripper_idx] + self.offset[name]
+        return action
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            "gripper_idc": self.gripper_idc,
+            "offset": self.offset,
+            "max_gripper_pos": self.max_gripper_pos
+        }
+
+    def reset(self) -> None:
+        pass
+
+    def transform_features(
+            self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         return features
 

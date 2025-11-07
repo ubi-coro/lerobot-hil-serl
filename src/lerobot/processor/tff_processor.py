@@ -40,8 +40,9 @@ class VanillaTFFProcessorStep(VanillaObservationProcessorStep):
         # add gripper pos to complementary info
         processed_complementary_data = new_transition.get(TransitionKey.COMPLEMENTARY_DATA).copy()
         for name in self.add_ee_velocity_to_observation:
-            if f"{name}.{GRIPPER_KEY}" in observation and self.use_gripper.get(name, False):
-                processed_complementary_data[f"{name}.{GRIPPER_KEY}"] = observation[f"{name}.{GRIPPER_KEY}"]
+            gripper_key = f"{name}.{GRIPPER_KEY}.pos"
+            if gripper_key in observation and self.use_gripper.get(name, False):
+                processed_complementary_data[gripper_key] = observation[gripper_key]
         new_transition[TransitionKey.COMPLEMENTARY_DATA] = processed_complementary_data
 
         return new_transition

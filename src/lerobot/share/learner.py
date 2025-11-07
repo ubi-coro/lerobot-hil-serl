@@ -1240,5 +1240,6 @@ def process_interaction_messages(
 
 
 if __name__ == "__main__":
+    import experiments
     train_cli()
     logging.info("[LEARNER] main finished")

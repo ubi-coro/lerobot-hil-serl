@@ -54,13 +54,13 @@ class Command(enum.IntEnum):
 class TaskFrameCommand:
     """One message = full spec for all 6 DoF"""
     cmd: Command = Command.SET
-    T_WF: Optional[list | np.ndarray]         = None  # world→task transform as a 6 vec
+    T_WF: Optional[list]         = None  # world→task transform as a 6 vec
     mode: Optional[list[AxisMode]]            = None  # len==6
-    target: Optional[list | np.ndarray]       = None  # 6 pos [m/rad], vel [m/s], or force [N]
-    kp: Optional[list | np.ndarray]           = None  # 6 proportional gains (position‐error → force)
-    kd: Optional[list | np.ndarray]           = None  # 6 derivative gains (velocity‐error → force)
-    max_pose_rpy: Optional[list | np.ndarray] = None  # 6 pos [m], rot [rad] in rpy
-    min_pose_rpy: Optional[list | np.ndarray] = None  # 6 pos [m], rot [rad] in rpy
+    target: Optional[list]       = None  # 6 pos [m/rad], vel [m/s], or force [N]
+    kp: Optional[list]           = None  # 6 proportional gains (position‐error → force)
+    kd: Optional[list]           = None  # 6 derivative gains (velocity‐error → force)
+    max_pose_rpy: Optional[list] = None  # 6 pos [m], rot [rad] in rpy
+    min_pose_rpy: Optional[list] = None  # 6 pos [m], rot [rad] in rpy
 
     def to_queue_dict(self):
         d = asdict(self)
@@ -110,13 +110,13 @@ class TaskFrameCommand:
     def make_default_cmd(cls):
         return cls(
             cmd=Command.SET,
-            T_WF=np.zeros(6),
+            T_WF=[0] * 6,
             mode=[AxisMode.PURE_VEL]*6,
-            target=np.zeros(6),
-            kp=np.full(6, 300.0),
-            kd=np.full(6, 20.0),
-            max_pose_rpy=np.full(6, np.inf),
-            min_pose_rpy=np.full(6, -np.inf)
+            target=[0] * 6,
+            kp=[300.0] * 6,
+            kd=[20.0] * 6,
+            max_pose_rpy=[float("inf")] * 6,
+            min_pose_rpy=[-float("inf")] * 6
         )
 
 
@@ -500,7 +500,7 @@ class RTDETFFController(mp.Process):
                 self.apply_wrench_bounds(pose_F, desired_wrench=wrench_W, measured_wrench=measured_wrench_F)
 
                 # 5.8) command the task space wrench via forceMode(...)
-                wrench_W[:] = 0.0
+                #print("Wrench", wrench_W, "Target", self.target)
                 if not self.force_on:
                     # If for some reason we dropped out of forceMode, re‐enter it
                     rtde_c.forceMode(

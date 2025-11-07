@@ -28,7 +28,7 @@ from huggingface_hub import hf_hub_download, snapshot_download
 from torch import Tensor
 
 from lerobot.configs.types import FeatureType, PolicyFeature
-from lerobot.utils.constants import OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE
+from lerobot.utils.constants import OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE, REWARD, DONE
 from lerobot.utils.utils import get_channel_first_image_shape
 
 
@@ -108,6 +108,23 @@ def env_to_policy_features(env_cfg: 'EnvConfig') -> dict[str, PolicyFeature]:
         policy_features[policy_key] = feature
 
     return policy_features
+
+
+def env_to_dataset_features(env_cfg: 'EnvConfig') -> dict:
+    ds_features = {}
+    for key, ft in env_cfg.features.items():
+        new_ft = {"shape": ft.shape}
+        if ft.type == FeatureType.VISUAL:
+            new_ft["dtype"] = "video",
+            new_ft["names"] = ["channels", "height", "width"]
+        else:
+            new_ft["dtype"] = "float32"
+            new_ft["names"] = None
+        ds_features[key] = new_ft
+
+    ds_features[REWARD] = {"dtype": "float32", "shape": (1,), "names": None}
+    ds_features[DONE] = {"dtype": "bool", "shape": (1,), "names": None}
+    return ds_features
 
 
 def are_all_envs_same_type(env: gym.vector.VectorEnv) -> bool:

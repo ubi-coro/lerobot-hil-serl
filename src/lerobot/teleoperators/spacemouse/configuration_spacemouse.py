@@ -17,7 +17,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from ..config import TeleoperatorConfig
+from lerobot.teleoperators import TeleoperatorConfig
 
 
 @TeleoperatorConfig.register_subclass("spacemouse")
@@ -25,10 +25,22 @@ from ..config import TeleoperatorConfig
 class SpacemouseConfig(TeleoperatorConfig):
     """KeyboardTeleopConfig"""
     device: Optional[str] = None
+    path: Optional[str] = None
 
     initial_gripper_pos: float = 0.0
     gripper_close_button_idx: bool = 1
     gripper_open_button_idx: bool = 0
-    gripper_continuous: bool = True
+    gripper_continuous: bool = False
+    gripper_gain: float = 0.05
+
+
+if __name__ == "__main__":
+    from easyhid import Enumeration
+    hid = Enumeration()
+    for device in hid.find():
+        print("Device:", device.product_string)
+        print("Path:", device.path)
+        print("=" * 5)
+
 
 

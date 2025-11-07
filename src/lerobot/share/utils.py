@@ -1,11 +1,9 @@
-from lerobot.configs.policies import PreTrainedConfig
+from typing import Any
+
 from lerobot.configs.types import PolicyFeature, FeatureType, PipelineFeatureType
 from lerobot.datasets.pipeline_features import create_initial_features, strip_prefix, PREFIXES_TO_STRIP
-from lerobot.envs import EnvConfig
 from lerobot.envs.robot_env import RobotEnv
-from lerobot.policies.factory import make_policy
 
-from lerobot.policies.sac.modeling_sac import SACPolicy
 from lerobot.processor import DataProcessorPipeline
 from lerobot.utils.constants import ACTION, OBS_STATE, OBS_IMAGES, REWARD, DONE
 
@@ -49,9 +47,13 @@ def get_pipeline_dataset_features(
     return features
 
 
-def make_rl_policy(policy_cfg: PreTrainedConfig | None, env_cfg: EnvConfig):
+# todo: finalize this and move to policy factory
+def make_rl_policy(policy_cfg: Any | None, env_cfg: Any):
     if policy_cfg is None:
         return None
+
+    from lerobot.policies.factory import make_policy
+    from lerobot.policies.sac.modeling_sac import SACPolicy
 
     policy = make_policy(policy_cfg, env_cfg=env_cfg)
 

@@ -7,4 +7,6 @@ from .dataset_test.config import DatasetTestConfig
 from .aloha_folding.config import AlohaFoldingDatasetConfig
 from .aloha_unfolding.config import AlohaUnfoldingDatasetConfig
 
+from .ur5e_bimanual_polytec.config import UR5eBimanualPolytecEnvConfig
+
 from .mock_env.config import MockEnvConfig

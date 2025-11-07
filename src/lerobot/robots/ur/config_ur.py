@@ -40,8 +40,8 @@ class URConfig(RobotConfig):
         requires running scripts/rtprio_setup.sh before hand.
 
     """
-    model: Optional[str] = str
-    robot_ip: Optional[str] = str
+    model: Optional[str]
+    robot_ip: Optional[str]
     shm_manager: Optional[SharedMemoryManager] = None
 
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
@@ -53,24 +53,26 @@ class URConfig(RobotConfig):
     tcp_offset_pose: Optional[list[float]] = None
     soft_real_time: bool = False
     rt_core: int = 3
-    launch_timeout: float = 3.0
+    launch_timeout: float = 10.0
     get_max_k: int = 128
     receive_keys: Optional[list[str]] = None
 
     # gripper
     use_gripper: bool = False  # attempts to initialize gripper from RTDEControlInterface
-    gripper_frequency: float = 30.0
-    gripper_vel: float = 100.0  # [%]
-    gripper_force: float = 100.0  # [%]
+    gripper_frequency: float = 50.0
+    gripper_vel: float = 1.0  # [0-1]
+    gripper_force: float = 1.0  # [0-1]
+    gripper_soft_real_time: bool = False
+    gripper_rt_core: int = 4
 
     # safety
     max_pose_rpy: list[float] = field(default_factory = lambda: [float("inf")] * 6)
     min_pose_rpy: list[float] = field(default_factory = lambda: [-float("inf")] * 6)
-    wrench_limits: list[float] = field(default_factory = lambda: [15.0, 15.0, 15.0, 1.5, 1.5, 1.5])
+    wrench_limits: list[float] = field(default_factory = lambda: [30.0, 30.0, 30.0, 3.0, 3.0, 3.0])
     speed_limits: list[float] = field(default_factory = lambda: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])
 
     # contact-aware scaling of wrench limits
-    enable_contact_aware_force_scaling: list[bool] = field(default_factory = lambda: [True] * 6)
+    enable_contact_aware_force_scaling: list[bool] = field(default_factory = lambda: [False] * 6)
     contact_desired_wrench: list[float] = field(default_factory = lambda: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])  # desired max contact force at equilibrium (N)
     contact_limit_scale_theta: Optional[list[float]] = None  # minimum force limit scaling factor, usually computed automatically
     contact_limit_scale_min: list[float] = field(default_factory = lambda: [0.1] * 6)  # minimum force limit scaling factor

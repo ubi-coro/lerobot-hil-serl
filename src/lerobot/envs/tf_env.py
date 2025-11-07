@@ -6,7 +6,7 @@ from typing import Any
 
 from torch import Tensor
 
-from lerobot.cameras import make_cameras_from_configs, Camera
+from lerobot.cameras import Camera
 from lerobot.robots.ur.tff_controller import TaskFrameCommand, AxisMode
 from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.robot_utils import busy_wait
@@ -25,7 +25,7 @@ class TaskFrameEnv(gym.Env):
         use_gripper: dict[str, bool] | None = None,
         reset_pose: dict[str, list[float]] | None = None,
         reset_time_s: dict[str, float] | None = None,
-        display_cameras: bool = False,
+        display_cameras: bool = False
     ) -> None:
         super().__init__()
 
@@ -38,6 +38,8 @@ class TaskFrameEnv(gym.Env):
         self.reset_pose = reset_pose if reset_pose else {name: None for name in robot_dict}
         self.reset_time_s = reset_time_s if reset_time_s else {name: 5.0 for name in robot_dict}
         self.display_cameras = display_cameras
+
+        assert all([self.robot_dict[name].config.use_gripper or not self.use_gripper[name] for name in self.robot_dict]), "To use a gripper, the robot must have one!"
 
         # build reset task frame commands
         self.reset_task_frame: dict[str, TaskFrameCommand | None] = {}
@@ -163,14 +165,12 @@ class TaskFrameEnv(gym.Env):
             if self.use_gripper[name]:
                 tf_cmd = self.task_frame[name]
                 tf_cmd.target[self.control_mask[name]] = robot_action_vec[:-1]
-                robot_action = tf_cmd.to_robot_action()
-                robot_action["gripper.pos"] = robot_action_vec[-1]
+                robot.send_gripper_action(robot_action_vec[-1])
             else:
                 tf_cmd = self.task_frame[name]
                 tf_cmd.target[self.control_mask[name]] = robot_action_vec
-                robot_action = tf_cmd.to_robot_action()
 
-            robot.send_action(robot_action)
+            robot.controller.send_cmd(tf_cmd)
 
         obs = self._get_observation()
 

@@ -16,7 +16,7 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
         self.id = config.id
         self.config = config
 
-        pyspacemouse.open(device=config.device)
+        pyspacemouse.open(device=config.device, path=config.path)
         self.process = None
         self.stop_event = multiprocessing.Event()
 
