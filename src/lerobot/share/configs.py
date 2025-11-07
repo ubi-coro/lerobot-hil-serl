@@ -20,6 +20,8 @@ class DatasetRecordConfig(draccus.ChoiceRegistry):
     fps: int = 30
     # Number of seconds for a single episode or intervention
     episode_time_s: int = 30
+    # Number of seconds for a teleoperated reset
+    reset_time_s: int | None = 30
     # Number of episodes to record.
     num_episodes: int = 50
     # Encode frames in the dataset into video
@@ -41,7 +43,7 @@ class DatasetRecordConfig(draccus.ChoiceRegistry):
     num_image_writer_threads_per_camera: int = 4
     # Number of episodes to record before batch encoding videos
     # Set to 1 for immediate encoding (default behavior), or higher for batched encoding
-    video_encoding_batch_size: int = 10
+    video_encoding_batch_size: int = 1
     # Rename map for the observation to override the image and state keys
     rename_map: dict[str, str] = field(default_factory=dict)
 

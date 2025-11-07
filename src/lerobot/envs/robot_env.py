@@ -1,3 +1,4 @@
+import logging
 import time
 from typing import Any
 
@@ -79,17 +80,52 @@ class RobotEnv(gym.Env):
 
     def _get_observation(self) -> dict[str, Any]:
         """Get current robot observation including joint positions and camera images."""
+
+        t0 = time.perf_counter()
         # Capture state info from robots
         raw_joint_joint_position = {}
         for name in self.robot_dict:
             obs_dict = self.robot_dict[name].get_observation()
             raw_joint_joint_position |= {f"{name}.{key}": obs_dict[key] for key in self._joint_names_dict[name]}
+        t1 = time.perf_counter()
 
         obs = {"agent_pos": np.array(list(raw_joint_joint_position.values())), **raw_joint_joint_position}
 
-        # Capture images
+        # Capture images (time each camera individually)
+        cam_timings_ms: dict[str, float] = {}
         if self.cameras:
-            obs["pixels"] = {cam_key: cam.async_read() for cam_key, cam in self.cameras.items()}
+            pixels: dict[str, Any] = {}
+            cam_start_total = time.perf_counter()
+
+            for cam_key, cam in self.cameras.items():
+                t_cam0 = time.perf_counter()
+                pixels[cam_key] = cam.async_read()
+                t_cam1 = time.perf_counter()
+                cam_timings_ms[cam_key] = (t_cam1 - t_cam0) * 1000.0
+
+            cam_end_total = time.perf_counter()
+            obs["pixels"] = pixels
+            dt_cam_total = cam_end_total - cam_start_total
+        else:
+            dt_cam_total = 0.0
+
+        dt_q = t1 - t0
+
+        # Logging
+        def _hz(dt: float) -> float:
+            return (1.0 / dt) if dt > 0 else float("inf")
+
+        # Build a compact per-camera timing string like: camA=5.12ms(195.3hz), camB=7.34ms(136.2hz)
+        per_cam_str = ", ".join(
+            f"{k}={ms:5.2f}ms ({_hz(ms / 1000.0):5.1f}hz)" for k, ms in cam_timings_ms.items()
+        )
+
+        #logging.info(
+        #    f"dt_send: {dt_q * 1000:5.2f}ms ({_hz(dt_q):5.1f}hz), "
+        #    f"dt_cam_total: {dt_cam_total * 1000:5.2f}ms ({_hz(dt_cam_total):5.1f}hz)"
+        #    + (f" | per_cam: {per_cam_str}" if per_cam_str else "")
+        #)
+
         return obs
 
     def _setup_spaces(self) -> None:

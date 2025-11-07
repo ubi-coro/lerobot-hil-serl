@@ -60,7 +60,7 @@ class OperatingMode(Enum):
 
     # This mode controls position. This mode is identical to the Multi-turn Position Control from existing
     # DYNAMIXEL. 512 turns are supported(-256[rev] ~ 256[rev]). This mode is ideal for multi-turn wrists or
-    # conveyer systems or a system that requires an additional reduction gear. Note that Max Position
+    # conveyor systems or a system that requires an additional reduction gear. Note that Max Position
     # Limit(48), Min Position Limit(52) are not used on Extended Position Control Mode.
     EXTENDED_POSITION = 4
 
@@ -192,10 +192,14 @@ class DynamixelMotorsBus(MotorsBus):
 
     def write_calibration(self, calibration_dict: dict[str, MotorCalibration], cache: bool = True) -> None:
         for motor, calibration in calibration_dict.items():
-            self.write("Homing_Offset", motor, calibration.homing_offset)
-            self.write("Min_Position_Limit", motor, calibration.range_min)
-            self.write("Max_Position_Limit", motor, calibration.range_max)
-            self.write("Drive_Mode", motor, calibration.drive_mode)
+            if self.read("Homing_Offset", motor) != calibration.homing_offset:
+                self.write("Homing_Offset", motor, calibration.homing_offset)
+            if self.read("Min_Position_Limit", motor) != calibration.range_min:
+                self.write("Min_Position_Limit", motor, calibration.range_min)
+            if self.read("Max_Position_Limit", motor) != calibration.range_max:
+                self.write("Max_Position_Limit", motor, calibration.range_max)
+            if self.read("Drive_Mode", motor) != calibration.drive_mode:
+                self.write("Drive_Mode", motor, calibration.drive_mode)
 
         if cache:
             self.calibration = calibration_dict

@@ -604,17 +604,16 @@ class InterventionActionProcessorStep(ProcessorStep):
         self._intervention_occurred = self._intervention_occurred  | is_intervention
         if self._intervention_occurred and not is_intervention:
             info[TeleopEvents.INTERVENTION_COMPLETED] = True
-            terminate_episode = True
 
         # Override action if intervention is active
         if is_intervention and teleop_action_dict is not None:
 
-            # loop over teleoperators and concat their actions
+            # loop over teleoperators and concat their action
             action_list = []
             for name, teleop_action in teleop_action_dict.items():
                 # torque leaders off on interventions
                 if self._disable_torque_on_intervention[name]:
-                    self.teleoperators[name].bus.disable_torque()
+                    self.teleoperators[name].disable_torque()
 
                 # process teleop action
                 if isinstance(teleop_action, dict):
@@ -632,7 +631,6 @@ class InterventionActionProcessorStep(ProcessorStep):
             new_transition[TransitionKey.ACTION] = teleop_action_tensor
 
         elif not self._intervention_occurred:  # dont write feedback on intervention end
-
             # send the current action as feedback to the robots
             idx = 0
             for teleop_name, teleop in self.teleoperators.items():
@@ -650,6 +648,7 @@ class InterventionActionProcessorStep(ProcessorStep):
                 # torque leaders off on interventions
                 if self._disable_torque_on_intervention[name]:
                     self.teleoperators[name].enable_torque()
+
 
         # Handle episode termination
         new_transition[TransitionKey.DONE] = bool(terminate_episode) or (

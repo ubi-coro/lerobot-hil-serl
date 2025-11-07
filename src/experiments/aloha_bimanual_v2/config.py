@@ -10,7 +10,6 @@ from lerobot.envs.configs import HilSerlRobotEnvConfig, EnvConfig
 from lerobot.envs.robot_env import RobotEnv
 from lerobot.processor.migrate_calibration_processor import MigrateCalibrationObsProcessorStep, MigrateInterventionActionProcessorStep
 from lerobot.robots.viperx import ViperXConfig
-from lerobot.share.configs import DatasetRecordConfig
 from lerobot.teleoperators import TeleopEvents
 from lerobot.teleoperators.widowx import WidowXConfig
 
@@ -61,7 +60,8 @@ class AlohaBimanualEnvConfigV2(HilSerlRobotEnvConfig):
         self.processor.gripper.use_gripper = True
         self.processor.reset.terminate_on_success = True
         self.processor.reset.teleop_on_reset = True
-        self.processor.reset.reset_time_s = 5.0
+        self.processor.reset.reset_time_s = 10.0
+        #self.processor.control_time_s = 10.0
         self.processor.events.foot_switch_mapping = {
             (TeleopEvents.SUCCESS,): {"device": 3, "toggle": False},
             (TeleopEvents.IS_INTERVENTION,): {"device": 6, "toggle": True},
@@ -105,12 +105,4 @@ class AlohaBimanualEnvConfigV2(HilSerlRobotEnvConfig):
         )
 
         return env_processor, action_processor
-
-
-@dataclass
-@DatasetRecordConfig.register_subclass("aloha_bimanual_v2")
-class AlohaBimanualDatasetConfigV2(DatasetRecordConfig):
-    repo_id: str = "test/aloha_bimanual_v2"
-    single_task: str = "test"
-    root: str = "/media/nvme1/jstranghoener/lerobot/data/test/aloha_bimanual_v2"
 

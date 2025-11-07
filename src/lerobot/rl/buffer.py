@@ -140,13 +140,13 @@ class ReplayBuffer:
         state_shapes = {key: val.squeeze(0).shape for key, val in state.items()}
         action_shape = action.squeeze(0).shape
 
-        # Pre-allocate tensors for storage
+         # Pre-allocate tensors for storage
         self.states = {
             key: torch.empty((self.capacity, *shape), device=self.storage_device)
             for key, shape in state_shapes.items()
         }
         self.actions = torch.empty((self.capacity, *action_shape), device=self.storage_device)
-        self.rewards = torch.empty((self.capacity,), device=self.storage_device)
+        self.rewards =torch.empty((self.capacity,), device=self.storage_device)
 
         if not self.optimize_memory:
             # Standard approach: store states and next_states separately
@@ -607,6 +607,7 @@ class ReplayBuffer:
             lerobot_dataset.save_episode()
 
         lerobot_dataset.stop_image_writer()
+        lerobot_dataset.finalize()
 
         return lerobot_dataset
 

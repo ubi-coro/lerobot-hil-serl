@@ -38,6 +38,43 @@ class DatasetConfig:
 
 
 @dataclass
+class DatasetBufferConfig(DatasetConfig):
+    # A short but accurate description of the task performed during the recording (e.g. "Pick the Lego block and drop it in the box on the right.")
+    single_task: str | None = None
+    # Encode frames in the dataset into video
+    video: bool = True
+    # Upload dataset to Hugging Face hub.
+    push_to_hub: bool = False
+    # Upload on private repository on the Hugging Face hub.
+    private: bool = False
+    # Add tags to your dataset on the hub.
+    tags: list[str] | None = None
+    # Number of subprocesses handling the saving of frames as PNG. Set to 0 to use threads only;
+    # set to ≥1 to use subprocesses, each using threads to write images. The best number of processes
+    # and threads depends on your system. We recommend 4 threads per camera with 0 processes.
+    # If fps is unstable, adjust the thread count. If still unstable, try using 1 or more subprocesses.
+    num_image_writer_processes: int = 0
+    # Number of threads writing the frames as png images on disk, per camera.
+    # Too many threads might cause unstable teleoperation fps due to main thread being blocked.
+    # Not enough threads might cause low camera fps.
+    num_image_writer_threads_per_camera: int = 4
+    # Number of episodes to record before batch encoding videos
+    # Set to 1 for immediate encoding (default behavior), or higher for batched encoding
+    video_encoding_batch_size: int = 1
+    # Rename map for the observation to override the image and state keys
+    rename_map: dict[str, str] = field(default_factory=dict)
+    # Keep an in-memory replay buffer and only write to disk when checkpointing
+    in_memory: bool = False
+    # Whether to overwrite repo_id and interpret root as dir containing folders, only works for disk (no in-memory) buffers
+    load_dir: bool = True
+
+    def __post_init__(self):
+        if self.single_task is None:
+            raise ValueError("You need to provide a task as argument in `single_task`.")
+
+
+
+@dataclass
 class WandBConfig:
     enable: bool = False
     # Set to true to disable saving an artifact despite training.save_checkpoint=True
@@ -57,7 +94,7 @@ class EvalConfig:
     # `use_async_envs` specifies whether to use asynchronous environments (multiprocessing).
     use_async_envs: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.batch_size > self.n_episodes:
             raise ValueError(
                 "The eval batch size is greater than the number of eval episodes "

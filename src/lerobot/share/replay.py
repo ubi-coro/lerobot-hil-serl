@@ -335,7 +335,7 @@ def record_loop(
 
 @parser.wrap()
 def replay(cfg: RecordConfig) -> LeRobotDataset:
-    replay_episode = 0
+    replay_episode = 4
 
     env, env_processor, action_processor = cfg.env.make(device="cpu" if cfg.policy is None else cfg.policy.device)
 

@@ -299,7 +299,7 @@ def act_with_policy(
         log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
 
         # Use the new step function
-        new_transition = step_env_and_process_transition(
+        new_transition, exit_early = step_env_and_process_transition(
             env=online_env,
             transition=transition,
             action=action,

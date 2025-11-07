@@ -435,12 +435,10 @@ class ForwardKinematicsJointsToEEObservation(ObservationProcessorStep):
         kinematics: The robot's kinematic model.
     """
 
-    kinematics: dict[str: RobotKinematics]
+    kinematics: dict[str, RobotKinematics]
     motor_names: list[str]
 
     def observation(self, observation: dict[str, Any]) -> dict[str, Any]:
-
-
         return compute_forward_kinematics_joints_to_ee(observation, self.kinematics, self.motor_names)
 
     def transform_features(
