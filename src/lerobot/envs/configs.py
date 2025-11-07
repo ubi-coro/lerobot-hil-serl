@@ -495,7 +495,7 @@ class HilSerlRobotEnvConfig(EnvConfig):
             display_cameras=self.processor.display_cameras,
         )
 
-        env_processor = self.make_env_processor(env, device)
+        env_processor = self.make_env_processor(device)
         action_processor = self.make_action_processor(teleop_dict, device)
 
         return env, env_processor, action_processor

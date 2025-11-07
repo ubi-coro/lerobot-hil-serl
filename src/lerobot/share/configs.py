@@ -69,7 +69,7 @@ class RecordConfig:
     # Resume recording on an existing dataset.
     resume: bool = False
     # Interactively take control during rollouts
-    interactive: bool = True
+    interactive: bool = False
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
