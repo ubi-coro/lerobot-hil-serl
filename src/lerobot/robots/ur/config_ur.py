@@ -24,19 +24,6 @@ from lerobot.robots.ur.config_tf_controller import TaskFrameControllerConfig
 @RobotConfig.register_subclass("ur")
 @dataclass
 class URConfig(TaskFrameControllerConfig, RobotConfig):
-    """
-    frequency: CB2=125, UR3e=500
-    lookahead_time: [0.03, 0.2]s smoothens the trajectory with this lookahead time
-    gain: [100, 2000] proportional gain for following target position
-    max_pos_speed: m/s
-    max_rot_speed: rad/s
-    tcp_offset_pose: 6d pose
-    payload_mass: float
-    payload_cog: 3d position, center of gravity
-    soft_real_time: enables round-robin scheduling and real-time priority
-        requires running scripts/rtprio_setup.sh before hand.
-
-    """
     model: str = "ur5e"
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
 

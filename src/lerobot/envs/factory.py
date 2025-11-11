@@ -143,14 +143,16 @@ def make_env(
 class RobotEnvInterface(gym.Env, ABC):
     """Mixin for real-world envs that must expose get_features_from_cfg(cfg)."""
 
-    @abstractmethod
     def __init__(
         self,
         robot_dict: dict[str, Robot],
         cameras: dict[str, Camera] | None = None,
-        processor: HILSerlProcessorConfig | None = None
+        processor: HILSerlProcessorConfig | None = None,
+        **kwargs
     ):
-        raise NotImplementedError
+        self.robot_dict = robot_dict
+        self.cameras = cameras if cameras else {}
+        self.processor = processor if processor else HILSerlProcessorConfig()
 
     @staticmethod
     @abstractmethod

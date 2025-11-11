@@ -774,16 +774,27 @@ class RTDETFFController(mp.Process):
             # hard clip wrench
             desired_wrench[i] = np.clip(desired_wrench[i], -scaled_wrench_limits[i], scaled_wrench_limits[i])
 
-            if pose[i] > self.max_pose_rpy[i] and desired_wrench[i] > 0:
-                desired_wrench[i] = 0.0
+            # 2) if outside bounds, project away outward component and add spring back toward bound
+            if pose[i] > self.max_pose_rpy[i]:
+                # remove outward push (positive wrench on + side)
+                if desired_wrench[i] > 0.0:
+                    desired_wrench[i] = 0.0
+                penetration = pose[i] - self.max_pose_rpy[i]  # > 0
+                desired_wrench[i] += -self.kp[i] * penetration
 
-            elif pose[i] < self.min_pose_rpy[i] and desired_wrench[i] < 0:
-                desired_wrench[i] = 0.0
+            elif pose[i] < self.min_pose_rpy[i]:
+                # remove outward push (negative wrench on - side)
+                if desired_wrench[i] < 0.0:
+                    desired_wrench[i] = 0.0
+                penetration = self.min_pose_rpy[i] - pose[i]  # > 0
+                desired_wrench[i] += +self.kp[i] * penetration
 
         # ----- rotation axes (convert to Euler first) -----
         for i in range(3, 6):
             desired_wrench[i] = np.clip(desired_wrench[i], -scaled_wrench_limits[i], scaled_wrench_limits[i])
             # we ignore rotation pose limits, bc I do not care. Why would you force control rotation anyway?
+            # honestly, this needs to work eventually
+            # todo: make wrench respect rpy bounds
 
         if self.config.debug:
             axis = self.config.debug_axis

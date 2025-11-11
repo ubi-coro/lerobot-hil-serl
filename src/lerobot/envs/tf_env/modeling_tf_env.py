@@ -27,19 +27,14 @@ class TaskFrameEnv(RobotEnvInterface):
         cameras: dict[str, Camera] | None = None,
         processor: HILSerlProcessorConfig | None = None
     ) -> None:
-        gym.Env.__init__(self)
+        super().__init__(robot_dict=robot_dict, cameras=cameras, processor=processor)
 
-        if processor is None:
-            processor = HILSerlProcessorConfig()
-
-        self.robot_dict = robot_dict
-        self.cameras = cameras if cameras else {}
-        self.task_frame = processor.task_frame.command
-        self.control_mask = {name: np.asarray(msk).astype(bool) for name, msk in processor.task_frame.control_mask.items()}
-        self.use_gripper = processor.gripper.use_gripper
-        self.reset_pose = processor.reset.fixed_reset_joint_positions
-        self.reset_time_s = processor.reset.reset_time_s
-        self.display_cameras = processor.display_cameras
+        self.task_frame = self.processor.task_frame.command
+        self.control_mask = {name: np.asarray(msk).astype(bool) for name, msk in self.processor.task_frame.control_mask.items()}
+        self.use_gripper = self.processor.gripper.use_gripper
+        self.reset_pose = self.processor.reset.fixed_reset_joint_positions
+        self.reset_time_s = self.processor.reset.reset_time_s
+        self.display_cameras = self.processor.display_cameras
 
         assert all([self.robot_dict[name].config.use_gripper or not self.use_gripper[name] for name in self.robot_dict]), "To use a gripper, the robot must have one!"
 

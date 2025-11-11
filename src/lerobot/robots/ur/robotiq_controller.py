@@ -476,24 +476,24 @@ class RobotiqGripper:
         :param log: Whether to print the results to log.
         """
         # first try to open in case we are holding an object
-        (open_pos, status) = self.move_and_wait_for_pos(self.get_open_position(), 128, 1)
+        (position, status) = self.move_and_wait_for_pos(self.get_open_position(), 128, 1)
         if RobotiqGripper.ObjectStatus(status) != RobotiqGripper.ObjectStatus.AT_DEST:
             raise RuntimeError(f"Calibration failed opening to start: {str(status)}")
-        assert open_pos >= self._min_position
+        assert position >= self._min_position
 
         # try to close as far as possible, and record the number
-        (close_pos, status) = self.move_and_wait_for_pos(self.get_closed_position(), 128, 1)
+        (position, status) = self.move_and_wait_for_pos(self.get_closed_position(), 128, 1)
         #if RobotiqGripper.ObjectStatus(status) != RobotiqGripper.ObjectStatus.AT_DEST:
         #    raise RuntimeError(f"Calibration failed because of an object: {str(status)}")
-        assert close_pos <= self._max_position
-        self._max_position = close_pos
+        assert position <= self._max_position
+        self._max_position = position
 
         # try to open as far as possible, and record the number
-        #(position, status) = self.move_and_wait_for_pos(self.get_open_position(), 64, 1)
-        #if RobotiqGripper.ObjectStatus(status) != RobotiqGripper.ObjectStatus.AT_DEST:
-        #    raise RuntimeError(f"Calibration failed because of an object: {str(status)}")
-        #assert position >= self._min_position
-        self._min_position = open_pos
+        (position, status) = self.move_and_wait_for_pos(self.get_open_position(), 64, 1)
+        if RobotiqGripper.ObjectStatus(status) != RobotiqGripper.ObjectStatus.AT_DEST:
+            raise RuntimeError(f"Calibration failed because of an object: {str(status)}")
+        assert position >= self._min_position
+        self._min_position = position
 
         if log:
             print(f"Gripper auto-calibrated to [{self.get_min_position()}, {self.get_max_position()}]")

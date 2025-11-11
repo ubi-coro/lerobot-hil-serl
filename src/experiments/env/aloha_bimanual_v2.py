@@ -9,6 +9,7 @@ from lerobot.cameras.realsense import RealSenseCameraConfig
 from lerobot.configs.types import PipelineFeatureType
 from lerobot.envs import RobotEnvConfig
 from lerobot.envs.configs import EnvConfig
+from lerobot.envs.factory import RobotEnvInterface
 from lerobot.envs.robot_env import RobotEnv
 from lerobot.processor import DataProcessorPipeline
 from lerobot.processor.migrate_calibration_processor import MigrateCalibrationObsProcessorStep, MigrateInterventionActionProcessorStep
@@ -96,7 +97,7 @@ class AlohaBimanualEnvConfigV2(RobotEnvConfig):
         )
         return action_processor
 
-    def make_env_processor(self, device) -> DataProcessorPipeline:
+    def make_env_processor(self, device, env: RobotEnvInterface | None = None) -> DataProcessorPipeline:
         env_processor = super().make_action_processor(device)
 
         # append converter

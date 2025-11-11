@@ -115,7 +115,7 @@ from lerobot.processor.rename_processor import rename_stats
 from lerobot.rl.gym_manipulator import step_env_and_process_transition
 from lerobot.share.configs import RecordConfig
 from lerobot.teleoperators import TeleopEvents
-from lerobot.utils.constants import ACTION, REWARD, DONE
+from lerobot.utils.constants import ACTION, REWARD, DONE, OBS_STATE
 from lerobot.utils.control_utils import (
     predict_action,
     sanity_check_dataset_name,
@@ -375,13 +375,12 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         )
 
     info = {}
-    first_reset_done = False
     with ((VideoEncodingManager(dataset))):
         recorded_episodes = 0
         while recorded_episodes < cfg.dataset.num_episodes and not info.get(TeleopEvents.STOP_RECORDING, False):
 
             # Execute a few seconds without recording to give time to manually reset the environment
-            if first_reset_done or (teleop_on_reset and not info.get(TeleopEvents.INTERVENTION_COMPLETED, False)):
+            if teleop_on_reset and not info.get(TeleopEvents.INTERVENTION_COMPLETED, False):
                 log_say("Reset the environment", cfg.play_sounds, blocking=True)
 
                 info = record_loop(

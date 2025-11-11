@@ -101,7 +101,7 @@ class RobotEnvConfig(EnvConfig):
             **self.env_kwargs
         )
 
-        env_processor = self.make_env_processor(device)
+        env_processor = self.make_env_processor(device, env=env)
         action_processor = self.make_action_processor(teleop_dict, device)
         return env, env_processor, action_processor
 
@@ -197,7 +197,7 @@ class RobotEnvConfig(EnvConfig):
             before_step_hooks=action_before_hooks, after_step_hooks=action_after_hooks
         )
 
-    def make_env_processor(self, device) -> DataProcessorPipeline:
+    def make_env_processor(self, device, env: RobotEnvInterface | None = None) -> DataProcessorPipeline:
         # Full processor pipeline for real robot environment
         # Get robot and motor information for kinematics
 
@@ -301,7 +301,8 @@ class RobotEnvConfig(EnvConfig):
 
     def _make_features(self):
         # process features with respective pipeline
-        pipeline_features = self.make_env_processor(device="cpu").transform_features(self.initial_features)
+        env_processor = self.make_env_processor(device="cpu", env=None)
+        pipeline_features = env_processor.transform_features(self.initial_features)
         obs_features = pipeline_features[PipelineFeatureType.OBSERVATION]
 
         # expose state, action and visual features

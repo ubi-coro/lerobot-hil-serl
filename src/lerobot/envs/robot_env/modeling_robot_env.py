@@ -51,17 +51,12 @@ class RobotEnv(RobotEnvInterface):
             reset_pose: Joint positions for environment reset.
             reset_time_s: Time to wait during reset.
         """
-        gym.Env.__init__(self)
+        super().__init__(robot_dict=robot_dict, cameras=cameras, processor=processor)
 
-        if processor is None:
-            processor = HILSerlProcessorConfig()
-
-        self.robot_dict = robot_dict
-        self.cameras = cameras if cameras else {}
-        self.use_gripper = processor.gripper.use_gripper
-        self.reset_pose = processor.reset.fixed_reset_joint_positions
-        self.reset_time_s = processor.reset.reset_time_s
-        self.display_cameras = processor.display_cameras
+        self.use_gripper = self.processor.gripper.use_gripper
+        self.reset_pose = self.processor.reset.fixed_reset_joint_positions
+        self.reset_time_s = self.processor.reset.reset_time_s
+        self.display_cameras = self.processor.display_cameras
 
         # Episode tracking.
         self.current_step = 0

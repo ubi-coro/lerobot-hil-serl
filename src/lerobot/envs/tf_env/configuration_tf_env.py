@@ -111,7 +111,7 @@ class TFRobotEnvConfig(RobotEnvConfig):
             before_step_hooks=action_before_hooks, after_step_hooks=action_after_hooks
         )
 
-    def make_env_processor(self, device) -> DataProcessorPipeline:
+    def make_env_processor(self, device, env: RobotEnvInterface | None = None) -> DataProcessorPipeline:
         env_pipeline_steps: list = [
             VanillaTFFProcessorStep(
                 device=device,
