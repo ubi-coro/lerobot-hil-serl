@@ -1,10 +1,265 @@
-"""Module to control Robotiq's grippers - tested with HAND-E"""
+import collections
+import os
+import enum
 import math
+import multiprocessing as mp
 import socket
 import threading
 import time
 from enum import Enum
+from dataclasses import dataclass, asdict
+from multiprocessing.managers import SharedMemoryManager
 from typing import Union, Tuple, OrderedDict
+
+from lerobot.utils.shared_memory import SharedMemoryQueue, SharedMemoryRingBuffer, Empty
+
+
+class Command(enum.IntEnum):
+    """Simple commands for gripper process."""
+    OPEN = 0
+    CLOSE = 1
+    MOVE = 2
+    STOP = 3
+
+
+@dataclass
+class GripperCommand:
+    cmd: Command = Command.OPEN
+    pos: float = 0.0  # for MOVE: target position (0-255)
+    vel: float = 100.0  # [%]
+    force: float = 100.0  # [%]
+    timestamp: float = 100.0
+
+    def to_queue_dict(self):
+        d = asdict(self)
+        d['cmd'] = int(self.cmd.value)
+        d['pos'] = float(self.pos)
+        d['vel'] = float(self.vel)
+        d['force'] = float(self.force)
+        d['timestamp'] = float(self.timestamp)
+        return d
+
+
+class RTDERobotiqController(mp.Process):
+    """
+    Separate process to drive the Robotiq 2F-85 gripper via shared-memory queues.
+
+    - gripper_cmd_queue: receive GripperCommand messages
+    - gripper_out_rb: push back current width & status periodically
+    """
+
+    def __init__(self,
+                 hostname: str,
+                 port: int = 63352,
+                 shm_manager: SharedMemoryManager = None,
+                 frequency: float = 20.0,
+                 soft_real_time: bool = False,
+                 rt_core: int = 4,
+                 verbose: bool = False):
+        super().__init__(name='GripperProcess')
+        # network settings
+        self.hostname = hostname
+        self.port = port
+        self.frequency = frequency
+        self.soft_real_time = soft_real_time
+        self.rt_core = rt_core
+        self.verbose = verbose
+
+        # shared-memory setup
+        if shm_manager is None:
+            shm_manager = SharedMemoryManager()
+            shm_manager.start()
+        self.shm_manager = shm_manager
+
+        # command queue example
+        example_cmd = GripperCommand().to_queue_dict()
+        self.gripper_cmd_queue = SharedMemoryQueue.create_from_examples(
+            shm_manager=self.shm_manager,
+            examples=example_cmd,
+            buffer_size=64
+        )
+
+        # state ring-buffer example
+        example_state = {
+            'width': 0.0,
+            'object_status': 0,
+            'fault': 0,
+            'timestamp': time.time()
+        }
+        self.gripper_out_rb = SharedMemoryRingBuffer.create_from_examples(
+            shm_manager=self.shm_manager,
+            examples=example_state,
+            get_max_k=256,
+            get_time_budget=0.1,
+            put_desired_frequency=self.frequency
+        )
+
+        # internal control
+        self.ready_event = mp.Event()
+        self._last_action_time = None
+        self._last_action = None
+
+    # =========== launch & shutdown =============
+    def connect(self):
+        self.start()
+
+    def start(self, wait=True):
+        super().start()
+        if wait:
+            self.start_wait()
+
+    def stop(self, wait=True):
+        # Send a STOP command
+        msg = {'cmd': Command.STOP.value}
+        self.gripper_cmd_queue.put(msg)
+        if wait:
+            self.stop_wait()
+
+    def start_wait(self):
+        self.ready_event.wait(5)
+        assert self.is_alive()
+
+    def stop_wait(self):
+        self.join()
+
+    @property
+    def is_ready(self):
+        return self.ready_event.is_set()
+
+    # =========== context manager ============
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
+
+    # ========= command methods ============
+    def move(self, pos: float, vel: float = 1.0, force: float = 1.0):
+        msg = {
+            'cmd': Command.MOVE.value,
+            'pos': pos,
+            'vel': vel,
+            'force': force,
+        }
+        self.gripper_cmd_queue.put(msg)
+
+    def move_smooth(self, pos: float, force: float = 1.0):
+        t_now = time.perf_counter()
+        if self._last_action_time is None:
+            vel = 1.0
+        else:
+            dt = max(1e-4, t_now - self._last_action_time)
+            vel = (pos - self._last_action) / dt
+
+        self._last_action_time = t_now
+        self._last_action = pos
+
+        msg = {
+            'cmd': Command.MOVE.value,
+            'pos': pos,
+            'vel': abs(vel),
+            'force': force,
+        }
+        self.gripper_cmd_queue.put(msg)
+
+    def open_gripper(self, vel: float = 1.0, force: float = 1.0):
+        msg = {
+            'cmd': Command.OPEN.value,
+            'vel': vel,
+            'force': force,
+        }
+        self.gripper_cmd_queue.put(msg)
+
+    def close_gripper(self, vel: float = 1.0, force: float = 1.0):
+        msg = {
+            'cmd': Command.CLOSE.value,
+            'vel': vel,
+            'force': force,
+        }
+        self.gripper_cmd_queue.put(msg)
+
+    # ========= receive APIs =============
+    def get_state(self, k=None, out=None):
+        if k is None:
+            return self.gripper_out_rb.get(out=out)
+        else:
+            return self.gripper_out_rb.get_last_k(k=k, out=out)
+
+    def get_all_state(self):
+        return self.gripper_out_rb.get_all()
+
+    def run(self):
+        try:
+            if self.soft_real_time:
+                os.sched_setaffinity(0, {self.rt_core})
+                os.sched_setscheduler(0, os.SCHED_RR, os.sched_param(20))
+                # no need for psutil().nice(-priority) if not root
+
+            # 1) Connect to gripper
+            gr = RobotiqGripper()
+            gr.connect(self.hostname, self.port)
+            gr.activate()
+
+            # Prepare for jitter logging
+            hist = collections.deque(maxlen=1000)
+            t_prev = time.monotonic()
+            log_interval = 5.0
+            next_log_time = t_prev + log_interval
+
+            keep_running = True
+            iter_idx = 0
+            t_start = time.monotonic()
+            while keep_running:  #
+                t_now = time.monotonic()
+
+                # 2) Get state from robot
+                state = {
+                    'width': float(gr.get_current_position()),
+                    'object_status': int(gr._get_var(gr.OBJ)),
+                    'fault': int(gr._get_var(gr.FLT)),
+                    'timestamp': t_now
+                }
+                self.gripper_out_rb.put(state)
+
+                # 3) Fetch command from queue
+                try:
+                    msgs = self.gripper_cmd_queue.get_all()
+                    n_cmd = len(msgs['cmd'])
+                except Empty:
+                    n_cmd = 0
+
+                for i in range(n_cmd):
+                    cmd_id = int(msgs['cmd'][i])
+                    vel = int(255.0 * msgs['vel'][i])
+                    force = int(255.0 * msgs['force'][i])
+
+                    if cmd_id == Command.OPEN.value:
+                        gr.move(gr.get_open_position(), vel, force)
+                    elif cmd_id == Command.CLOSE.value:
+                        gr.move(gr.get_closed_position(), vel, force)
+                    elif cmd_id == Command.MOVE.value:
+                        pos = int(255.0 * msgs['pos'][i])
+                        gr.move(pos, vel, force)
+                    elif cmd_id == Command.STOP.value:
+                        keep_running = False
+                        # stop immediately, ignore later commands
+                        break
+
+                # 4) First loop successful, ready to receive command
+                if iter_idx == 0:
+                    self.ready_event.set()
+                iter_idx += 1
+
+                # 5) Regulate frequency
+                dt = 1 / self.frequency
+                t_end = t_start + dt * iter_idx
+                time.sleep(t_end - t_start)
+
+        finally:
+            self.ready_event.set()
+            gr.disconnect()
+
 
 class RobotiqGripper:
     """
@@ -221,24 +476,24 @@ class RobotiqGripper:
         :param log: Whether to print the results to log.
         """
         # first try to open in case we are holding an object
-        (position, status) = self.move_and_wait_for_pos(self.get_open_position(), 128, 1)
+        (open_pos, status) = self.move_and_wait_for_pos(self.get_open_position(), 128, 1)
         if RobotiqGripper.ObjectStatus(status) != RobotiqGripper.ObjectStatus.AT_DEST:
             raise RuntimeError(f"Calibration failed opening to start: {str(status)}")
-        assert position >= self._min_position
+        assert open_pos >= self._min_position
 
         # try to close as far as possible, and record the number
-        (position, status) = self.move_and_wait_for_pos(self.get_closed_position(), 128, 1)
+        (close_pos, status) = self.move_and_wait_for_pos(self.get_closed_position(), 128, 1)
         #if RobotiqGripper.ObjectStatus(status) != RobotiqGripper.ObjectStatus.AT_DEST:
         #    raise RuntimeError(f"Calibration failed because of an object: {str(status)}")
-        assert position <= self._max_position
-        self._max_position = position
+        assert close_pos <= self._max_position
+        self._max_position = close_pos
 
         # try to open as far as possible, and record the number
-        (position, status) = self.move_and_wait_for_pos(self.get_open_position(), 64, 1)
+        #(position, status) = self.move_and_wait_for_pos(self.get_open_position(), 64, 1)
         #if RobotiqGripper.ObjectStatus(status) != RobotiqGripper.ObjectStatus.AT_DEST:
         #    raise RuntimeError(f"Calibration failed because of an object: {str(status)}")
-        assert position >= self._min_position
-        self._min_position = position
+        #assert position >= self._min_position
+        self._min_position = open_pos
 
         if log:
             print(f"Gripper auto-calibrated to [{self.get_min_position()}, {self.get_max_position()}]")
@@ -324,3 +579,4 @@ if __name__ == "__main__":
         pos = int(128 + 100 * math.sin(phase))
         gripper.push_position(pos)
         time.sleep(dt)
+

@@ -19,7 +19,7 @@ from typing import Any
 import draccus
 
 from lerobot.configs.types import FeatureType, PolicyFeature, PipelineFeatureType
-from lerobot.robots.ur.tff_controller import TaskFrameCommand
+from lerobot.robots.ur.tf_controller import TaskFrameCommand
 from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE
 

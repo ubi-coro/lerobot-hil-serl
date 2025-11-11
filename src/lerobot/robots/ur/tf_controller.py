@@ -1,21 +1,3 @@
-"""Updated RTDEInterpolationController with per‑axis task‑frame formalism.
-Only the worker file changed – the public TF_UR class will get a helper next.
-
-Key additions
--------------
-* Mode enum  (POS, VEL, FORCE, FIXED)
-* TFCommand  (SET)
-* new queue schema (servo + task‑frame)
-* internal task‑frame state & mixer inside the 1 kHz loop
-* automatic force_mode / endForceMode depending on mode_mask
-
-Assumptions
------------
-* Task frame is static after first SET (no tracking‑mode yet)
-* At most one translational force axis – TF_UR limit is 3, easy to relax
-* kp / kd are diagonal
-* Units:  metres, rad, N, N·m
-"""
 import collections
 import os
 import time
@@ -52,7 +34,12 @@ class Command(enum.IntEnum):
 
 @dataclass
 class TaskFrameCommand:
-    """One message = full spec for all 6 DoF"""
+    """Container for full 6-DoF task-frame commands (pose/vel/force + gains, bounds).
+
+    Encodes a single atomic update for the controller: command type, world->task
+    transform, per-axis modes, targets, impedance gains, and soft workspace bounds.
+    Designed to serialize cleanly into a shared-memory queue.
+    """
     cmd: Command = Command.SET
     T_WF: Optional[list]         = None  # world→task transform as a 6 vec
     mode: Optional[list[AxisMode]]            = None  # len==6
@@ -63,6 +50,12 @@ class TaskFrameCommand:
     min_pose_rpy: Optional[list] = None  # 6 pos [m], rot [rad] in rpy
 
     def to_queue_dict(self):
+        """Convert the command to a queue-friendly dict of NumPy arrays and ints.
+
+        Returns:
+            dict: Mapping of field names to primitive/NumPy values suitable for
+                `SharedMemoryQueue.put(...)`. Missing optional fields are omitted.
+        """
         d = asdict(self)
         try:
             d["cmd"]    = self.cmd.value
@@ -78,6 +71,11 @@ class TaskFrameCommand:
         return d
 
     def to_robot_action(self):
+        """Map the command to a simple per-axis action dict for TF_UR's send_action syntax.
+
+        Returns:
+            dict: Keys like `'x.pos'`, `'y.vel'`, `'wx.wrench'` depending on `mode`.
+        """
         action_dict = {}
         for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"]):
             if self.mode[i] == AxisMode.POS:
@@ -89,7 +87,12 @@ class TaskFrameCommand:
         return action_dict
 
     def update(self, cmd: 'TaskFrameCommand'):
-        """Update only the fields that are not None in the new cmd."""
+        """Update only fields that are not None in cmd (in-place).
+
+        Args:
+            cmd (TaskFrameCommand): Partial command whose non-``None`` fields
+                overwrite this instance.
+        """
         self.cmd = cmd.cmd
         if cmd.T_WF is not None:
             self.T_WF = cmd.T_WF
@@ -108,6 +111,11 @@ class TaskFrameCommand:
 
     @classmethod
     def make_default_cmd(cls):
+        """Create a sane default command (zero targets, PURE_VEL, wide bounds).
+
+        Returns:
+            TaskFrameCommand: Initialized with zeros and diagonal gains.
+        """
         return cls(
             cmd=Command.SET,
             T_WF=[0] * 6,
@@ -121,12 +129,36 @@ class TaskFrameCommand:
 
 
 class RTDETFFController(mp.Process):
-    """
-    An RTDE‐based “task‐frame force‐feedback” controller.  This replaces the old
-    servoL/waypoint loop with a full 6D impedance implemented via forceMode(...).
+    """RTDE task-frame controller with per-axis modes and 6D impedance.
+
+    Runs a 1 kHz loop that:
+      • Reads commands from shared memory (pose/vel/force modes per axis)
+      • Estimates current state in the task frame
+      • Integrates virtual targets (for IMPEDANCE_VEL)
+      • Computes and bounds a wrench, then applies it via `forceMode(...)`
+
+    Notes:
+        - Translation bounds are enforced directly; rotation bounds are applied
+          in RPY space but the controller operates internally on rot-vectors.
+        - Automatically (re)enters `forceMode` as needed.
+
+    Attributes:
+        config (URConfig): Runtime configuration (RTDE IP, gains, limits, etc.).
+        ready_event (mp.Event): Set once the control loop is alive.
+        robot_cmd_queue (SharedMemoryQueue): Incoming `TaskFrameCommand`s.
+        robot_out_rb (SharedMemoryRingBuffer): Outgoing robot state samples.
     """
 
     def __init__(self, config: 'URConfig'):
+        """Initialize controller processes, queues, and default internal state.
+
+        Args:
+            config (URConfig): Configuration (frequency, limits, payload/TCP, etc.).
+
+        Raises:
+            AssertionError: If `config` fields are inconsistent (validated/normalized).
+        """
+
         config = _validate_config(config)
         super().__init__(name="RTDEPositionalController")
         self.config = config
@@ -189,14 +221,25 @@ class RTDETFFController(mp.Process):
 
     # =========== launch & shutdown =============
     def connect(self):
+        """Spawn the control process and block until the first iteration completes."""
         self.start()
 
     def start(self, wait=True):
+        """Start the control process.
+
+        Args:
+            wait (bool, optional): If True, block until the loop signals readiness.
+        """
         super().start()
         if wait:
             self.start_wait()
 
     def stop(self, wait=True):
+        """Request a graceful shutdown of the control loop.
+
+        Args:
+            wait (bool, optional): If True, join the process before returning.
+        """
         # Send a STOP command
         msg = {'cmd': Command.STOP.value}
         self.robot_cmd_queue.put(msg)
@@ -204,29 +247,41 @@ class RTDETFFController(mp.Process):
             self.stop_wait()
 
     def start_wait(self):
+        """Block until the controller signals ready or the launch timeout elapses.
+
+        Raises:
+            AssertionError: If the process is not alive after waiting.
+        """
         self.ready_event.wait(self.config.launch_timeout)
         assert self.is_alive()
 
     def stop_wait(self):
+        """Join the control process (blocks until termination)."""
         self.join()
 
     @property
     def is_ready(self):
+        """bool: True once the control loop completed its first successful cycle."""
         return self.ready_event.is_set()
 
     # =========== context manager ============
     def __enter__(self):
+        """Context: start controller and return self (blocks until ready)."""
         self.start()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context: stop controller on exit, regardless of exceptions."""
         self.stop()
 
     # =========== sending a new TaskFrameCommand ============
     def send_cmd(self, cmd: TaskFrameCommand):
-        """
-        Merges the incoming cmd fields into the last_robot_cmd,
-        then pushes the updated last_robot_cmd into the shared queue.
+        """Merge cmd into the last command and push the result to the queue.
+        The first call stores a full copy; subsequent calls update only fields
+        that are provided (non-None).
+
+        Args:
+            cmd (TaskFrameCommand): Partial or full command to apply.
         """
         if self.last_robot_cmd is None:
             # First time ever: store a full copy
@@ -246,24 +301,59 @@ class RTDETFFController(mp.Process):
         self.robot_cmd_queue.put(self.last_robot_cmd.to_queue_dict())
 
     def zero_ft(self):
-        """Tell the controller thread to re‐zero the force‐torque sensor."""
+        """Re-zero the force-torque sensor in the control loop."""
         # We only need the cmd field for ZERO_FT, everything else can be None
         zero_cmd = TaskFrameCommand(cmd=Command.ZERO_FT)
         self.send_cmd(zero_cmd)
 
     # =========== get robot state from ring buffer ============
     def get_robot_state(self, k=None, out=None):
+        """Get the latest (or last k) robot state sample(s).
+
+        Args:
+            k (int, optional): If `None`, return the latest sample. If an integer,
+                return the last `k` samples.
+            out (dict, optional): Optional preallocated output buffer.
+
+        Returns:
+            dict or tuple[dict,...]: State dict(s) including:
+                - ``'ActualTCPPose'`` (6, ) task-frame pose (x,y,z, rx,ry,rz)
+                - ``'ActualTCPSpeed'`` (6, ) task-frame twist
+                - ``'ActualTCPForce'`` (6, ) task-frame wrench
+                - any additional keys requested via `config.receive_keys`
+                - ``'SetTCPForce'`` (6, ) last commanded wrench (world frame)
+                - ``'timestamp'`` (float)
+        """
         if k is None:
             return self.robot_out_rb.get(out=out)
         else:
             return self.robot_out_rb.get_last_k(k=k, out=out)
 
     def get_all_robot_states(self):
+        """Return all buffered robot states currently stored in the ring buffer.
+        Returns:
+            list[dict]: Chronologically ordered state samples.
+        """
         return self.robot_out_rb.get_all()
 
     # ========= main loop in process ============
-    # noinspection PyUnreachableCode
     def run(self):
+        """Control-loop entry point (child process).
+
+        Steps:
+            1) Configure RT scheduling (optional) and connect RTDE.
+            2) Initialize `forceMode` and virtual targets.
+            3) Loop at `config.frequency`:
+               - Drain and apply queued `TaskFrameCommand`s
+               - Read current state and write it to the ring buffer
+               - Integrate virtual pose for IMPEDANCE_VEL
+               - Compute per-axis wrench from mode/targets/gains
+               - Clamp wrench using pose bounds and contact-aware scaling
+               - Apply wrench via `forceMode`
+            4) On shutdown, stop force mode and disconnect cleanly.
+
+        This method is not intended to be called directly; use `start()`/`stop()`.
+        """
         # 1) Enable soft real‐time (optional)
         if self.config.soft_real_time:
             os.sched_setaffinity(0, {self.config.rt_core})
@@ -499,7 +589,6 @@ class RTDETFFController(mp.Process):
                 self.apply_wrench_bounds(pose_F, desired_wrench=wrench_W, measured_wrench=measured_wrench_F)
 
                 # 5.8) command the task space wrench via forceMode(...)
-                #print("Wrench", wrench_W, "Target", self.target)
                 if not self.force_on:
                     # If for some reason we dropped out of forceMode, re‐enter it
                     rtde_c.forceMode(
@@ -561,6 +650,14 @@ class RTDETFFController(mp.Process):
                 print(f"[RTDETFFController] Disconnected from robot {robot_ip}")
 
     def read_current_state(self, rtde_r):
+        """Read world state from RTDE and express pose/twist/wrench in the task frame.
+
+        Args:
+            rtde_r: `RTDEReceiveInterface` (or mock) used to query current state.
+
+        Returns:
+            dict: ``{'ActualTCPPose','ActualTCPSpeed','ActualTCPForce'}`` in task frame.
+        """
         # 1) get the world→frame 4×4
         T = np.linalg.inv(self.sixvec_to_homogeneous(self.T_WF))
         R_fw = T[:3, :3]        # rotation: world → frame
@@ -613,7 +710,14 @@ class RTDETFFController(mp.Process):
         }
 
     def clip_pose(self, pose: np.ndarray) -> np.ndarray:
-        """Clamp translation per-axis; clamp rotation in RPY space, return rot-vec form."""
+        """Clamp translation per-axis and rotation in RPY space; return rot-vector.
+
+        Args:
+            pose (np.ndarray): 6-vector (x,y,z, rx,ry,rz) in task frame.
+
+        Returns:
+            np.ndarray: Bounded pose as rotation-vector representation.
+        """
         out = pose.copy()
 
         # --- translation ---
@@ -635,10 +739,17 @@ class RTDETFFController(mp.Process):
         return out
 
     def apply_wrench_bounds(self, pose: np.ndarray, desired_wrench: np.ndarray, measured_wrench: np.ndarray):
+        """Contact-aware wrench limiting and boundary protection (in-place).
+
+        Zeroes or scales components that would push the TCP further outside
+        position/orientation limits and applies exponential scaling near contact.
+
+        Args:
+            pose (np.ndarray): Current task-frame pose (6,).
+            desired_wrench (np.ndarray): Computed wrench to be bounded (modified).
+            measured_wrench (np.ndarray): Measured task-frame wrench from RTDE.
         """
-        Zero individual wrench components that would push the TCP farther
-        outside its per-axis (xyz + RPY) bounds.
-        """
+
         scale_vec = np.array([1.0] * 6)
         for i in range(6):
             if not self.config.enable_contact_aware_force_scaling[i]:
@@ -686,29 +797,26 @@ class RTDETFFController(mp.Process):
 
     @staticmethod
     def _rotvec_to_rpy(rv: np.ndarray) -> np.ndarray:
-        """rotation-vector → roll-pitch-yaw (xyz, radians)."""
+        """Rotation-vector → roll-pitch-yaw (xyz order, radians)."""
         return R.from_rotvec(rv).as_euler('xyz', degrees=False)
 
     @staticmethod
     def _rpy_to_rotvec(rpy: np.ndarray) -> np.ndarray:
-        """roll-pitch-yaw → rotation-vector (axis-angle)."""
+        """Roll-pitch-yaw (xyz, radians) → rotation-vector (axis-angle)."""
         return R.from_euler('xyz', rpy, degrees=False).as_rotvec()
 
     @staticmethod
     def homogenous_to_sixvec(T):
-        """
-        Convert a 4x4 homogeneous transformation matrix into a 6-vector:
-        [tx, ty, tz, rx, ry, rz], where (rx, ry, rz) is the rotation vector (axis-angle).
+        """4×4 homogeneous transform → 6-vector [tx,ty,tz, rx,ry,rz].
 
-        Parameters:
-        -----------
-        T : numpy.ndarray
-            4x4 homogeneous transformation matrix
+        Args:
+            T (np.ndarray): Homogeneous matrix (4,4).
 
         Returns:
-        --------
-        six_vec : numpy.ndarray
-            6-element vector: [tx, ty, tz, rx, ry, rz]
+            list[float]: Translation + rotation-vector.
+
+        Raises:
+            ValueError: If input is not (4,4).
         """
         if T.shape != (4, 4):
             raise ValueError("Input must be a 4x4 matrix.")
@@ -729,23 +837,16 @@ class RTDETFFController(mp.Process):
 
     @staticmethod
     def sixvec_to_homogeneous(six_vec):
-        """
-        Convert a 6-element vector [tx, ty, tz, rx, ry, rz]
-        into a 4x4 homogeneous transformation matrix.
+        """6-vector [tx,ty,tz, rx,ry,rz] → 4×4 homogeneous transform.
 
-        Parameters
-        ----------
-        six_vec : array-like, shape (6,)
-            First three elements are translation [tx,ty,tz];
-            last three are rotation vector (axis * angle) [rx,ry,rz].
+        Args:
+            six_vec (array-like): First 3 translation, last 3 rotation-vector.
 
-        Returns
-        -------
-        T : ndarray, shape (4,4)
-            Homogeneous transform:
-                [ R  t ]
-                [ 0  1 ]
-            where R = expmap(rot_vec) and t = [tx,ty,tz].
+        Returns:
+            np.ndarray: Homogeneous transform (4,4).
+
+        Raises:
+            ValueError: If input shape is not (6,).
         """
         six = np.asarray(six_vec, dtype=float)
         if six.shape != (6,):
@@ -766,10 +867,35 @@ class RTDETFFController(mp.Process):
 
     @staticmethod
     def exp_scale(f_meas, f_thresh, s_min=0.2, theta=0.1):
+        """Exponential scaling from contact force to [s_min, 1].
+
+        Args:
+            f_meas (float): Measured absolute force/moment (≥0).
+            f_thresh (float): Nominal limit (unused here; for symmetry with caller).
+            s_min (float, optional): Lower bound of scaling ∈ (0,1].
+            theta (float, optional): Decay constant; larger → slower decay.
+
+        Returns:
+            float: Scale factor in [s_min, 1].
+        """
         return s_min + (1 - s_min) * np.exp(-f_meas / theta)
 
 
 def _validate_config(config: 'URConfig') -> 'URConfig':
+    """Normalize and validate controller configuration.
+
+    Checks frequency range, TCP/payload shapes, instantiates a shared memory
+    manager if missing, and enforces simple physical bounds.
+
+    Args:
+        config (URConfig): User-provided configuration.
+
+    Returns:
+        URConfig: Possibly modified/normalized config.
+
+    Raises:
+        AssertionError: On invalid frequency, payload/TCP shapes, or types.
+    """
     assert 0 < config.frequency <= 500
     if config.tcp_offset_pose is not None:
         config.tcp_offset_pose = np.array(config.tcp_offset_pose)

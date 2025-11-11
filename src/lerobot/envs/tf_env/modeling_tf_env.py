@@ -11,7 +11,7 @@ from lerobot.datasets.pipeline_features import create_initial_features
 from lerobot.envs.factory import RobotEnvInterface
 from lerobot.envs.robot_env.configuration_robot_env import HILSerlProcessorConfig
 from lerobot.robots.ur import TF_UR
-from lerobot.robots.ur.tff_controller import TaskFrameCommand, AxisMode
+from lerobot.robots.ur.tf_controller import TaskFrameCommand, AxisMode
 from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.constants import ACTION
 from lerobot.utils.robot_utils import busy_wait
@@ -35,7 +35,7 @@ class TaskFrameEnv(RobotEnvInterface):
         self.robot_dict = robot_dict
         self.cameras = cameras if cameras else {}
         self.task_frame = processor.task_frame.command
-        self.control_mask = processor.task_frame.control_mask
+        self.control_mask = {name: np.asarray(msk).astype(bool) for name, msk in processor.task_frame.control_mask.items()}
         self.use_gripper = processor.gripper.use_gripper
         self.reset_pose = processor.reset.fixed_reset_joint_positions
         self.reset_time_s = processor.reset.reset_time_s

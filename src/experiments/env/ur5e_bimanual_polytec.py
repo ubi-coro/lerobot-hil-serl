@@ -8,7 +8,7 @@ from lerobot.cameras.realsense import RealSenseCameraConfig
 from lerobot.envs import TFRobotEnvConfig
 from lerobot.envs.configs import EnvConfig
 from lerobot.robots.ur import URConfig
-from lerobot.robots.ur.tff_controller import TaskFrameCommand, AxisMode
+from lerobot.robots.ur.tf_controller import TaskFrameCommand, AxisMode
 from lerobot.teleoperators import TeleopEvents
 from lerobot.teleoperators.spacemouse import SpacemouseConfig
 
@@ -80,7 +80,7 @@ class UR5eBimanualPolytecEnvConfig(TFRobotEnvConfig):
         }
         self.teleop = {
             "left": SpacemouseConfig(path="/dev/hidraw5"),
-            "right": SpacemouseConfig(path="/dev/hidraw6")
+            "right": SpacemouseConfig(path="/dev/hidraw2")
         }
         self.cameras = {
             "left_wrist": RealSenseCameraConfig(

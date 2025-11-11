@@ -25,9 +25,9 @@ from lerobot.cameras import make_cameras_from_configs
 from lerobot.processor.hil_processor import GRIPPER_KEY
 from lerobot.robots import Robot
 from lerobot.robots.ur import URConfig
-from lerobot.robots.ur.rtde_robotiq_controller import RTDERobotiqController
-from lerobot.robots.ur.tff_controller import TaskFrameCommand, RTDETFFController, AxisMode
-from lerobot.robots.ur.tff_mock_controller import RTDETFFMockController
+from lerobot.robots.ur.robotiq_controller import RTDERobotiqController
+from lerobot.robots.ur.tf_controller import TaskFrameCommand, RTDETFFController, AxisMode
+from lerobot.robots.ur.tf_mock_controller import RTDETFFMockController
 from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnectedError
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,7 @@ class TF_UR(Robot):
     ]
 
     def __init__(self, config: URConfig):
+        # super().__init__(config)  # we avoid super's init because we dont have or want a calibration dir
         self.config = config
         self.robot_type = self.name
         self.id = config.id
