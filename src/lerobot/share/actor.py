@@ -292,7 +292,7 @@ def act_with_policy(
 
     for interaction_step in range(cfg.policy.online_steps):
 
-        start_time = time.perf_counter()
+        start_loop_t = time.perf_counter()
         if shutdown_event.is_set():
             logging.info("[ACTOR] Shutting down act_with_policy")
             return
@@ -413,7 +413,8 @@ def act_with_policy(
             logging.info(
                 f"[ACTOR] --- Finished {episode_cnt} episode, "
                 f"successful? {['no', 'yes'][int(info.get('success', False))]}, "
-                f"episode reward: {sum_reward_episode}, "
+                f"episode reward: {episode_info['Episodic reward']}, "
+                f"episode time: {episode_info['Cycle Time [s]']:.2f} s,"
                 f"step: {interaction_step}, "
             )
 
@@ -434,8 +435,13 @@ def act_with_policy(
             transition = env_processor(transition)
 
         if cfg.env.fps is not None:
-            dt_time = time.perf_counter() - start_time
-            busy_wait(1 / cfg.env.fps - dt_time)
+            dt_load = time.perf_counter() - start_loop_t
+            busy_wait(1 / cfg.env.fps - dt_load)
+            dt_loop = time.perf_counter() - start_loop_t
+            logging.info(
+                f"dt_loop: {dt_loop * 1000:5.2f}ms ({1 / dt_loop:3.1f}hz), "
+                f"dt_load: {dt_load * 1000:5.2f}ms ({1 / dt_load:3.1f}hz)"
+            )
 
 
 #  Communication Functions - Group all gRPC/messaging functions

@@ -467,7 +467,6 @@ class RTDETFFController(mp.Process):
                         wrench_W[i] = self.kp[i] * pos_err_vec[i] + self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
                     elif mode_i == AxisMode.PURE_VEL:
                         vel_err = self.target[i] - v_F[i]
-                        #print("Vel Error", i, vel_err)
                         wrench_W[i] = self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
                     elif mode_i == AxisMode.FORCE:
                         wrench_W[i] = float(self.target[i])  # directly obey commanded force

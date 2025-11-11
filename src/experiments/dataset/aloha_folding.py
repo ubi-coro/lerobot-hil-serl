@@ -1,21 +1,12 @@
 from dataclasses import dataclass
-from pathlib import Path
 
-from pynput import keyboard
-
-from lerobot.cameras.opencv import OpenCVCameraConfig
-from lerobot.cameras.realsense import RealSenseCameraConfig
-from lerobot.envs.configs import HilSerlRobotEnvConfig, EnvConfig
-from lerobot.robots.viperx import ViperXConfig
 from lerobot.share.configs import DatasetRecordConfig
-from lerobot.teleoperators import TeleopEvents
-from lerobot.teleoperators.widowx import WidowXConfig
 
 
 @dataclass
 @DatasetRecordConfig.register_subclass("aloha_folding")
 class AlohaFoldingDatasetConfig(DatasetRecordConfig):
-    repo_id: str = "hoodie_folding/base"
+    repo_id: str = "hoodie_folding_v3/base"
     single_task: str = "Fold the hoodie"
     root: str = "/media/nvme1/jstranghoener/lerobot/data/jannick-st/hoodie_folding_v3/base"
     num_episodes: int = 30

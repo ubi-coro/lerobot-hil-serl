@@ -1,14 +1,12 @@
 from dataclasses import dataclass
-from functools import cached_property
 from pathlib import Path
 
 from pynput import keyboard
 
 from lerobot.cameras.opencv import OpenCVCameraConfig
 from lerobot.cameras.realsense import RealSenseCameraConfig
-from lerobot.envs.configs import HilSerlRobotEnvConfig, EnvConfig
-from lerobot.envs.robot_env import RobotEnv
-from lerobot.processor.migrate_calibration_processor import MigrateCalibrationObsProcessorStep, MigrateInterventionActionProcessorStep
+from lerobot.envs import RobotEnvConfig
+from lerobot.envs.configs import EnvConfig
 from lerobot.teleoperators import TeleopEvents
 from tests.mocks.mock_robot import MockRobotConfig
 from tests.mocks.mock_teleop import MockTeleopConfig
@@ -16,7 +14,7 @@ from tests.mocks.mock_teleop import MockTeleopConfig
 
 @dataclass
 @EnvConfig.register_subclass("mock")
-class MockEnvConfig(HilSerlRobotEnvConfig):
+class MockEnvConfig(RobotEnvConfig):
     use_aloha_cameras: bool = False
 
     def __post_init__(self):
@@ -68,7 +66,6 @@ class MockEnvConfig(HilSerlRobotEnvConfig):
         self.processor.reset.terminate_on_success = True
         self.processor.reset.teleop_on_reset = True
         self.processor.reset.reset_time_s = 10.0
-        #self.processor.control_time_s = 10.0
         self.processor.events.key_mapping = {
             TeleopEvents.RERECORD_EPISODE: keyboard.Key.left,
             TeleopEvents.TERMINATE_EPISODE: keyboard.Key.right

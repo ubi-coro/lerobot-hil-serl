@@ -110,12 +110,12 @@ def env_to_policy_features(env_cfg: 'EnvConfig') -> dict[str, PolicyFeature]:
     return policy_features
 
 
-def env_to_dataset_features(env_cfg: 'EnvConfig') -> dict:
+def env_to_dataset_features(env_features: dict[str, PolicyFeature]) -> dict:
     ds_features = {}
-    for key, ft in env_cfg.features.items():
+    for key, ft in env_features.items():
         new_ft = {"shape": ft.shape}
         if ft.type == FeatureType.VISUAL:
-            new_ft["dtype"] = "video",
+            new_ft["dtype"] = "video"
             new_ft["names"] = ["channels", "height", "width"]
         else:
             new_ft["dtype"] = "float32"

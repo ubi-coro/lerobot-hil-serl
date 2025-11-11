@@ -240,7 +240,6 @@ class TF_UR(Robot):
 
         if self.gripper is not None and f"{GRIPPER_KEY}.pos" in action:
             self.send_gripper_action(action[f"{GRIPPER_KEY}.pos"])
-            gripper_action = action[f"{GRIPPER_KEY}.pos"]
 
         self.controller.send_cmd(self.task_frame)
 

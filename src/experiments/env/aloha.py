@@ -7,7 +7,8 @@ from pynput import keyboard
 from lerobot.cameras import CameraConfig
 from lerobot.cameras.opencv import OpenCVCameraConfig
 from lerobot.cameras.realsense import RealSenseCameraConfig
-from lerobot.envs.configs import HilSerlRobotEnvConfig, EnvConfig
+from lerobot.envs import RobotEnvConfig
+from lerobot.envs.configs import EnvConfig
 from lerobot.robots import RobotConfig
 from lerobot.robots.viperx.viperx import ViperXConfig
 from lerobot.teleoperators import TeleopEvents, TeleoperatorConfig
@@ -16,7 +17,7 @@ from lerobot.teleoperators.widowx.widowx import WidowXConfig
 
 @dataclass
 @EnvConfig.register_subclass("aloha_bimanual")
-class AlohaBimanualEnvConfig(HilSerlRobotEnvConfig):
+class AlohaBimanualEnvConfig(RobotEnvConfig):
     benchmark: bool = False
 
     def __post_init__(self):
@@ -89,7 +90,7 @@ class AlohaBimanualSafeEnvConfig(AlohaBimanualEnvConfig):
 
 @dataclass
 @EnvConfig.register_subclass("aloha_single")
-class AlohaSingleEnvConfig(HilSerlRobotEnvConfig):
+class AlohaSingleEnvConfig(RobotEnvConfig):
     teleop: TeleoperatorConfig = WidowXConfig(port="/dev/ttyDXL_leader_left", id="left")
     robot: RobotConfig = ViperXConfig(port="/dev/ttyDXL_follower_left", id="left")
     cameras: dict[str, CameraConfig] = field(

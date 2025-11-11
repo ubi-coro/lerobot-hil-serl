@@ -13,13 +13,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from abc import ABC, abstractmethod
+from typing import Any
 import importlib
 
 import gymnasium as gym
 from gymnasium.envs.registration import registry as gym_registry
 
-from lerobot.envs.configs import AlohaEnv, EnvConfig, LiberoEnv, PushtEnv
+from lerobot.cameras import Camera
+from lerobot.envs.configs import AlohaEnv, EnvConfig, LiberoEnv, PushtEnv, HILSerlProcessorConfig
 from lerobot.envs.utils import _call_make_env, _download_hub_file, _import_hub_module, _normalize_hub_result
+from lerobot.robots import Robot
 
 
 def make_env_config(env_type: str, **kwargs) -> EnvConfig:
@@ -134,3 +138,24 @@ def make_env(
     # normalize to {suite: {task_id: vec_env}} for consistency
     suite_name = cfg.type  # e.g., "pusht", "aloha"
     return {suite_name: {0: vec}}
+
+
+class RobotEnvInterface(gym.Env, ABC):
+    """Mixin for real-world envs that must expose get_features_from_cfg(cfg)."""
+
+    @abstractmethod
+    def __init__(
+        self,
+        robot_dict: dict[str, Robot],
+        cameras: dict[str, Camera] | None = None,
+        processor: HILSerlProcessorConfig | None = None
+    ):
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def get_features_from_cfg(cfg: Any) -> Any:
+        """Return feature specs derived from cfg."""
+        raise NotImplementedError
+
+
