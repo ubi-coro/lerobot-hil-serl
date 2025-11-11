@@ -4,8 +4,8 @@ from typing import Any
 import numpy as np
 import torch
 
-from lerobot.configs.types import PipelineFeatureType, PolicyFeature
-from lerobot.utils.constants import OBS_IMAGE, OBS_IMAGES, OBS_STATE
+from lerobot.configs.types import PipelineFeatureType, PolicyFeature, FeatureType
+from lerobot.utils.constants import OBS_IMAGE, OBS_IMAGES, OBS_STATE, OBS_ENV_STATE, OBS_STR
 from . import EnvTransition, TransitionKey, PolicyAction, VanillaObservationProcessorStep
 from .hil_processor import TELEOP_ACTION_KEY, GRIPPER_KEY
 
@@ -89,6 +89,108 @@ class VanillaTFFProcessorStep(VanillaObservationProcessorStep):
             processed_obs[f"{OBS_STATE}"] = torch.tensor(state_parts).type(torch.float32)
 
         return processed_obs
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        """
+        Transforms feature keys from the Gym standard to the LeRobot standard.
+
+        This method standardizes the feature dictionary by renaming keys according
+        to LeRobot's conventions, ensuring that policies can be constructed correctly.
+        It handles various raw key formats, including those with an "observation." prefix.
+
+        **Renaming Rules:**
+        - `pixels` or `observation.pixels` -> `observation.image`
+        - `pixels.{cam}` or `observation.pixels.{cam}` -> `observation.images.{cam}`
+        - `environment_state` or `observation.environment_state` -> `observation.environment_state`
+        - `agent_pos` or `observation.agent_pos` -> `observation.state`
+
+        Args:
+            features: The policy features dictionary with Gym-style keys.
+
+        Returns:
+            The policy features dictionary with standardized LeRobot keys.
+        """
+        # Build a new features mapping keyed by the same FeatureType buckets
+        # We assume callers already placed features in the correct FeatureType.
+        new_features: dict[PipelineFeatureType, dict[str, PolicyFeature]] = {ft: {} for ft in features}
+
+        exact_pairs = {
+            "pixels": OBS_IMAGE,
+        }
+
+        prefix_pairs = {
+            "pixels.": f"{OBS_IMAGES}.",
+        }
+
+        # Iterate over all incoming feature buckets and normalize/move each entry
+        state_dim = 0
+        for src_ft, bucket in features.items():
+            state_dim = 0
+            for key, feat in list(bucket.items()):
+                handled = False
+
+                if self.is_state_key(key):
+                    handled = True
+
+                    name, axis, state_type = key.split(".")
+                    idx_map = {ax: i for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"])}
+
+                    if (state_type == "ee_vel" and self.add_ee_velocity_to_observation[name]) or \
+                       (state_type == "ee_wrench" and self.add_ee_velocity_to_observation[name]) or \
+                       (state_type == "ee_pos" and self.ee_pos_mask.get(name, [1]*6)[idx_map[axis]]) or \
+                       (state_type == "pos" and axis == "gripper" and self.use_gripper[name]):
+                        state_dim += 1
+
+                if handled:
+                    continue
+
+                if len(feat.shape) == 3:
+                    feat.shape = (feat.shape[2], feat.shape[0], feat.shape[1])
+
+                # Prefix-based rules (e.g. pixels.cam1 -> OBS_IMAGES.cam1)
+                for old_prefix, new_prefix in prefix_pairs.items():
+                    prefixed_old = f"{OBS_STR}.{old_prefix}"
+                    if key.startswith(prefixed_old):
+                        suffix = key[len(prefixed_old) :]
+                        new_key = f"{new_prefix}{suffix}"
+                        new_features[src_ft][new_key] = feat
+                        handled = True
+                        break
+
+                    if key.startswith(old_prefix):
+                        suffix = key[len(old_prefix) :]
+                        new_key = f"{new_prefix}{suffix}"
+                        new_features[src_ft][new_key] = feat
+                        handled = True
+                        break
+
+                if handled:
+                    continue
+
+                # Exact-name rules (pixels, environment_state, agent_pos)
+                for old, new in exact_pairs.items():
+                    if key == old or key == f"{OBS_STR}.{old}":
+                        new_key = new
+                        new_features[src_ft][new_key] = feat
+                        handled = True
+                        break
+
+                if handled:
+                    continue
+
+                # Default: keep key in the same source FeatureType bucket
+                new_features[src_ft][key] = feat
+
+            if state_dim > 0:
+                new_features[src_ft][OBS_STATE] = PolicyFeature(type=FeatureType.STATE, shape=(state_dim, ))
+
+        return new_features
+
+    def is_state_key(self, key):
+        return "pos" in key or "vel" in key or "wrench" in key
+
 
 
 @dataclass
@@ -195,6 +297,7 @@ class ActionScalingProcessorStep(ProcessorStep):
     def __post_init__(self):
         if not isinstance(self.action_scale, np.ndarray):
             self.action_scale = np.array(self.action_scale)
+        self.action_scale = torch.from_numpy(self.action_scale).to(dtype=torch.float32)
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         new_transition = transition.copy()

@@ -13,3 +13,5 @@
 # limitations under the License.
 
 from .configs import AlohaEnv, EnvConfig, PushtEnv  # noqa: F401
+from .robot_env import *
+from .tf_env import *

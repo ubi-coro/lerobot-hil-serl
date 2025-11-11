@@ -330,7 +330,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         teleop_on_reset = reset_cfg.teleop_on_reset
 
     # make dataset
-    features = env_to_dataset_features(cfg.env)
+    features = env_to_dataset_features(cfg.env.features)
     if cfg.resume:
         dataset = LeRobotDataset(
             cfg.dataset.repo_id,
@@ -405,7 +405,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 env=env,
                 fps=cfg.dataset.fps,
                 control_time_s=cfg.dataset.episode_time_s,
-                action_dim=cfg.env.action_dim,
+                action_dim=features[ACTION]["shape"][0],
                 action_processor=action_processor,
                 env_processor=env_processor,
                 policy=policy,

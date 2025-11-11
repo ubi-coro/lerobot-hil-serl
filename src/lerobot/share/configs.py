@@ -21,7 +21,7 @@ class DatasetRecordConfig(draccus.ChoiceRegistry):
     # Number of seconds for a single episode or intervention
     episode_time_s: int = 30
     # Number of seconds for a teleoperated reset
-    reset_time_s: int | None = 30
+    reset_time_s: int | None = None
     # Number of episodes to record.
     num_episodes: int = 50
     # Encode frames in the dataset into video

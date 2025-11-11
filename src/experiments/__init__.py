@@ -1,12 +1,10 @@
-from .aloha_bimanual.config import AlohaSingleEnvConfig, AlohaBimanualEnvConfig, AlohaBimanualSafeEnvConfig
-from .aloha_bimanual_v2.config import AlohaBimanualEnvConfigV2
-from .aloha_bimanual_lemgo_v2.config import AlohaBimanualDatasetConfigLemgoV2, AlohaBimanualEnvConfigLemgoV2
+from .env.mock import MockEnvConfig
+from .env.aloha import AlohaBimanualEnvConfig
+from .env.aloha_bimanual_v2 import AlohaBimanualEnvConfigV2
+from .env.aloha_bimanual_v2_lemgo import AlohaBimanualEnvConfigLemgoV2
+from .env.ur5e_bimanual_polytec import UR5eBimanualPolytecEnvConfig
 
-from .dataset_test.config import DatasetTestConfig
-
-from .aloha_folding.config import AlohaFoldingDatasetConfig
-from .aloha_unfolding.config import AlohaUnfoldingDatasetConfig
-
-from .ur5e_bimanual_polytec.config import UR5eBimanualPolytecEnvConfig
-
-from .mock_env.config import MockEnvConfig
+from .dataset.test import DatasetTestConfig
+from .dataset.aloha_folding import AlohaFoldingDatasetConfig
+from .dataset.aloha_unfolding import AlohaUnfoldingDatasetConfig
+from .dataset.aloha_bimanual_lemgo_v2 import AlohaBimanualDatasetConfigLemgoV2
