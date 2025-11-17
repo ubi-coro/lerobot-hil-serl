@@ -64,11 +64,11 @@ class AlohaBimanualEnvConfigLemgoV2(HilSerlRobotEnvConfig):
         self.processor.reset.teleop_on_reset = True
         self.processor.reset.reset_time_s = 5.0
         self.processor.events.foot_switch_mapping = {
-            (TeleopEvents.SUCCESS,): {"device": 3, "toggle": False},
-            (TeleopEvents.IS_INTERVENTION,): {"device": 5, "toggle": True},
+            (TeleopEvents.IS_INTERVENTION,): {"device": 7, "toggle": True},
         }
         self.processor.events.key_mapping = {
-            TeleopEvents.RERECORD_EPISODE: keyboard.Key.left
+            TeleopEvents.RERECORD_EPISODE: keyboard.Key.left,
+            TeleopEvents.SUCCESS: keyboard.Key.right
         }
 
     @cached_property
@@ -111,7 +111,7 @@ class AlohaBimanualEnvConfigLemgoV2(HilSerlRobotEnvConfig):
 @dataclass
 @DatasetRecordConfig.register_subclass("aloha_bimanual_lemgo_v2")
 class AlohaBimanualDatasetConfigLemgoV2(DatasetRecordConfig):
-    repo_id: str = "local/20251024_hoodie_folding_lemgo"
-    single_task: str = "Hoodie Folding Lemgo"
-    root: str = "/media/jannick/DATA/aloha_data_lerobot/jannick-st/eval_20251024_hoodie_folding_lemgo"
+    repo_id: str = "hoodie_folding/20251111_hoodie_folding_lemgo_left_twisted"
+    single_task: str = "Hoodie Folding Lemgo  Left Twisted"
+    root: str = "/mnt/DATA/lerobot/aloha_data/hoodie_folding/20251111_hoodie_folding_lemgo_left_twisted"
 
