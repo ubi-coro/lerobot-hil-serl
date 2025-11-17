@@ -68,6 +68,8 @@ class RecordConfig:
     resume: bool = False
     # Interactively take control during rollouts
     interactive: bool = True
+    # Demo mode: run policy/teleop without saving any dataset
+    demo_mode: bool = False
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.

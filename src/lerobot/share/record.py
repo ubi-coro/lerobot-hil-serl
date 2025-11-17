@@ -84,6 +84,7 @@ lerobot-record \
 """
 
 import logging
+from contextlib import nullcontext
 import time
 from dataclasses import asdict
 from pprint import pformat
@@ -331,7 +332,7 @@ def record_loop(
         return info
 
 @parser.wrap()
-def record(cfg: RecordConfig) -> LeRobotDataset:
+def record(cfg: RecordConfig) -> LeRobotDataset | None:
     init_logging()
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
@@ -343,51 +344,80 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
     teleop_on_reset = cfg.env.processor.reset.teleop_on_reset if hasattr(cfg.env, "processor") else False
 
-    if cfg.resume:
-        dataset = LeRobotDataset(
-            cfg.dataset.repo_id,
-            root=cfg.dataset.root,
-            batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-        )
-
-        if hasattr(env, "cameras") and len(env.cameras) > 0:
-            dataset.start_image_writer(
-                num_processes=cfg.dataset.num_image_writer_processes,
-                num_threads=cfg.dataset.num_image_writer_threads_per_camera * len(env.cameras),
-            )
-        sanity_check_dataset_robot_compatibility(dataset, cfg.env.type, cfg.dataset.fps, dataset_features)
+    # Demo mode: do not create any dataset
+    dataset: LeRobotDataset | None
+    if getattr(cfg, "demo_mode", False):
+        dataset = None
     else:
-        # Create empty dataset or load existing saved episodes
-        sanity_check_dataset_name(cfg.dataset.repo_id, cfg.policy)
-        dataset = LeRobotDataset.create(
-            cfg.dataset.repo_id,
-            cfg.dataset.fps,
-            root=cfg.dataset.root,
-            robot_type=cfg.env.type,
-            features=dataset_features,
-            use_videos=cfg.dataset.video,
-            image_writer_processes=cfg.dataset.num_image_writer_processes,
-            image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * len(cfg.env.cameras),
-            batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-        )
+        if cfg.resume:
+            dataset = LeRobotDataset(
+                cfg.dataset.repo_id,
+                root=cfg.dataset.root,
+                batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+            )
+
+            if hasattr(env, "cameras") and len(env.cameras) > 0:
+                dataset.start_image_writer(
+                    num_processes=cfg.dataset.num_image_writer_processes,
+                    num_threads=cfg.dataset.num_image_writer_threads_per_camera * len(env.cameras),
+                )
+            sanity_check_dataset_robot_compatibility(dataset, cfg.env.type, cfg.dataset.fps, dataset_features)
+        else:
+            # Create empty dataset or load existing saved episodes
+            sanity_check_dataset_name(cfg.dataset.repo_id, cfg.policy)
+            dataset = LeRobotDataset.create(
+                cfg.dataset.repo_id,
+                cfg.dataset.fps,
+                root=cfg.dataset.root,
+                robot_type=cfg.env.type,
+                features=dataset_features,
+                use_videos=cfg.dataset.video,
+                image_writer_processes=cfg.dataset.num_image_writer_processes,
+                image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * len(cfg.env.cameras),
+                batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+            )
 
     # Load pretrained policy
-    policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
+    if cfg.policy is None:
+        policy = None
+    else:
+        if dataset is None:
+            # Demo mode: dataset is absent. We need policy input/output features.
+            # Instead of relying on env_cfg.features (empty for real robot env configs),
+            # synthesize minimal dataset metadata from pipeline-derived dataset_features.
+            class _SyntheticMeta:
+                def __init__(self, features: dict[str, dict]):
+                    self.features = features
+            synthetic_meta = _SyntheticMeta(dataset_features)
+            policy = make_policy(cfg.policy, ds_meta=synthetic_meta)
+        else:
+            policy = make_policy(cfg.policy, ds_meta=dataset.meta)
     preprocessor = None
     postprocessor = None
     if cfg.policy is not None:
-        preprocessor, postprocessor = make_pre_post_processors(
-            policy_cfg=cfg.policy,
-            pretrained_path=cfg.policy.pretrained_path,
-            dataset_stats=rename_stats(dataset.meta.stats, cfg.dataset.rename_map),
-            preprocessor_overrides={
-                "device_processor": {"device": cfg.policy.device},
-                "rename_observations_processor": {"rename_map": cfg.dataset.rename_map},
-            },
-        )
+        if dataset is None:
+            preprocessor, postprocessor = make_pre_post_processors(
+                policy_cfg=cfg.policy,
+                pretrained_path=cfg.policy.pretrained_path,
+                preprocessor_overrides={
+                    "device_processor": {"device": cfg.policy.device},
+                    "rename_observations_processor": {"rename_map": cfg.dataset.rename_map},
+                },
+            )
+        else:
+            preprocessor, postprocessor = make_pre_post_processors(
+                policy_cfg=cfg.policy,
+                pretrained_path=cfg.policy.pretrained_path,
+                dataset_stats=rename_stats(dataset.meta.stats, cfg.dataset.rename_map),
+                preprocessor_overrides={
+                    "device_processor": {"device": cfg.policy.device},
+                    "rename_observations_processor": {"rename_map": cfg.dataset.rename_map},
+                },
+            )
 
     info = {}
-    with (VideoEncodingManager(dataset)):
+    manager = VideoEncodingManager(dataset) if dataset is not None else nullcontext()
+    with manager:
         recorded_episodes = 0
         while recorded_episodes < cfg.dataset.num_episodes and not info.get(TeleopEvents.STOP_RECORDING, False):
 
@@ -412,7 +442,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             if info.get(TeleopEvents.STOP_RECORDING, False):
                 break
 
-            log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+            next_ep = (recorded_episodes + 1)
+            log_say(f"Recording episode {next_ep}", cfg.play_sounds)
             info = record_loop(
                 env=env,
                 fps=cfg.dataset.fps,
@@ -422,7 +453,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 policy=policy,
                 preprocessor=preprocessor,
                 postprocessor=postprocessor,
-                dataset=dataset,
+                dataset=dataset if not getattr(cfg, "demo_mode", False) else None,
                 interactive=cfg.interactive,
                 single_task=cfg.dataset.single_task,
                 robot_type=cfg.env.type,
@@ -431,25 +462,31 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
             if info.get(TeleopEvents.RERECORD_EPISODE, False):
                 log_say("Re-record episode", cfg.play_sounds)
-                dataset.clear_episode_buffer()
+                if dataset is not None:
+                    dataset.clear_episode_buffer()
                 continue
 
-            if dataset.episode_buffer["size"] > 0:
-                dataset.save_episode()
+            if getattr(cfg, "demo_mode", False):
+                # In demo mode, complete the episode without saving
                 recorded_episodes += 1
                 continue
+            else:
+                if dataset.episode_buffer["size"] > 0:
+                    dataset.save_episode()
+                    recorded_episodes += 1
+                    continue
 
             if info.get(TeleopEvents.STOP_RECORDING, False):
                 break
 
-            if dataset.episode_buffer["size"] == 0:
+            if dataset is not None and dataset.episode_buffer["size"] == 0:
                 log_say("Dataset is empty, re-record episode", cfg.play_sounds)
 
     log_say("Stop recording", cfg.play_sounds, blocking=True)
 
     env.close()
 
-    if cfg.dataset.push_to_hub:
+    if dataset is not None and cfg.dataset.push_to_hub and not getattr(cfg, "demo_mode", False):
         dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
 
     log_say("Exiting", cfg.play_sounds)

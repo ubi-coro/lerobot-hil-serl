@@ -33,6 +33,7 @@ import time
 import logging
 import asyncio
 from pathlib import Path
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -470,47 +471,53 @@ def start_recording_via_api(config: Dict[str, Any]):
 
             camera_count = len(getattr(env, "cameras", {}) or {})
 
-            if cfg.resume:
-                dataset = LeRobotDataset(
-                    cfg.repo_id,
-                    root=cfg.root,
-                    batch_encoding_size=cfg.video_encoding_batch_size,
-                )
-                if camera_count > 0:
-                    dataset.start_image_writer(
-                        num_processes=cfg.num_image_writer_processes,
-                        num_threads=cfg.num_image_writer_threads_per_camera * camera_count,
-                    )
-                sanity_check_dataset_robot_compatibility(dataset, env_cfg.type, cfg.fps, dataset_features)
-                try:
-                    recording_worker.existing_dataset_episodes = int(getattr(dataset, "num_episodes", 0))
-                except Exception:
-                    recording_worker.existing_dataset_episodes = None
+            if demo_mode:
+                dataset = None
+                recording_worker.existing_dataset_episodes = None
+                recording_worker.dataset = None
             else:
-                dataset = LeRobotDataset.create(
-                    repo_id=cfg.repo_id,
-                    fps=cfg.fps,
-                    root=cfg.root,
-                    robot_type=env_cfg.type,
-                    features=dataset_features,
-                    use_videos=cfg.video,
-                    image_writer_processes=cfg.num_image_writer_processes,
-                    image_writer_threads=cfg.num_image_writer_threads_per_camera * camera_count,
-                    batch_encoding_size=cfg.video_encoding_batch_size,
-                )
-                recording_worker.existing_dataset_episodes = 0
+                if cfg.resume:
+                    dataset = LeRobotDataset(
+                        cfg.repo_id,
+                        root=cfg.root,
+                        batch_encoding_size=cfg.video_encoding_batch_size,
+                    )
+                    if camera_count > 0:
+                        dataset.start_image_writer(
+                            num_processes=cfg.num_image_writer_processes,
+                            num_threads=cfg.num_image_writer_threads_per_camera * camera_count,
+                        )
+                    sanity_check_dataset_robot_compatibility(dataset, env_cfg.type, cfg.fps, dataset_features)
+                    try:
+                        recording_worker.existing_dataset_episodes = int(getattr(dataset, "num_episodes", 0))
+                    except Exception:
+                        recording_worker.existing_dataset_episodes = None
+                else:
+                    dataset = LeRobotDataset.create(
+                        repo_id=cfg.repo_id,
+                        fps=cfg.fps,
+                        root=cfg.root,
+                        robot_type=env_cfg.type,
+                        features=dataset_features,
+                        use_videos=cfg.video,
+                        image_writer_processes=cfg.num_image_writer_processes,
+                        image_writer_threads=cfg.num_image_writer_threads_per_camera * camera_count,
+                        batch_encoding_size=cfg.video_encoding_batch_size,
+                    )
+                    recording_worker.existing_dataset_episodes = 0
 
-            recording_worker.dataset = dataset
+                recording_worker.dataset = dataset
 
-            orig_add_frame = dataset.add_frame
+                # Hook frame counting only when a dataset exists
+                orig_add_frame = dataset.add_frame
 
-            def add_frame_hook(frame):
-                with recording_worker.status_lock:
-                    recording_worker.total_frames += 1
-                    recording_worker.episode_frames += 1
-                return orig_add_frame(frame)
+                def add_frame_hook(frame):
+                    with recording_worker.status_lock:
+                        recording_worker.total_frames += 1
+                        recording_worker.episode_frames += 1
+                    return orig_add_frame(frame)
 
-            dataset.add_frame = add_frame_hook  # type: ignore
+                dataset.add_frame = add_frame_hook  # type: ignore
 
             if demo_mode:
                 policy_cfg = policy_cfg_for_name or PreTrainedConfig.from_pretrained(cfg.policyPath)
@@ -518,11 +525,11 @@ def start_recording_via_api(config: Dict[str, Any]):
                 policy_device = get_safe_torch_device(getattr(policy_cfg, "device", "cpu") or "cpu")
                 policy_cfg.device = str(policy_device)
                 use_amp = bool(getattr(policy_cfg, "use_amp", False))
-                policy = make_policy(policy_cfg, ds_meta=dataset.meta)
+                # In demo mode, avoid dataset dependency: infer features from env_cfg and load processors from pretrained
+                policy = make_policy(policy_cfg, env_cfg=env_cfg)
                 preprocessor, postprocessor = make_pre_post_processors(
                     policy_cfg=policy_cfg,
                     pretrained_path=policy_cfg.pretrained_path,
-                    dataset_stats=rename_stats(dataset.meta.stats, cfg.rename_map),
                     preprocessor_overrides={
                         "device_processor": {"device": str(policy_device)},
                         "rename_observations_processor": {"rename_map": cfg.rename_map},
@@ -544,7 +551,8 @@ def start_recording_via_api(config: Dict[str, Any]):
             teleop_reset_cfg = getattr(getattr(env_cfg, "processor", None), "reset", None)
             teleop_on_reset = bool(getattr(teleop_reset_cfg, "teleop_on_reset", False))
 
-            with VideoEncodingManager(dataset):
+            manager = VideoEncodingManager(dataset) if dataset is not None else nullcontext()
+            with manager:
                 if teleop_on_reset:
                     with recording_worker.status_lock:
                         recording_worker.phase = "warmup"
@@ -587,7 +595,7 @@ def start_recording_via_api(config: Dict[str, Any]):
                         action_dim=env_cfg.action_dim,
                         action_processor=action_processor,
                         env_processor=env_processor,
-                        dataset=dataset,
+                        dataset=(None if demo_mode else dataset),
                         policy=policy,
                         preprocessor=preprocessor,
                         postprocessor=postprocessor,
@@ -602,23 +610,29 @@ def start_recording_via_api(config: Dict[str, Any]):
 
                     if last_info.get(TeleopEvents.RERECORD_EPISODE, False):
                         log_say("Re-record episode", cfg.play_sounds)
-                        dataset.clear_episode_buffer()
+                        if dataset is not None:
+                            dataset.clear_episode_buffer()
                         events.reset()
                         continue
 
-                    episode_size = int(dataset.episode_buffer.get("size", 0))
-                    if episode_size > 0:
-                        with recording_worker.status_lock:
-                            recording_worker.phase = "processing"
-                            recording_worker.phase_total_s = None
-                            recording_worker.phase_start_t = time.perf_counter()
-                        dataset.save_episode()
+                    if demo_mode:
+                        # In demo mode, we do not save any data; count an episode on completion
                         recorded_episodes += 1
                         recording_worker.episode_index = recorded_episodes
                     else:
-                        log_say("Dataset is empty, re-record episode", cfg.play_sounds)
-                        events.reset()
-                        continue
+                        episode_size = int(dataset.episode_buffer.get("size", 0))
+                        if episode_size > 0:
+                            with recording_worker.status_lock:
+                                recording_worker.phase = "processing"
+                                recording_worker.phase_total_s = None
+                                recording_worker.phase_start_t = time.perf_counter()
+                            dataset.save_episode()
+                            recorded_episodes += 1
+                            recording_worker.episode_index = recorded_episodes
+                        else:
+                            log_say("Dataset is empty, re-record episode", cfg.play_sounds)
+                            events.reset()
+                            continue
 
                     if recorded_episodes < cfg.num_episodes and not last_info.get(
                         TeleopEvents.STOP_RECORDING, False
@@ -650,7 +664,7 @@ def start_recording_via_api(config: Dict[str, Any]):
                 if last_info.get(TeleopEvents.STOP_RECORDING, False):
                     log_say("Stop recording", cfg.play_sounds)
 
-            if cfg.push_to_hub:
+            if not demo_mode and cfg.push_to_hub:
                 with recording_worker.status_lock:
                     recording_worker.phase = "pushing"
                     recording_worker.phase_total_s = None
