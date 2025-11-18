@@ -42,10 +42,21 @@ from lerobot.processor.pipeline import (
     ProcessorStepRegistry,
     TruncatedProcessorStep,
 )
+from lerobot.utils.constants import OBS_IMAGES
 
 GRIPPER_KEY = "gripper"
 DISCRETE_PENALTY_KEY = "discrete_penalty"
 TELEOP_ACTION_KEY = "teleop_action"
+
+
+def strip_img_prefix(key: str) -> str:
+    prefixes_to_strip = tuple(
+        f"{token}." for token in (OBS_IMAGES, OBS_IMAGES.split(".")[-1])
+    )
+    for prefix in prefixes_to_strip:
+        if key.startswith(prefix):
+            return key[len(prefix):]
+    return key
 
 
 @runtime_checkable
@@ -366,8 +377,15 @@ class ImageCropResizeProcessorStep(ObservationProcessorStep):
             if device.type == "mps":
                 image = image.cpu()
             # Crop if crop params are provided for this key
-            if self.crop_params_dict is not None and key in self.crop_params_dict:
-                crop_params = self.crop_params_dict[key]
+            stripped_key = strip_img_prefix(key)
+
+            key_matches = key in self.crop_params_dict
+            stripped_key_matches = stripped_key in self.crop_params_dict
+            if self.crop_params_dict is not None and (key_matches or stripped_key_matches):
+                if key_matches:
+                    crop_params = self.crop_params_dict[key]
+                else:
+                    crop_params = self.crop_params_dict[stripped_key]
                 image = F.crop(image, *crop_params)
             if self.resize_size is not None:
                 image = F.resize(image, self.resize_size)
@@ -472,6 +490,8 @@ class TimeLimitProcessorStep(TruncatedProcessorStep):
     def reset(self) -> None:
         """Resets the step counter, typically called at the start of a new episode."""
         self.current_step = 0
+        self._pbar.reset()
+
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
@@ -553,51 +573,109 @@ class GripperPenaltyProcessorStep(ComplementaryDataProcessorStep):
 
 
 @dataclass
-@ProcessorStepRegistry.register("gripper_offset_processor")
-class GripperOffsetProcessorStep(ActionProcessorStep):
+@ProcessorStepRegistry.register("discretize_gripper_processor")
+class DiscretizeGripperProcessorStep(ActionProcessorStep):
     """
-    Applies a penalty for inefficient gripper usage on multiple robots.
+    Discretizes gripper actions using an internal per-robot gripper state.
 
-    For each robot:
-      - Penalizes actions that try to close an already closed gripper
-        or open an already open one.
-      - Penalties are added to complementary_data with robot-specific keys.
+    For each robot's gripper action:
+      - If the incoming action value is greater than +threshold, the internal
+        gripper state is set to 1.0 (fully closed).
+      - If the incoming action value is less than -threshold, the internal
+        gripper state is set to `min_position[robot_name]` (partially open).
+      - If the incoming action value lies in [-threshold, threshold], the
+        internal state is left unchanged (i.e., “do nothing” region).
 
-    Attributes:
-        penalty: Negative reward value applied per violation.
-        max_gripper_pos: Dict of robot_name -> max gripper pos (for normalization).
+    The processed action written back into the tensor is always this internal
+    discretized state, allowing a continuous input signal (e.g. from a joystick
+    or SpaceMouse) to act like a three-region controller:
+      - Close
+      - Open to a defined minimum position
+      - No-op in a deadzone around zero
+
+    Attributes
+    ----------
+    gripper_idc:
+        Mapping from robot name to the index of the gripper action in the
+        action tensor. Use `None` to skip a robot.
+    min_position:
+        Mapping from robot name to the minimum gripper position that should be
+        used when the input is below -threshold (e.g. 0.8).
+    threshold:
+        Scalar threshold that defines the deadzone around zero. Defaults to 0.5.
     """
 
     gripper_idc: dict[str, int | None] = field(default_factory=dict)
-    offset: dict[str, float | None] = field(default_factory=dict)
+    min_pos: dict[str, float] = field(default_factory=dict)
+    max_pos: dict[str, float] = field(default_factory=dict)
+    threshold: float = 0.5
 
     def __post_init__(self):
-        assert self.gripper_idc.keys() == self.offset.keys()
-        self._robot_names = self.gripper_idc.keys()
+        # Ensure we have consistent keys for indices and min positions
+        assert self.gripper_idc.keys() == self.min_pos.keys() == self.max_pos.keys()
+        self._robot_names = list(self.gripper_idc.keys())
+
+        # Internal gripper state per robot (initialized to min_position)
+        self._gripper_state: dict[str, float] = {
+            name: self.min_pos[name] for name in self._robot_names
+        }
 
     def action(self, action: Tensor) -> Tensor:
         """
-        Calculates gripper penalties for each robot and adds them to complementary_data.
+        Discretizes gripper actions based on the current input and internal state.
+
+        Parameters
+        ----------
+        action:
+            1D action tensor for a single step (or a compatible view) that
+            includes gripper entries at the indices specified in `gripper_idc`.
+
+        Returns
+        -------
+        Tensor
+            The same tensor, with gripper entries replaced by the internal
+            discretized gripper state.
         """
         for name in self._robot_names:
-            if self.gripper_idc[name] is None or self.offset[name] is None:
+            gripper_idx = self.gripper_idc[name]
+            if gripper_idx is None:
                 continue
-            gripper_idx = int(self.gripper_idc[name])
-            action[gripper_idx] = action[gripper_idx] + self.offset[name]
+
+            gi = int(gripper_idx)
+
+            # Read current (continuous) gripper input
+            input_val = float(action[gi].item())
+
+            # Update internal state based on thresholds
+            if input_val > self.threshold:
+                self._gripper_state[name] = self.max_pos[name]
+            elif input_val < -self.threshold:
+                self._gripper_state[name] = self.min_pos[name]
+            # else: within deadzone -> keep previous state
+
+            # Write discretized value back to action tensor
+            action[gi] = torch.as_tensor(self._gripper_state[name], dtype=action.dtype)
+
         return action
 
     def get_config(self) -> dict[str, Any]:
         return {
             "gripper_idc": self.gripper_idc,
-            "offset": self.offset,
-            "max_gripper_pos": self.max_gripper_pos
+            "min_pos": self.min_pos,
+            "max_pos": self.max_pos,
+            "threshold": self.threshold,
         }
 
     def reset(self) -> None:
-        pass
+        """
+        Resets internal gripper states to their minimum positions.
+        """
+        for name in self._robot_names:
+            self._gripper_state[name] = self.min_pos[name]
 
     def transform_features(
-            self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+        self,
+        features: dict[PipelineFeatureType, dict[str, PolicyFeature]],
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         return features
 
@@ -705,8 +783,10 @@ class InterventionActionProcessorStep(ProcessorStep):
 
 
         # Handle episode termination
-        new_transition[TransitionKey.DONE] = bool(terminate_episode) or (
-            any(self.terminate_on_success.values()) and success
+        new_transition[TransitionKey.DONE] = (
+                bool(terminate_episode) or
+                bool(rerecord_episode) or
+                (any(self.terminate_on_success.values()) and success)
         )
         new_transition[TransitionKey.REWARD] = float(success)
 

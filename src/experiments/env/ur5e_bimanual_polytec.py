@@ -9,14 +9,14 @@ from scipy.spatial.transform import Rotation as R
 from lerobot.cameras.realsense import RealSenseCameraConfig
 from lerobot.configs.types import PipelineFeatureType, PolicyFeature
 from lerobot.envs import TFRobotEnvConfig, TaskFrameEnv
-from lerobot.envs.configs import EnvConfig
+from lerobot.envs.configs import EnvConfig, ImagePreprocessingConfig
 from lerobot.envs.factory import RobotEnvInterface
 from lerobot.processor import DataProcessorPipeline, ProcessorStepRegistry, ObservationProcessorStep, TransitionKey
 from lerobot.robots.ur import URConfig
 from lerobot.robots.ur.tf_controller import TaskFrameCommand, AxisMode
 from lerobot.teleoperators import TeleopEvents
 from lerobot.teleoperators.spacemouse import SpacemouseConfig
-from lerobot.utils.constants import OBS_STATE
+from lerobot.utils.constants import OBS_STATE, ACTION
 
 
 @ProcessorStepRegistry.register("bimanual_gap_constraint_processor")
@@ -70,7 +70,7 @@ class BimanualGapConstraintObsProcessor(ObservationProcessorStep):
         right_pos = raw_obs[f"right.{self._base_lr_offset_axis}.ee_pos"]
         dist = right_pos - left_pos + self.base_lr_offset_m
 
-        # add to state
+        # add distance to state
         state = observation[OBS_STATE]
         dist_t = torch.tensor([dist], dtype=state.dtype, device=state.device)
         new_observation[OBS_STATE] = observation[OBS_STATE] = torch.cat([state, dist_t])
@@ -122,66 +122,136 @@ class BimanualGapConstraintObsProcessor(ObservationProcessorStep):
 @dataclass
 @EnvConfig.register_subclass("ur5e_bimanual_polytec")
 class UR5eBimanualPolytecEnvConfig(TFRobotEnvConfig):
+    fps: int = 10
 
-    left_x_rot_deg: float = 0.0
-    left_max_x_pos: float = 0.593
-    left_min_z_pos: float = 0.221
-    left_max_z_pos: float = 0.3
+    # 7 dof problem
+    # left arm: xyz translation + c rotation + gripper
+    # right arm: xyz translation
 
-    right_x_rot_deg: float = -15.0
-    right_min_x_pos: float = -0.386
-    right_min_z_pos: float = 0.22546
-    right_max_z_pos: float = 0.3
+    # workspace
+    left_min_x_pos: float = 0.4590
+    left_max_x_pos: float = 0.5523
+    left_min_y_pos: float = -0.2291
+    left_max_y_pos: float = -0.1851
+    left_min_z_pos: float = 0.2340
+    left_max_z_pos: float = 0.25
+    max_c_rot_deg: float = 30.0
+    min_c_rot_deg: float = -5.0
 
-    v_ee = 0.25
+    right_y_rot_deg: float = -30.0  # fixed position
+    right_max_x_pos: float = -0.3760
+    right_min_z_pos: float = 0.2275
+    right_max_z_pos: float = 0.25
+    right_min_y_pos: float = -0.2219
+    right_max_y_pos: float = -0.19
+
+    # velocities
+    v_ee = 0.15
     omega_ee = 1.0
     v_gripper = 0.3
-    max_gripper_pos: float = 0.2
 
-    ee_min_gap_m: float = 0.05
-    base_lr_offset_m: float = 1.0
+    # parameters for bimanual setup + collision avoidance
+    # assumes offset in one axis only and prevents the left robot
+    # from colliding with the right robot on that axis
+    ee_min_gap_m: float = 0.02
     base_lr_offset_axis: Literal["x", "y", "z"] | int = "x"
+    base_lr_offset_m: float = 1.0
 
 
     def __post_init__(self):
+        self.processor.control_time_s = 20.0
 
-        # calculate fixed target poses for both arms
-        left_rot = R.from_rotvec([np.pi / np.sqrt(2), np.pi / np.sqrt(2), 0.0], degrees=False) * R.from_euler('x', self.left_x_rot_deg, degrees=True)
-        left_target = 3 * [0.0] + left_rot.as_rotvec().tolist()
+        self.processor.observation.add_ee_velocity_to_observation = True
+        self.processor.observation.add_ee_wrench_to_observation = True
+        self.processor.observation.ee_pos_mask = {
+            "left": [1, 1, 1, 0, 0, 1],
+            "right": [1, 1, 1, 0, 0, 0],
+        }
 
-        right_rot = R.from_rotvec([np.pi / np.sqrt(2), -np.pi / np.sqrt(2), 0.0], degrees=False) * R.from_euler('x', self.right_x_rot_deg, degrees=True)
-        right_target = 3 * [0.0] + right_rot.as_rotvec().tolist()
+        # (top, left, height, width) crop
+        self.processor.image_preprocessing = ImagePreprocessingConfig(
+            crop_params_dict={'observation.images.left_wrist': (220, 257, 170, 312)},
+            resize_size=(128, 256)
+        )
 
-        max_pose_rpy_left = np.full(6, np.inf)
-        min_pose_rpy_left = np.full(6, -np.inf)
-        max_pose_rpy_left[0] = self.left_max_x_pos
-        max_pose_rpy_left[2] = self.left_max_z_pos
-        min_pose_rpy_left[2] = self.left_min_z_pos
+        self.processor.gripper.use_gripper = {"left": True, "right": False}
+        self.processor.gripper.max_pos = 1.0
+        self.processor.gripper.min_pos = 0.8
 
-        max_pose_rpy_right = np.full(6, np.inf)
-        min_pose_rpy_right = np.full(6, -np.inf)
-        max_pose_rpy_right[2] = self.right_max_z_pos
-        min_pose_rpy_right[0] = self.right_min_x_pos
-        min_pose_rpy_right[2] = self.right_min_z_pos
+        self.processor.reset.terminate_on_success = True
+        self.processor.reset.teleop_on_reset = True
+        self.processor.reset.reset_time_s = 10.0
 
+        self.processor.events.key_mapping = {
+            TeleopEvents.TERMINATE_EPISODE: keyboard.Key.right,
+            TeleopEvents.RERECORD_EPISODE: keyboard.Key.left
+        }
+
+        self.processor.hooks.time_action_processor = False
+        self.processor.hooks.time_env_processor = False
+        self.processor.hooks.log_every = 1
+
+        # calculate fixed target orientations for both arms
+        left_rot = R.from_rotvec([np.pi / np.sqrt(2), np.pi / np.sqrt(2), 0.0], degrees=False)
+        right_rot = R.from_rotvec([np.pi, 0.0, 0.0], degrees=False)
+        right_rot *= R.from_euler('y', self.right_y_rot_deg, degrees=True)
+
+        # calculate bounds
+        deg2rad = lambda deg: deg / 180.0 * np.pi
+        min_pose_rpy_left = [
+            self.left_min_x_pos,
+            self.left_min_y_pos,
+            self.left_min_z_pos,
+            -float("inf"),
+            -float("inf"),
+            deg2rad(self.min_c_rot_deg) + left_rot.as_euler("xyz", degrees=False)[2]
+        ]
+
+        max_pose_rpy_left = [
+            self.left_max_x_pos,
+            self.left_max_y_pos,
+            self.left_max_z_pos,
+            float("inf"),
+            float("inf"),
+            deg2rad(self.max_c_rot_deg) + left_rot.as_euler("xyz", degrees=False)[2]
+        ]
+
+        min_pose_rpy_right = [
+            -float("inf"),
+            self.right_min_y_pos,
+            self.right_min_z_pos,
+            -float("inf"),
+            -float("inf"),
+            -float("inf")
+        ]
+
+        max_pose_rpy_right = [
+            self.right_max_x_pos,
+            self.right_max_y_pos,
+            self.right_max_z_pos,
+            float("inf"),
+            float("inf"),
+            float("inf")
+        ]
+
+        # device configs
         self.robot = {
             "left": URConfig(
                 model="ur5e",
                 robot_ip="192.168.1.10",
-                use_gripper=False,
-                gripper_soft_real_time=False,
+                use_gripper=True,
+                gripper_soft_real_time=True,
+                gripper_rt_core=5,
                 gripper_vel=self.v_gripper,
                 soft_real_time=True,
                 rt_core=3,
                 verbose=True,
-                wrench_limits=[100.0, 100.0, 100.0, 20.0, 20.0, 20.0]
+                wrench_limits=[300.0, 300.0, 300.0, 20.0, 20.0, 20.0]
             ),
             "right": URConfig(
                 model="ur5e",
                 robot_ip="192.168.1.11",
                 use_gripper=False,
-                gripper_soft_real_time=False,
-                gripper_vel=self.v_gripper,
                 soft_real_time=True,
                 rt_core=4,
                 verbose=True,
@@ -189,8 +259,24 @@ class UR5eBimanualPolytecEnvConfig(TFRobotEnvConfig):
             ),
         }
         self.teleop = {
-            "left": SpacemouseConfig(path="/dev/hidraw2"),
-            "right": SpacemouseConfig(path="/dev/hidraw5")
+            "left": SpacemouseConfig(
+                path="/dev/hidraw6",
+                gripper_close_button_idx=0,
+                gripper_open_button_idx=1
+            ),
+            "right": SpacemouseConfig(
+                path="/dev/hidraw2",
+                button_mapping={
+                    0: {
+                        "event": TeleopEvents.IS_INTERVENTION,
+                        "toggle": True
+                    },
+                    1: {
+                        "event": TeleopEvents.SUCCESS,
+                        "toggle": False
+                    },
+                }
+            )
         }
         self.cameras = {
             "left_wrist": RealSenseCameraConfig(
@@ -200,45 +286,44 @@ class UR5eBimanualPolytecEnvConfig(TFRobotEnvConfig):
                 height=480
             )
         }
+        self.processor.events.key_mapping = {
+            TeleopEvents.STOP_RECORDING: keyboard.Key.down
+        }
 
+        # task frame configuration
         self.processor.task_frame.command = {
             "left": TaskFrameCommand(
                 T_WF=[0.0] * 6,
-                target=left_target,
+                target=3 * [0.0] + left_rot.as_rotvec().tolist(),
                 mode=3 * [AxisMode.PURE_VEL] + 2 * [AxisMode.POS] + [AxisMode.PURE_VEL],
-                kp=[2500, 2500, 2500, 100, 100, 100],
+                kp=[5000, 5000, 5000, 100, 100, 100],
                 kd=[480, 480, 480, 6, 6, 6],
-                max_pose_rpy=max_pose_rpy_left.tolist(),
-                min_pose_rpy=min_pose_rpy_left.tolist()
+                max_pose_rpy=max_pose_rpy_left,
+                min_pose_rpy=min_pose_rpy_left
             ),
             "right": TaskFrameCommand(
                 T_WF=[0.0] * 6,
-                target=right_target,
+                target=3 * [0.0] + right_rot.as_rotvec().tolist(),
                 mode=3 * [AxisMode.PURE_VEL] + 3 * [AxisMode.POS],
-                kp=[2500, 2500, 2500, 100, 100, 100],
+                kp=[5000, 5000, 5000, 100, 100, 100],
                 kd=[480, 480, 480, 6, 6, 6],
-                max_pose_rpy=max_pose_rpy_right.tolist(),
-                min_pose_rpy=min_pose_rpy_right.tolist()
+                max_pose_rpy=max_pose_rpy_right,
+                min_pose_rpy=min_pose_rpy_right
             )
         }
+        # 1 if mode[i] != POS
         self.processor.task_frame.control_mask = {
-            "left": 3 * [1] + 2 * [0] + [1],
-            "right": 3 * [1] + 3 * [0]
+            "left": [1, 1, 1, 0, 0, 1],
+            "right": [1, 1, 1, 0, 0, 0]
         }
+        self.processor.task_frame.action_scale = 3 * [self.v_ee] + [self.omega_ee] + [1.0] + 3 * [self.v_ee]
 
-        #self.processor.task_frame.action_scale = 3 * [self.v_ee] + [self.omega_ee] + [self.max_gripper_pos] + 3 * [self.v_ee]
-        self.processor.task_frame.action_scale = 3 * [self.v_ee] + [self.omega_ee] + 3 * [self.v_ee]
-        self.processor.hooks.time_action_processor = False
-        self.processor.hooks.time_env_processor = False
-        self.processor.hooks.log_every = 1
-        self.processor.gripper.use_gripper = {"left": False, "right": False}
-        self.processor.gripper.offset = 1 - self.max_gripper_pos
-        self.processor.control_time_s = 3600.0  # 1h for debugging
-        self.processor.reset.terminate_on_success = True
-        self.processor.reset.teleop_on_reset = False
-        self.processor.reset.reset_time_s = 5.0
-        self.processor.events.key_mapping = {
-            TeleopEvents.TERMINATE_EPISODE: keyboard.Key.right
+        # Hard-code stats for online learning without offline datasets
+        self.stats = {
+            ACTION: {
+                "min": [-1] * 8,
+                "max": [1] * 8
+            }
         }
 
         super().__post_init__()

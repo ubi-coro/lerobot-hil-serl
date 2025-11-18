@@ -4,30 +4,26 @@ from pathlib import Path
 import draccus
 
 from lerobot.configs import parser
+from lerobot.configs.default import DatasetConfig
 from lerobot.configs.policies import PreTrainedConfig
+from lerobot.configs.train import TrainPipelineConfig
 from lerobot.envs import EnvConfig
 
 
 @dataclass
-class DatasetRecordConfig(draccus.ChoiceRegistry):
-    # Dataset identifier. By convention it should match '{hf_username}/{dataset_name}' (e.g. `lerobot/test`).
-    repo_id: str
-    # A short but accurate description of the task performed during the recording (e.g. "Pick the Lego block and drop it in the box on the right.")
-    single_task: str
-    # Root directory where the dataset will be stored (e.g. 'dataset/path').
-    root: str | Path | None = None
-    # Limit the frames per second.
-    fps: int = 30
+class DatasetRecordConfig(draccus.ChoiceRegistry, DatasetConfig):
     # Number of seconds for a single episode or intervention
     episode_time_s: int = 30
     # Number of seconds for a teleoperated reset
     reset_time_s: int | None = None
     # Number of episodes to record.
     num_episodes: int = 50
+    # A short but accurate description of the task performed during the recording (e.g. "Pick the Lego block and drop it in the box on the right.")
+    single_task: str | None = None
     # Encode frames in the dataset into video
     video: bool = True
     # Upload dataset to Hugging Face hub.
-    push_to_hub: bool = True
+    push_to_hub: bool = False
     # Upload on private repository on the Hugging Face hub.
     private: bool = False
     # Add tags to your dataset on the hub.
@@ -46,10 +42,26 @@ class DatasetRecordConfig(draccus.ChoiceRegistry):
     video_encoding_batch_size: int = 1
     # Rename map for the observation to override the image and state keys
     rename_map: dict[str, str] = field(default_factory=dict)
+    # Keep an in-memory replay buffer and only write to disk when checkpointing
+    in_memory: bool = True
+    # Whether to overwrite repo_id and interpret root as dir containing folders, only works for disk (no in-memory) buffers
+    load_dir: bool = False
 
     def __post_init__(self):
         if self.single_task is None:
             raise ValueError("You need to provide a task as argument in `single_task`.")
+        if not self.in_memory:
+            self.load_dir = False
+
+    @property
+    def project_root(self) -> str:
+        project_root = None
+        if self.root is not None:
+            if self.load_dir:
+                project_root = str(Path(self.root).parent)
+            else:
+                project_root = str(Path(self.root).parent.parent)
+        return project_root
 
     @property
     def type(self) -> str:
@@ -83,3 +95,10 @@ class RecordConfig:
     def __get_path_fields__(cls) -> list[str]:
         """This enables the parser to load config from the policy using `--policy.path=local/dir`"""
         return ["policy"]
+
+
+@dataclass(kw_only=True)
+class TrainRLServerPipelineConfig(TrainPipelineConfig):
+    # NOTE: In RL, we don't need an offline dataset
+    # TODO: Make `TrainPipelineConfig.dataset` optional
+    dataset: DatasetRecordConfig  # type: ignore[assignment] # because the parent class has made it's type non-optional

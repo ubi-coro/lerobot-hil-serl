@@ -16,10 +16,16 @@ from lerobot.processor import (
     TimeLimitProcessorStep
 )
 from lerobot.processor.converters import identity_transition
-from lerobot.processor.hil_processor import AddFootswitchEventsAsInfoStep, AddKeyboardEventsAsInfoStep, \
-    GripperOffsetProcessorStep
-from lerobot.processor.tff_processor import VanillaTFFProcessorStep, SixDofVelocityInterventionActionProcessorStep, \
+from lerobot.processor.hil_processor import (
+    AddFootswitchEventsAsInfoStep,
+    AddKeyboardEventsAsInfoStep,
+    DiscretizeGripperProcessorStep
+)
+from lerobot.processor.tf_processor import (
+    VanillaTFFProcessorStep,
+    SixDofVelocityInterventionActionProcessorStep,
     ActionScalingProcessorStep
+)
 from lerobot.utils.constants import ACTION
 
 
@@ -79,18 +85,19 @@ class TFRobotEnvConfig(RobotEnvConfig):
                 AddFootswitchEventsAsInfoStep(mapping=self.processor.events.foot_switch_mapping))
 
         action_pipeline_steps.extend([
-            AddTeleopActionAsComplimentaryDataStep(teleoperators=teleoperators),
             AddTeleopEventsAsInfoStep(teleoperators=teleoperators),
             AddFootswitchEventsAsInfoStep(mapping=self.processor.events.foot_switch_mapping),
+            AddTeleopActionAsComplimentaryDataStep(teleoperators=teleoperators),  # this checks events and should come after Add*EventsAsInfoStep's
             SixDofVelocityInterventionActionProcessorStep(
                 use_gripper=self.processor.gripper.use_gripper,
                 control_mask=self.processor.task_frame.control_mask,
                 terminate_on_success=self.processor.reset.terminate_on_success,
             ),
             ActionScalingProcessorStep(action_scale=self.processor.task_frame.action_scale),
-            GripperOffsetProcessorStep(
+            DiscretizeGripperProcessorStep(
                 gripper_idc=self.gripper_idc,
-                offset=self.processor.gripper.offset
+                min_pos=self.processor.gripper.min_pos,
+                max_pos=self.processor.gripper.max_pos
             ),
         ])
 
@@ -115,7 +122,7 @@ class TFRobotEnvConfig(RobotEnvConfig):
         env_pipeline_steps: list = [
             VanillaTFFProcessorStep(
                 device=device,
-                ee_pos_mask=self.processor.task_frame.control_mask,
+                ee_pos_mask=self.processor.observation.ee_pos_mask,
                 use_gripper=self.processor.gripper.use_gripper,
                 add_ee_velocity_to_observation=self.processor.observation.add_ee_velocity_to_observation,
                 add_ee_wrench_to_observation=self.processor.observation.add_ee_wrench_to_observation,

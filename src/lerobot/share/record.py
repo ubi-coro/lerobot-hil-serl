@@ -258,6 +258,7 @@ def record_loop(
             logging.info(
                 f"Intervention ended after {episode_step} steps in {episode_time:.1f}s with reward {transition[TransitionKey.REWARD]}"
             )
+            env.stop()
             return info
 
         # (8) Store transition. When interactive, only store frames on interventions
@@ -294,9 +295,7 @@ def record_loop(
             logging.info(
                 f"Episode ended after {episode_step} steps in {episode_time:.1f}s with reward {transition[TransitionKey.REWARD]}"
             )
-            return info
-
-        if info.get(TeleopEvents.RERECORD_EPISODE, False) or info.get(TeleopEvents.TERMINATE_EPISODE, False):
+            env.stop()
             return info
 
         # (10) Handle frequency
@@ -309,6 +308,7 @@ def record_loop(
         )
 
     else:
+        env.stop()
         return info
 
 @parser.wrap()
@@ -323,11 +323,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
     # handle timing
     reset_cfg: ResetConfig = cfg.env.processor.reset
-    if reset_cfg.reset_time_s is not None:
-        teleop_on_reset = True
+    if cfg.dataset.reset_time_s is not None:
+        reset_cfg.teleop_on_reset = True
         reset_cfg.reset_time_s = cfg.dataset.reset_time_s
-    else:
-        teleop_on_reset = reset_cfg.teleop_on_reset
 
     # make dataset
     features = env_to_dataset_features(cfg.env.features)
@@ -349,7 +347,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         sanity_check_dataset_name(cfg.dataset.repo_id, cfg.policy)
         dataset = LeRobotDataset.create(
             cfg.dataset.repo_id,
-            cfg.dataset.fps,
+            cfg.env.fps,
             root=cfg.dataset.root,
             robot_type=cfg.env.type,
             features=features,
@@ -380,13 +378,13 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         while recorded_episodes < cfg.dataset.num_episodes and not info.get(TeleopEvents.STOP_RECORDING, False):
 
             # Execute a few seconds without recording to give time to manually reset the environment
-            if teleop_on_reset and not info.get(TeleopEvents.INTERVENTION_COMPLETED, False):
+            if reset_cfg.teleop_on_reset and not info.get(TeleopEvents.INTERVENTION_COMPLETED, False):
                 log_say("Reset the environment", cfg.play_sounds, blocking=True)
 
                 info = record_loop(
                     env=env,
-                    fps=cfg.dataset.fps,
-                    control_time_s=cfg.env.processor.reset.reset_time_s,
+                    fps=cfg.env.fps,
+                    control_time_s=reset_cfg.reset_time_s,
                     action_dim=features[ACTION]["shape"][0],
                     action_processor=action_processor,
                     env_processor=env_processor,
@@ -396,13 +394,21 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     interactive=False
                 )
 
+                # if we teleop on reset, env.reset should not perform the env reset
+                # still call reset to reset internal states (state counter, buffers), reset again
+                env.reset()
+                if policy is not None and preprocessor is not None and postprocessor is not None:
+                    policy.reset()
+                    preprocessor.reset()
+                    postprocessor.reset()
+
             if info.get(TeleopEvents.STOP_RECORDING, False):
                 break
 
             log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds, blocking=True)
             info = record_loop(
                 env=env,
-                fps=cfg.dataset.fps,
+                fps=cfg.env.fps,
                 control_time_s=cfg.dataset.episode_time_s,
                 action_dim=features[ACTION]["shape"][0],
                 action_processor=action_processor,

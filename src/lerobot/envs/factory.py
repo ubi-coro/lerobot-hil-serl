@@ -160,4 +160,9 @@ class RobotEnvInterface(gym.Env, ABC):
         """Return feature specs derived from cfg."""
         raise NotImplementedError
 
+    @abstractmethod
+    def stop(self) -> None:
+        """Called after an episode to stop the robot. We need this because there might be a delay between stop and reset"""
+        raise NotImplementedError
+
 

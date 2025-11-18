@@ -102,7 +102,7 @@ def step_env_and_process_transition(
     action: torch.Tensor,
     env_processor: DataProcessorPipeline[EnvTransition, EnvTransition],
     action_processor: DataProcessorPipeline[EnvTransition, EnvTransition],
-    info: {},
+    info: dict,
     exit_early_on_intervention_end: bool = False
 ) -> EnvTransition:
     """
@@ -129,12 +129,11 @@ def step_env_and_process_transition(
     # Step env
     obs, reward, terminated, truncated, info = env.step(processed_action_transition[TransitionKey.ACTION])
 
-
     # Read out info and possibly overwrite action
     complementary_data = processed_action_transition[TransitionKey.COMPLEMENTARY_DATA].copy()
     info.update(processed_action_transition[TransitionKey.INFO].copy())
 
-    # Determine which action to store
+    # Determine which action to store (either action that went in, or teleop action that was written as complementary data)
     if info.get(TeleopEvents.IS_INTERVENTION, False) and TELEOP_ACTION_KEY in complementary_data:
         action_to_record = complementary_data[TELEOP_ACTION_KEY]
     else:

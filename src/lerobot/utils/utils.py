@@ -223,8 +223,8 @@ def say(text: str, blocking: bool = False):
         subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW if system == "Windows" else 0)
 
 
-def log_say(text: str, play_sounds: bool = True, blocking: bool = False):
-    logging.info(text)
+def log_say(text: str, play_sounds: bool = True, blocking: bool = False, log_prefix: str = ""):
+    logging.info(log_prefix + text)
 
     if play_sounds:
         say(text, blocking)

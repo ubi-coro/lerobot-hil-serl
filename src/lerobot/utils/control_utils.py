@@ -118,7 +118,7 @@ def predict_action(
             #    observation[name] = observation[name].permute(2, 0, 1).contiguous()
 
             observation[name] = observation[name].to(device)
-            observation[name] = observation[name].unsqueeze(0)
+            #observation[name] = observation[name].unsqueeze(0)
 
         observation["task"] = task if task else ""
         observation["robot_type"] = robot_type if robot_type else ""

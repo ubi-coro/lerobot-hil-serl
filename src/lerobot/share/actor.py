@@ -45,11 +45,10 @@ reduce interventions as the policy improves.
 For more details on the complete HILSerl training workflow, see:
 https://github.com/michel-aractingi/lerobot-hilserl-guide
 """
-
-import datetime
 import logging
 import os
 import time
+from datetime import datetime
 from functools import lru_cache
 from queue import Empty
 
@@ -60,15 +59,19 @@ from torch.multiprocessing import Event, Queue
 
 from lerobot.cameras import opencv  # noqa: F401
 from lerobot.configs import parser
-from lerobot.configs.train import TrainRLServerPipelineConfig
+from lerobot.envs.configs import ResetConfig
+from lerobot.envs.utils import env_to_dataset_features
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.sac.modeling_sac import SACPolicy
-from lerobot.processor import TransitionKey, create_transition
+from lerobot.processor import TransitionKey, create_transition, EnvTransition
 from lerobot.rl.gym_manipulator import step_env_and_process_transition
 from lerobot.rl.process import ProcessSignalHandler
 from lerobot.rl.queue_utils import get_last_item_from_queue
 from lerobot.robots import so100_follower  # noqa: F401
-from lerobot.share.utils import get_pipeline_dataset_features, make_rl_policy
+from lerobot.share.configs import TrainRLServerPipelineConfig
+from lerobot.share.learner import initialize_offline_replay_buffer
+from lerobot.share.record import record_loop
+from lerobot.share.utils import get_pipeline_dataset_features, make_rl_policy, make_processors_from_stats
 from lerobot.teleoperators import gamepad, so101_leader  # noqa: F401
 from lerobot.teleoperators.utils import TeleopEvents
 from lerobot.transport import services_pb2, services_pb2_grpc
@@ -80,6 +83,7 @@ from lerobot.transport.utils import (
     send_bytes_in_chunks,
     transitions_to_bytes,
 )
+from lerobot.utils.constants import ACTION
 from lerobot.utils.control_utils import predict_action
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.robot_utils import busy_wait
@@ -91,7 +95,7 @@ from lerobot.utils.transition import (
 from lerobot.utils.utils import (
     TimerManager,
     get_safe_torch_device,
-    init_logging,
+    init_logging, log_say,
 )
 
 # Main entry point
@@ -99,6 +103,10 @@ from lerobot.utils.utils import (
 
 @parser.wrap()
 def actor_cli(cfg: TrainRLServerPipelineConfig):
+    if cfg.output_dir is None and cfg.dataset.project_root is not None:
+        now = datetime.now()
+        cfg.output_dir = os.path.join(cfg.dataset.project_root, "online", f"actor-{now:%Y-%m-%d}-{now:%H-%M-%S}")
+
     cfg.validate()
     display_pid = False
     if not use_threads(cfg):
@@ -230,72 +238,93 @@ def act_with_policy(
         os.makedirs(log_dir, exist_ok=True)
         log_file = os.path.join(log_dir, f"actor_policy_{os.getpid()}.log")
         init_logging(log_file=log_file, display_pid=True)
-        logging.info("Actor policy process logging initialized")
-
-    logging.info("make_env online")
-
-    set_seed(cfg.seed)
-    device = get_safe_torch_device(cfg.policy.device, log=True)
-
-    env, env_processor, action_processor = cfg.env.make(device=device)
-
-    if not cfg.env.features:
-        cfg.env.features = get_pipeline_dataset_features(
-            env,
-            env_processor,
-            action_dim=cfg.env.action_dim,
-            use_video=cfg.dataset.video
-        )
+        logging.info("[ACTOR] Policy process logging initialized")
 
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
-
-    logging.info("make_policy")
+    set_seed(cfg.seed)
+    device = get_safe_torch_device(cfg.policy.device, log=True)
 
     ### Instantiate the policy in both the actor and learner processes
     ### To avoid sending a SACPolicy object through the port, we create a policy instance
     ### on both sides, the learner sends the updated parameters every n steps to update the actor's parameters
     # Load pretrained policy
+    logging.info("[ACTOR] Make policy")
     policy = make_rl_policy(cfg.policy, env_cfg=cfg.env)
     policy = policy.eval()
     assert isinstance(policy, nn.Module)
 
-    preprocessor = None
-    postprocessor = None
-    if cfg.policy is not None:
-        preprocessor, postprocessor = make_pre_post_processors(
-            policy_cfg=cfg.policy,
-            pretrained_path=cfg.policy.pretrained_path,
-            preprocessor_overrides={
-                "device_processor": {"device": cfg.policy.device}
-            },
+    offline_stats = None
+    if cfg.dataset.root is not None:
+        offline_replay_buffer, offline_stats = initialize_offline_replay_buffer(
+            cfg=cfg,
+            device=device,
+            storage_device="cpu",
         )
+        del offline_replay_buffer
 
-    obs, info = env.reset()
-    env_processor.reset()
-    action_processor.reset()
+    # make policy processors, mostly normalizer
+    preprocessor, postprocessor = make_processors_from_stats(cfg, device, offline_stats)
 
-    # Process initial observation
-    transition = create_transition(observation=obs, info=info)
-    transition = env_processor(transition)
+    # make the env
+    logging.info("[ACTOR] Make online env")
+    env, env_processor, action_processor = cfg.env.make(device=device)
+
+    # overwrite reset parameters if they are set in the dataset config
+    reset_cfg: ResetConfig = cfg.env.processor.reset
+    if cfg.dataset.reset_time_s is not None:
+        reset_cfg.teleop_on_reset = True
+        reset_cfg.reset_time_s = cfg.dataset.reset_time_s
+
+    try:
+        actor_loop(
+            cfg,
+            env,
+            env_processor,
+            action_processor,
+            policy,
+            preprocessor,
+            postprocessor,
+            shutdown_event,
+            device,
+            parameters_queue,
+            transitions_queue,
+            interactions_queue
+        )
+    except Exception as e:
+        env.close()
+        raise e
+
+def actor_loop(
+    cfg,
+    env,
+    env_processor,
+    action_processor,
+    policy,
+    preprocessor,
+    postprocessor,
+    shutdown_event,
+    device,
+    parameters_queue,
+    transitions_queue,
+    interactions_queue
+):
+    transition = reset_environment(cfg, env, env_processor, action_processor)
 
     # NOTE: For the moment we will solely handle the case of a single environment
     sum_reward_episode = 0
     list_transition_to_send_to_learner = []
     episode_intervention = False
+    policy_timer = TimerManager("Policy inference", log=False)
+
     # Add counters for intervention rate calculation
     episode_intervention_steps = 0
     episode_total_steps = 0
     episode_cnt = 0
-
-    policy_timer = TimerManager("Policy inference", log=False)
+    log_say(f"Recording episode {episode_cnt}", play_sounds=True, blocking=True, log_prefix="[ACTOR] ")
 
     for interaction_step in range(cfg.policy.online_steps):
-
         start_loop_t = time.perf_counter()
-        if shutdown_event.is_set():
-            logging.info("[ACTOR] Shutting down act_with_policy")
-            return
 
         observation = {
             k: v for k, v in transition[TransitionKey.OBSERVATION].items() if k in cfg.policy.input_features
@@ -312,6 +341,7 @@ def act_with_policy(
                 postprocessor=postprocessor,
                 use_amp=policy.config.use_amp
             )
+
         policy_fps = policy_timer.fps_last
 
         log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
@@ -322,7 +352,7 @@ def act_with_policy(
             action=action,
             env_processor=env_processor,
             action_processor=action_processor,
-            info=info
+            info={}
         )
 
         # Extract values from processed transition
@@ -338,17 +368,23 @@ def act_with_policy(
         truncated = new_transition.get(TransitionKey.TRUNCATED, False)
         info = new_transition.get(TransitionKey.INFO, {})
 
+        if shutdown_event.is_set() or info.get(TeleopEvents.STOP_RECORDING, False):
+            logging.info("[ACTOR] Shutting down act_with_policy")
+            env.close()
+            return
+
         sum_reward_episode += float(reward)
         episode_total_steps += 1
 
-        # Check for intervention from transition info
+        # Check for intervention from new_transition info
         if info.get(TeleopEvents.IS_INTERVENTION, False):
             episode_intervention = True
             episode_intervention_steps += 1
 
         complementary_info = {
             TeleopEvents.IS_INTERVENTION.value: info.get(TeleopEvents.IS_INTERVENTION, False),
-            "discrete_penalty": torch.tensor([new_transition[TransitionKey.COMPLEMENTARY_DATA].get("discrete_penalty", 0.0)])
+            "discrete_penalty": torch.tensor(
+                [new_transition[TransitionKey.COMPLEMENTARY_DATA].get("discrete_penalty", 0.0)])
         }
 
         # Create transition for learner (convert to old format)
@@ -368,9 +404,8 @@ def act_with_policy(
         transition = new_transition
 
         if done or truncated:
+            env.stop()
             logging.info(f"[ACTOR] Global step {interaction_step}: Episode reward: {sum_reward_episode}")
-
-            update_policy_parameters(policy=policy, parameters_queue=parameters_queue, device=device)
 
             if len(list_transition_to_send_to_learner) > 0:
                 push_transitions_to_transport_queue(
@@ -418,23 +453,19 @@ def act_with_policy(
                 f"step: {interaction_step}, "
             )
 
+            update_policy_parameters(policy=policy, parameters_queue=parameters_queue, device=device)
+
+            transition = reset_environment(cfg, env, env_processor, action_processor)
+
             # Reset intervention counters and environment
             sum_reward_episode = 0.0
             episode_intervention = False
             episode_intervention_steps = 0
             episode_total_steps = 0
             episode_cnt += 1
+            log_say(f"Recording episode {episode_cnt}", play_sounds=True, blocking=True, log_prefix="[ACTOR] ")
 
-            # Reset environment and processors
-            obs, info = env.reset()
-            env_processor.reset()
-            action_processor.reset()
-
-            # Process initial observation
-            transition = create_transition(observation=obs, info=info)
-            transition = env_processor(transition)
-
-        if cfg.env.fps is not None:
+        elif cfg.env.fps is not None:
             dt_load = time.perf_counter() - start_loop_t
             busy_wait(1 / cfg.env.fps - dt_load)
             dt_loop = time.perf_counter() - start_loop_t
@@ -521,7 +552,7 @@ def receive_policy(
 
         # Initialize logging with explicit log file
         init_logging(log_file=log_file, display_pid=True)
-        logging.info("Actor receive policy process logging initialized")
+        logging.info("[ACTOR] Receive policy process logging initialized")
 
         # Setup process handlers to handle shutdown signal
         # But use shutdown event from the main process
@@ -576,7 +607,7 @@ def send_transitions(
 
         # Initialize logging with explicit log file
         init_logging(log_file=log_file, display_pid=True)
-        logging.info("Actor transitions process logging initialized")
+        logging.info("[ACTOR] Transitions process logging initialized")
 
     if grpc_channel is None or learner_client is None:
         learner_client, grpc_channel = learner_service_client(
@@ -625,7 +656,7 @@ def send_interactions(
 
         # Initialize logging with explicit log file
         init_logging(log_file=log_file, display_pid=True)
-        logging.info("Actor interactions process logging initialized")
+        logging.info("[ACTOR] Interactions process logging initialized")
 
         # Setup process handlers to handle shutdown signal
         # But use shutdown event from the main process
@@ -775,6 +806,32 @@ def log_policy_frequency_issue(policy_fps: float, cfg: TrainRLServerPipelineConf
 
 def use_threads(cfg: TrainRLServerPipelineConfig) -> bool:
     return cfg.policy.concurrency.actor == "threads"
+
+
+def reset_environment(cfg, env, env_processor, action_processor) -> EnvTransition:
+    log_say("Reset the environment", play_sounds=True, blocking=True, log_prefix="[ACTOR] ")
+
+    if cfg.env.processor.reset.teleop_on_reset:
+        record_loop(
+            env=env,
+            fps=cfg.env.fps,
+            control_time_s=cfg.env.processor.reset.reset_time_s,
+            action_dim=env_to_dataset_features(cfg.env.features)[ACTION]["shape"][0],
+            action_processor=action_processor,
+            env_processor=env_processor,
+            policy=None,
+            dataset=None,
+            interactive=False
+        )
+
+    obs, info = env.reset()
+    env_processor.reset()
+    action_processor.reset()
+
+    # Process initial observation
+    transition = create_transition(observation=obs, info=info)
+    transition = env_processor(transition)
+    return transition
 
 
 if __name__ == "__main__":

@@ -48,6 +48,7 @@ class RobotEnvConfig(EnvConfig):
     teleop: TeleoperatorConfig | dict[str, TeleoperatorConfig] | None = None
     processor: HILSerlProcessorConfig = HILSerlProcessorConfig()
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
+    stats: dict[str, dict] = field(default_factory=dict)
 
     def __post_init__(self):
         # Handle multi robot configuration

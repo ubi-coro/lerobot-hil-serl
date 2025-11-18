@@ -226,7 +226,6 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
         self._intervention_occurred = self._intervention_occurred | is_intervention
         if self._intervention_occurred and not is_intervention:
             info[TeleopEvents.INTERVENTION_COMPLETED] = True
-            terminate_episode = True
 
         if is_intervention and teleop_action_dict:
 
@@ -248,8 +247,10 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
             new_transition[TransitionKey.ACTION] = teleop_action_tensor
 
         # Termination / reward
-        new_transition[TransitionKey.DONE] = bool(terminate_episode) or (
-                any(self.terminate_on_success.values()) and success
+        new_transition[TransitionKey.DONE] = (
+                bool(terminate_episode) or
+                bool(rerecord_episode) or
+                (any(self.terminate_on_success.values()) and success)
         )
         new_transition[TransitionKey.REWARD] = float(success)
 
@@ -261,7 +262,7 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
 
         # Update complementary data with teleop action
         complementary_data = new_transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
-        complementary_data[TELEOP_ACTION_KEY] = new_transition.get(TransitionKey.ACTION)
+        complementary_data[TELEOP_ACTION_KEY] = new_transition[TransitionKey.ACTION].clone()
         new_transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
 
         return new_transition
@@ -300,7 +301,7 @@ class ActionScalingProcessorStep(ProcessorStep):
         new_transition = transition.copy()
 
         action = new_transition[TransitionKey.ACTION]
-        action *= self.action_scale
+        action = action * self.action_scale
         new_transition[TransitionKey.ACTION] = action
 
         complementary_data = new_transition.get(TransitionKey.COMPLEMENTARY_DATA, {})

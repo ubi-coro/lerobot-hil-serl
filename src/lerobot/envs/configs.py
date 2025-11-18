@@ -280,7 +280,7 @@ class MetaworldEnv(EnvConfig):
 
 @dataclass
 class ImagePreprocessingConfig:
-    crop_params_dict: dict[str, tuple[int, int, int, int]] | None = None
+    crop_params_dict: dict[str, tuple[int, int, int, int]] | None = None  # cam_name -> (top, left, height, width)
     resize_size: tuple[int, int] | None = None
 
 
@@ -313,6 +313,7 @@ class ObservationConfig:
     add_current_to_observation: bool | dict[str, bool] = False
     add_ee_velocity_to_observation: bool | dict[str, bool] = False
     add_ee_wrench_to_observation: bool | dict[str, bool] = False
+    ee_pos_mask: list[int] | dict[str, list[int]] = field(default_factory=lambda: [1] * 6)
     stack_frames: int | dict[str, int] = 0
 
 
@@ -323,7 +324,7 @@ class GripperConfig:
     use_gripper: bool | dict[str, bool] = False
     penalty: float | dict[str, float | None] | None = None
     max_pos: float | dict[str, float] = 1.0
-    offset: float | dict[str, float] = 0.0
+    min_pos: float | dict[str, float] = 0.0
 
 
 @dataclass

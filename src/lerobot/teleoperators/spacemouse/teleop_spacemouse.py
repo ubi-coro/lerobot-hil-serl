@@ -3,6 +3,8 @@ import multiprocessing
 import time
 from typing import Any
 
+import numpy as np
+
 from lerobot.processor.hil_processor import HasTeleopEvents
 from lerobot.teleoperators import Teleoperator, TeleopEvents
 from lerobot.teleoperators.spacemouse import pyspacemouse
@@ -12,6 +14,75 @@ logger = logging.getLogger(__name__)
 
 
 class SpaceMouse(Teleoperator, HasTeleopEvents):
+    """
+    Teleoperator interface for 3Dconnexion SpaceMouse devices.
+
+    This class wraps the `pyspacemouse` driver and exposes a consistent
+    teleoperation API for use within the LeRobot framework. It runs a separate
+    background process to continuously read 6-DoF motion and button states from
+    the device, making the latest data available through a
+    `multiprocessing.Manager` dictionary.
+
+    **Features**
+    -----------
+    - Provides velocity-based 6-DoF control (`x`, `y`, `z`, `wx`, `wy`, `wz`).
+    - Supports configurable gripper control (binary or continuous modes).
+    - Supports generic teleoperation events via `button_mapping`, where each
+      button can trigger a *toggle* event (press once → ON, press again → OFF).
+    - Non-blocking multiprocessing reader ensures stable performance and avoids
+      input lag.
+    - Safe connect/disconnect flow with graceful shutdown of the reader process.
+
+    **Usage**
+    ---------
+    After instantiating and calling :meth:`connect`, the main training or control
+    loop may repeatedly call:
+        - :meth:`get_action` to obtain the latest motion/gripper command.
+        - :meth:`get_teleop_events` to obtain the current state of mapped toggle
+          events.
+
+    **Multiprocessing Architecture**
+    --------------------------------
+    - A subprocess (`SpaceMouseReader`) performs HID reads at ~500Hz.
+    - Data is stored in a shared Manager dict:
+        - `"action"`: 6-element float list of velocities.
+        - `"buttons"`: list of raw button states from the device.
+    - The parent process never communicates directly with `pyspacemouse`,
+      ensuring thread/process safety.
+
+    **Gripper Control**
+    -------------------
+    If configured, gripper actions are derived from the designated button indices:
+        - Continuous mode: buttons apply incremental open/close.
+        - Binary mode: directly set gripper to open/closed states.
+
+    **Teleop Events**
+    -----------------
+    Teleoperation events are configured via `config.button_mapping`, which maps
+    event names to button indices. Events use a *toggle* behavior:
+        - Event becomes True on a rising edge (0→1).
+        - Event stays True until the next press toggles it back to False.
+
+    **Errors**
+    ----------
+    - Raises :class:`DeviceAlreadyConnectedError` if `connect()` is called while
+      the device is already running.
+    - Raises :class:`DeviceNotConnectedError` on invalid disconnect attempts.
+
+    Parameters
+    ----------
+    config : SpaceMouseConfig
+        Configuration object specifying device selection, button bindings,
+        gripper behavior, and other teleoperation options.
+
+    Notes
+    -----
+    - The class does not currently implement haptic/force feedback.
+    - The action and event structures follow the conventions of the LeRobot
+      teleoperator interface to ensure compatibility with the rest of the
+      framework.
+    """
+
     def __init__(self, config: 'SpaceMouseConfig'):
         self.id = config.id
         self.config = config
@@ -26,6 +97,14 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
         self.latest_data["action"] = [0.0] * 6
         self.latest_data["gripper_pos"] = [0] * 4
         self._last_gripper_pos = config.initial_gripper_pos
+        self._has_gripper = self.config.gripper_close_button_idx is not None and self.config.gripper_open_button_idx is not None
+        self._event_states: dict[str, bool] = {
+            data["event"]: False for data in self.config.button_mapping.values()
+        }
+        self._prev_button_states: dict[str, int] = {
+            data["event"]: 0 for data in self.config.button_mapping.values()
+        }
+
 
     @property
     def action_features(self) -> dict[str, type]:
@@ -69,29 +148,49 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
         action = {f"{ax}.vel": latest_action[i] for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"])}
 
         # handle gripper action
-        latest_buttons = self.latest_data.get("buttons", [0] * 4)
-        close_gripper = latest_buttons[self.config.gripper_close_button_idx]
-        open_gripper = latest_buttons[self.config.gripper_open_button_idx]
+        if self._has_gripper:
+            latest_buttons = self.latest_data.get("buttons", [0] * 2)
+            close_gripper = latest_buttons[self.config.gripper_close_button_idx]
+            open_gripper = latest_buttons[self.config.gripper_open_button_idx]
 
-        if self.config.gripper_continuous:
+            action["gripper.pos"] = 0.0
             if open_gripper:
-                self._last_gripper_pos = max([0.0, self._last_gripper_pos - self.config.gripper_gain])
+                action["gripper.pos"] = np.random.uniform(-1, -0.9)
             elif close_gripper:
-                self._last_gripper_pos = min([1.0, self._last_gripper_pos + self.config.gripper_gain])
-        else:
-            if open_gripper:
-                self._last_gripper_pos = 0.0
-            elif close_gripper:
-                self._last_gripper_pos = 1.0
-        action["gripper.pos"] = self._last_gripper_pos
+                action["gripper.pos"] = np.random.uniform(0.9, 1.0)
 
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read action: {dt_ms:.1f}ms")
         return action
 
     def get_teleop_events(self) -> dict[str, Any]:
-        buttons = self.latest_data.get("buttons", [0, 0, 0, 0])
-        events = {TeleopEvents.IS_INTERVENTION: bool(buttons[0]) | bool(buttons[1])}
+        events: dict[str, Any] = {}
+
+        buttons = self.latest_data.get("buttons", [0] * 2)
+
+        for index, data in self.config.button_mapping.items():
+            event = data["event"]
+            toggle = data["toggle"]
+
+            # safely read button state
+            current = int(buttons[index]) if index < len(buttons) else 0
+
+            if toggle:
+                prev = self._prev_button_states.get(event, 0)
+
+                # Rising edge: button just pressed -> toggle event state
+                if current == 1 and prev == 0:
+                    self._event_states[event] = not self._event_states.get(event, False)
+
+            else:
+                self._event_states[event] = current
+
+            # Update previous state
+            self._prev_button_states[event] = current
+
+            # Expose current toggle state
+            events[event] = self._event_states[event]
+
         return events
 
     def _read_spacemouse(self):

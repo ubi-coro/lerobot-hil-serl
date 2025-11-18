@@ -103,6 +103,14 @@ class TaskFrameEnv(RobotEnvInterface):
 
         return create_initial_features(observation=obs_ft, action=action_ft)
 
+    def stop(self):
+        for name, robot in self.robot_dict.items():
+            tf_cmd = self.task_frame[name]
+            for i, mode in enumerate(tf_cmd.mode):
+                if mode != AxisMode.POS:
+                    tf_cmd.target[i] = 0.0
+            robot.controller.send_cmd(tf_cmd)
+
     def _setup_spaces(self) -> None:
         """Configure observation and action spaces for all robots."""
         # peek one observation
@@ -155,6 +163,7 @@ class TaskFrameEnv(RobotEnvInterface):
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         """Reset all robots to initial state."""
+        self.stop()
         for name, robot in self.robot_dict.items():
             robot.task_frame = self.task_frame[name]
 

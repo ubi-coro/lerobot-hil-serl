@@ -128,7 +128,7 @@ class SACConfig(PreTrainedConfig):
 
     # Architecture specifics
     # Device to run the model on (e.g., "cuda", "cpu")
-    device: str = "cpu"
+    device: str = "cuda"
     # Device to store the model on
     storage_device: str = "cpu"
     # Name of the vision encoder model (Set to "helper2424/resnet10" for hil serl resnet10)
@@ -148,9 +148,9 @@ class SACConfig(PreTrainedConfig):
     # Number of steps for online training
     online_steps: int = 1000000
     # Capacity of the online replay buffer
-    online_buffer_capacity: int = 100000
+    online_buffer_capacity: int = 25000
     # Capacity of the offline replay buffer
-    offline_buffer_capacity: int = 100000
+    offline_buffer_capacity: int = 25000
     # Whether to use asynchronous prefetching for the buffers
     async_prefetch: bool = False
     # Number of steps before learning starts

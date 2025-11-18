@@ -94,6 +94,9 @@ class RobotEnv(RobotEnvInterface):
 
         return create_initial_features(observation=obs_ft, action=action_ft)
 
+    def stop(self):
+        pass
+
     def _get_observation(self) -> dict[str, Any]:
         """Get current robot observation including joint positions and camera images."""
 
@@ -178,7 +181,7 @@ class RobotEnv(RobotEnvInterface):
             Tuple of (observation, info) dictionaries.
         """
         # Reset the robot
-        # self.robot.reset()
+
 
         start_time = time.perf_counter()
         for name, robot in self.robot_dict.items():

@@ -8,3 +8,4 @@ from .dataset.test import DatasetTestConfig
 from .dataset.aloha_folding import AlohaFoldingDatasetConfig
 from .dataset.aloha_unfolding import AlohaUnfoldingDatasetConfig
 from .dataset.aloha_bimanual_lemgo_v2 import AlohaBimanualDatasetConfigLemgoV2
+from .dataset.polytec import PolytecDatasetConfig

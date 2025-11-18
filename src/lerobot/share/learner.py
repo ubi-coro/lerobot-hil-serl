@@ -47,13 +47,17 @@ https://github.com/michel-aractingi/lerobot-hilserl-guide
 import logging
 import os
 import shutil
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy
+from datetime import datetime
 from pathlib import Path
 from pprint import pformat
+from typing import Tuple
 
 import grpc
+import numpy as np
 import torch
 from termcolor import colored
 from torch import nn
@@ -62,7 +66,6 @@ from torch.optim.optimizer import Optimizer
 
 from lerobot.cameras import opencv  # noqa: F401
 from lerobot.configs import parser
-from lerobot.configs.train import TrainRLServerPipelineConfig
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.factory import make_policy
@@ -71,7 +74,9 @@ from lerobot.rl.buffer import ReplayBuffer, concatenate_batch_transitions
 from lerobot.rl.process import ProcessSignalHandler
 from lerobot.rl.wandb_utils import WandBLogger
 from lerobot.robots import so100_follower  # noqa: F401
+from lerobot.share.configs import TrainRLServerPipelineConfig
 from lerobot.share.disk_buffer import OnDiskReplayBuffer
+from lerobot.share.utils import make_processors_from_stats
 from lerobot.teleoperators import gamepad, so101_leader  # noqa: F401
 from lerobot.teleoperators.utils import TeleopEvents
 from lerobot.transport import services_pb2_grpc
@@ -86,7 +91,7 @@ from lerobot.utils.constants import (
     CHECKPOINTS_DIR,
     LAST_CHECKPOINT_LINK,
     PRETRAINED_MODEL_DIR,
-    TRAINING_STATE_DIR,
+    TRAINING_STATE_DIR, REWARD,
 )
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.train_utils import (
@@ -129,6 +134,12 @@ def train(cfg: TrainRLServerPipelineConfig, job_name: str | None = None):
         cfg (TrainRLServerPipelineConfig): The training configuration
         job_name (str | None, optional): Job name for logging. Defaults to None.
     """
+    if cfg.output_dir is None and cfg.dataset.project_root is not None:
+        now = datetime.now()
+        cfg.output_dir = os.path.join(cfg.dataset.project_root, "online", f"learner-{now:%Y-%m-%d}-{now:%H-%M-%S}")
+
+        if cfg.job_name is None:
+            cfg.job_name = f"{cfg.policy.type}-{now:%Y-%m-%d}-{now:%H-%M-%S}"
 
     cfg.validate()
 
@@ -307,16 +318,33 @@ def add_actor_information_and_train(
         init_logging(log_file=log_file, display_pid=True)
         logging.info("Initialized logging for actor information and training process")
 
+    # make policy
     logging.info("Initializing policy")
-
     policy: SACPolicy = make_policy(
         cfg=cfg.policy,
         env_cfg=cfg.env,
     )
-
     assert isinstance(policy, nn.Module)
-
     policy.train()
+
+    # make buffers
+    logging.info("Initializing storage")
+    replay_buffer = initialize_replay_buffer(cfg, device, storage_device)
+    batch_size = cfg.batch_size
+    offline_replay_buffer = None
+    offline_stats = {}
+
+    if cfg.dataset.root is not None:
+        offline_replay_buffer, offline_stats = initialize_offline_replay_buffer(
+            cfg=cfg,
+            device=device,
+            storage_device=storage_device,
+        )
+        if not use_bc_dagger:
+            batch_size: int = batch_size // 2  # We will sample from both replay buffers
+
+    # make policy processors, mostly normalizer
+    preprocessor, postprocessor = make_processors_from_stats(cfg, device, offline_stats)
 
     push_actor_policy_to_queue(parameters_queue=parameters_queue, policy=policy)
 
@@ -328,18 +356,6 @@ def add_actor_information_and_train(
     resume_optimization_step, resume_interaction_step = load_training_state(cfg=cfg, optimizers=optimizers)
 
     log_training_info(cfg=cfg, policy=policy)
-
-    replay_buffer = initialize_replay_buffer(cfg, device, storage_device)
-    batch_size = cfg.batch_size
-    offline_replay_buffer = None
-
-    if cfg.dataset.root is not None:
-        offline_replay_buffer = initialize_offline_replay_buffer(
-            cfg=cfg,
-            device=device,
-            storage_device=storage_device,
-        )
-        batch_size: int = batch_size // 2  # We will sample from both replay buffer
 
     logging.info("Starting learner thread")
     optimization_step = resume_optimization_step if resume_optimization_step is not None else 0
@@ -367,7 +383,7 @@ def add_actor_information_and_train(
             offline_replay_buffer=offline_replay_buffer,
             device=device,
             dataset_repo_id=dataset_repo_id,
-            shutdown_event=shutdown_event,
+            shutdown_event=shutdown_event
         )
 
         # Process all available interaction messages sent by the actor server
@@ -379,8 +395,8 @@ def add_actor_information_and_train(
         )
 
         # Wait until the replay buffer has enough samples to start training
-        #if len(replay_buffer) < training_starts:
-        #    continue
+        if len(replay_buffer) < training_starts:
+            continue
 
         if online_iterator is None:
             online_iterator = replay_buffer.get_iterator(
@@ -395,6 +411,7 @@ def add_actor_information_and_train(
         time_for_one_optimization_step = time.time()
         if use_bc_dagger:
             batch = next(offline_iterator)
+            batch = apply_preprocessor(batch, preprocessor)
 
             actions = batch[ACTION]
             observations = batch["state"]
@@ -420,11 +437,14 @@ def add_actor_information_and_train(
             loss_bc.backward()
             bc_grad_norm = torch.nn.utils.clip_grad_norm_(
                 parameters=policy.actor.parameters(), max_norm=clip_grad_norm_value
-            )
+            ).item()
             optimizers["actor"].step()
 
-            training_infos = bc_output["training_infos"]
-            training_infos["bc_grad_norm"] = bc_grad_norm
+            training_infos = {
+                "loss_bc": bc_output["loss_bc"].item(),
+                "mse": bc_output["training_infos"]["mse"].item(),
+                "bc_grad_norm": bc_grad_norm
+            }
 
         else:
             for _ in range(utd_ratio - 1):
@@ -622,7 +642,11 @@ def add_actor_information_and_train(
 
         optimization_step += 1
         if optimization_step % log_freq == 0:
-            logging.info(f"[LEARNER] Number of optimization step: {optimization_step}")
+            logging.info(
+                f"[LEARNER] Number of optimization step: {optimization_step},"
+                f"{len(replay_buffer)} online samples,"
+                f"{len(offline_replay_buffer) if offline_replay_buffer is not None else 0} offline samples"
+            )
 
         # Save checkpoint at specified intervals
         if saving_checkpoint and (optimization_step % save_freq == 0 or optimization_step == online_steps):
@@ -773,7 +797,7 @@ def save_training_checkpoint(
 
     # TODO : temporary save replay buffer here, remove later when on the robot
     # We want to control this with the keyboard inputs
-    dataset_dir = os.path.join(cfg.output_dir, "dataset")
+    dataset_dir = os.path.join(cfg.output_dir, "dataset_online")
     if os.path.exists(dataset_dir) and os.path.isdir(dataset_dir):
         shutil.rmtree(dataset_dir)
 
@@ -1033,7 +1057,7 @@ def initialize_offline_replay_buffer(
     cfg: TrainRLServerPipelineConfig,
     device: str,
     storage_device: str,
-) -> ReplayBuffer | OnDiskReplayBuffer:
+) -> Tuple[ReplayBuffer | OnDiskReplayBuffer, dict[str, dict[str, np.ndarray]] ]:
     """
     Initialize an offline replay buffer from a dataset.
 
@@ -1048,7 +1072,7 @@ def initialize_offline_replay_buffer(
     if not cfg.dataset.in_memory:
         ds_cfg = copy(cfg.dataset)
 
-        return OnDiskReplayBuffer(
+        offline_replay_buffer = OnDiskReplayBuffer(
             ds_cfg=ds_cfg,
             policy_cfg=cfg.policy,
             fps=cfg.env.fps,
@@ -1057,6 +1081,7 @@ def initialize_offline_replay_buffer(
             num_workers=cfg.num_workers,
             resume=True
         )
+        stats = offline_replay_buffer.read_ds.meta.stats
 
     else:
         if not cfg.resume:
@@ -1078,7 +1103,9 @@ def initialize_offline_replay_buffer(
             optimize_memory=True,
             capacity=cfg.policy.offline_buffer_capacity,
         )
-        return offline_replay_buffer
+        stats = offline_dataset.meta.stats
+
+    return offline_replay_buffer, stats
 
 
 # Utilities/Helpers functions
@@ -1275,6 +1302,24 @@ def process_interaction_messages(
         )
 
     return last_message
+
+
+def apply_preprocessor(batch, preprocessor):
+    # batch contains "state": {k1: v1, k2: v2, ...}
+    # preprocessor needs a flat dict
+    state_keys = batch["state"].keys()
+
+    # process state and next_state separately, take other keys from processed state (not next_state) batch
+    stateless_batch = {key: batch[key] for key in (ACTION, "reward", "done", "truncated", "complementary_info")}
+    processed_batch = preprocessor({**batch["state"], **stateless_batch})
+    processed_next_batch = preprocessor({**batch["next_state"], **stateless_batch})
+
+    return {
+        ACTION: processed_batch[ACTION],
+        "state": {key: processed_batch[key] for key in state_keys},
+        "next_state": {key: processed_next_batch[key] for key in state_keys},
+        **{key: stateless_batch[key] for key in ("reward", "done", "truncated")},
+    }
 
 
 if __name__ == "__main__":

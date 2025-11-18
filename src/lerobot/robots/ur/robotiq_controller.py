@@ -11,6 +11,9 @@ from dataclasses import dataclass, asdict
 from multiprocessing.managers import SharedMemoryManager
 from typing import Union, Tuple, OrderedDict
 
+import numpy as np
+
+from lerobot.utils.robot_utils import busy_wait
 from lerobot.utils.shared_memory import SharedMemoryQueue, SharedMemoryRingBuffer, Empty
 
 
@@ -76,7 +79,7 @@ class RTDERobotiqController(mp.Process):
         self.gripper_cmd_queue = SharedMemoryQueue.create_from_examples(
             shm_manager=self.shm_manager,
             examples=example_cmd,
-            buffer_size=64
+            buffer_size=256
         )
 
         # state ring-buffer example
@@ -201,21 +204,19 @@ class RTDERobotiqController(mp.Process):
             gr.connect(self.hostname, self.port)
             gr.activate()
 
-            # Prepare for jitter logging
-            hist = collections.deque(maxlen=1000)
-            t_prev = time.monotonic()
-            log_interval = 5.0
-            next_log_time = t_prev + log_interval
-
             keep_running = True
             iter_idx = 0
             t_start = time.monotonic()
+            vel = 255
+            force = 255
+            dt = 1 / self.frequency
             while keep_running:  #
                 t_now = time.monotonic()
 
                 # 2) Get state from robot
+                current_pos = float(gr.get_current_position())
                 state = {
-                    'width': float(gr.get_current_position()),
+                    'width': current_pos,
                     'object_status': int(gr._get_var(gr.OBJ)),
                     'fault': int(gr._get_var(gr.FLT)),
                     'timestamp': t_now
@@ -223,6 +224,7 @@ class RTDERobotiqController(mp.Process):
                 self.gripper_out_rb.put(state)
 
                 # 3) Fetch command from queue
+                target_pos = current_pos
                 try:
                     msgs = self.gripper_cmd_queue.get_all()
                     n_cmd = len(msgs['cmd'])
@@ -235,16 +237,18 @@ class RTDERobotiqController(mp.Process):
                     force = int(255.0 * msgs['force'][i])
 
                     if cmd_id == Command.OPEN.value:
-                        gr.move(gr.get_open_position(), vel, force)
+                        target_pos = gr.get_open_position()
                     elif cmd_id == Command.CLOSE.value:
-                        gr.move(gr.get_closed_position(), vel, force)
+                        target_pos = gr.get_closed_position()
                     elif cmd_id == Command.MOVE.value:
-                        pos = int(255.0 * msgs['pos'][i])
-                        gr.move(pos, vel, force)
+                        target_pos = int(255.0 * msgs['pos'][i])
                     elif cmd_id == Command.STOP.value:
                         keep_running = False
                         # stop immediately, ignore later commands
                         break
+
+                if not np.isclose(target_pos, current_pos, rtol=1e-2):
+                    gr.move(target_pos, vel, force)
 
                 # 4) First loop successful, ready to receive command
                 if iter_idx == 0:
@@ -252,9 +256,8 @@ class RTDERobotiqController(mp.Process):
                 iter_idx += 1
 
                 # 5) Regulate frequency
-                dt = 1 / self.frequency
                 t_end = t_start + dt * iter_idx
-                time.sleep(t_end - t_start)
+                busy_wait(max([t_end - time.perf_counter(), 0.0]))
 
         finally:
             self.ready_event.set()

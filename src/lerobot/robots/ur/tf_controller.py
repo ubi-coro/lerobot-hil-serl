@@ -790,11 +790,32 @@ class RTDETFFController(mp.Process):
                 desired_wrench[i] += +self.kp[i] * penetration
 
         # ----- rotation axes (convert to Euler first) -----
-        for i in range(3, 6):
+        #    Operate in Euler to measure penetration; torques are Nm.
+        rpy = self._rotvec_to_rpy(pose[3:6]).astype(np.float64)
+
+        # Optional: wrap angles & bounds to [-pi, pi] if you use bounded RPY ranges
+        rpy = self.wrap_to_pi(rpy)
+        min_rpy = self.wrap_to_pi(np.array(self.min_pose_rpy[3:6], dtype=np.float64))
+        max_rpy = self.wrap_to_pi(np.array(self.max_pose_rpy[3:6], dtype=np.float64))
+
+        for j, i in enumerate(range(3, 6)):
             desired_wrench[i] = np.clip(desired_wrench[i], -scaled_wrench_limits[i], scaled_wrench_limits[i])
-            # we ignore rotation pose limits, bc I do not care. Why would you force control rotation anyway?
-            # honestly, this needs to work eventually
-            # todo: make wrench respect rpy bounds
+
+            # upper bound violation
+            if rpy[j] > max_rpy[j]:
+                if desired_wrench[i] > 0.0:  # outward (increasing angle)
+                    desired_wrench[i] = 0.0
+                penetration = rpy[j] - max_rpy[j]  # > 0 (rad)
+                desired_wrench[i] += -self.kp[i] * penetration  # Nm
+
+            # lower bound violation
+            elif rpy[j] < min_rpy[j]:
+                if desired_wrench[i] < 0.0:  # outward (decreasing angle)
+                    desired_wrench[i] = 0.0
+                penetration = min_rpy[j] - rpy[j]  # > 0 (rad)
+                desired_wrench[i] += +self.kp[i] * penetration  # Nm
+
+            desired_wrench[i] = np.clip(desired_wrench[i], -scaled_wrench_limits[i], scaled_wrench_limits[i])
 
         if self.config.debug:
             axis = self.config.debug_axis
@@ -890,6 +911,14 @@ class RTDETFFController(mp.Process):
             float: Scale factor in [s_min, 1].
         """
         return s_min + (1 - s_min) * np.exp(-f_meas / theta)
+
+    @staticmethod
+    def wrap_to_pi(angles: np.ndarray) -> np.ndarray:
+        """Wrap angles [rad] elementwise to (-pi, pi]."""
+        out = (angles + np.pi) % (2 * np.pi) - np.pi
+        # map -pi to +pi for consistency if desired:
+        out[np.isclose(out, -np.pi)] = np.pi
+        return out
 
 
 def _validate_config(config: 'URConfig') -> 'URConfig':

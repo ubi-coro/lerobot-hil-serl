@@ -13,7 +13,7 @@ from lerobot.teleoperators.spacemouse import SpacemouseConfig, SpaceMouse
 # 1. Configure and start the controller
 # ----------------------------------------
 env_cfg = UR5eBimanualPolytecEnvConfig()
-robot_name = "right"
+robot_name = "left"
 
 # Instantiate and start the controller (in its own process)
 robot_cfg = env_cfg.robot[robot_name]

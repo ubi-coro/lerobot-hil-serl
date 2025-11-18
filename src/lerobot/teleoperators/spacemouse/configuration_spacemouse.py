@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
-from lerobot.teleoperators import TeleoperatorConfig
+from lerobot.teleoperators import TeleoperatorConfig, TeleopEvents
 
 
 @TeleoperatorConfig.register_subclass("spacemouse")
@@ -28,19 +28,12 @@ class SpacemouseConfig(TeleoperatorConfig):
     path: Optional[str] = None
 
     initial_gripper_pos: float = 0.0
-    gripper_close_button_idx: bool = 1
-    gripper_open_button_idx: bool = 0
+    gripper_close_button_idx: bool | None = 1
+    gripper_open_button_idx: bool | None = 0
     gripper_continuous: bool = False
     gripper_gain: float = 0.05
 
-
-if __name__ == "__main__":
-    from easyhid import Enumeration
-    hid = Enumeration()
-    for device in hid.find():
-        print("Device:", device.product_string)
-        print("Path:", device.path)
-        print("=" * 5)
+    button_mapping: dict[str, dict[str, TeleopEvents | int]] = field(default_factory=dict)
 
 
 
