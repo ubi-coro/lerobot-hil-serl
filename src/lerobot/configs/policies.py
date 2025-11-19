@@ -25,8 +25,10 @@ import draccus
 from huggingface_hub import hf_hub_download
 from huggingface_hub.constants import CONFIG_NAME
 from huggingface_hub.errors import HfHubHTTPError
+from torch.utils.data import Dataset
 
 from lerobot.configs.types import FeatureType, PolicyFeature
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.optim.optimizers import OptimizerConfig
 from lerobot.optim.schedulers import LRSchedulerConfig
 from lerobot.utils.constants import ACTION, OBS_STATE
@@ -88,6 +90,9 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
                 f"Automatic Mixed Precision (amp) is not available on device '{self.device}'. Deactivating AMP."
             )
             self.use_amp = False
+
+    def wrap_dataset(self, dataset: LeRobotDataset) -> Dataset:
+        return dataset
 
     @property
     def type(self) -> str:
