@@ -5,6 +5,9 @@ import torch
 from torch.utils.data import IterableDataset
 from torchvision import transforms
 
+from lerobot.utils.constants import REWARD
+
+
 # from your code:
 # from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
@@ -191,8 +194,11 @@ class LeRobotLIVWrapper(IterableDataset):
             imt1 = self.aug(imt1)
             im_text = self.aug(im_text)
 
-        images = torch.stack([im0, imT, imt0, imt1, im_text], dim=0)
-        return images, reward, text
+        return {
+            self.camera_key: torch.stack([im0, imT, imt0, imt1, im_text], dim=0),
+            REWARD: reward,
+            "task": text
+        }
 
     def __iter__(self):
         # Stateless, infinite iterator like in LIVBuffer

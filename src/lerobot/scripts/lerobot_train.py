@@ -23,6 +23,7 @@ import torch
 from accelerate import Accelerator
 from termcolor import colored
 from torch.optim import Optimizer
+from torch.utils.data import IterableDataset
 
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
@@ -269,6 +270,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
+    wrapped_dataset = cfg.policy.wrap_dataset(dataset)  # potentially different samples for different algos
     if hasattr(cfg.policy, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(
@@ -278,11 +280,11 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             shuffle=True,
         )
     else:
-        shuffle = True
+        shuffle = not isinstance(wrapped_dataset, IterableDataset)
         sampler = None
 
     dataloader = torch.utils.data.DataLoader(
-        dataset,
+        wrapped_dataset,
         num_workers=cfg.num_workers,
         batch_size=cfg.batch_size,
         shuffle=shuffle and not cfg.dataset.streaming,
@@ -294,9 +296,9 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
 
     # Prepare everything with accelerator
     accelerator.wait_for_everyone()
-    policy, optimizer, dataloader, lr_scheduler = accelerator.prepare(
-        policy, optimizer, dataloader, lr_scheduler
-    )
+    #policy, optimizer, dataloader, lr_scheduler = accelerator.prepare(
+    #    policy, optimizer, dataloader, lr_scheduler
+    #)
     dl_iter = cycle(dataloader)
 
     policy.train()
