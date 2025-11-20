@@ -290,7 +290,13 @@ def record_loop(
         episode_step += 1
 
         # (9) Handle done
-        if done or truncated:
+        if (
+                done or
+                truncated or
+                info.get(TeleopEvents.RERECORD_EPISODE, False) or
+                info.get(TeleopEvents.TERMINATE_EPISODE, False) or
+                info.get(TeleopEvents.PAUSE_RECORDING, False)
+        ):
             episode_time = time.perf_counter() - episode_start_time
             logging.info(
                 f"Episode ended after {episode_step} steps in {episode_time:.1f}s with reward {transition[TransitionKey.REWARD]}"
@@ -375,6 +381,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     info = {}
     with ((VideoEncodingManager(dataset))):
         recorded_episodes = 0
+        paused = False
         while recorded_episodes < cfg.dataset.num_episodes and not info.get(TeleopEvents.STOP_RECORDING, False):
 
             # Execute a few seconds without recording to give time to manually reset the environment
@@ -420,7 +427,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 interactive=cfg.interactive,
                 single_task=cfg.dataset.single_task,
                 robot_type=cfg.env.type,
-                display_data=cfg.display_data,
+                display_data=cfg.display_data
             )
 
             if info.get(TeleopEvents.RERECORD_EPISODE, False):
@@ -429,9 +436,23 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 continue
 
             if dataset.episode_buffer["size"] > 0:
-                dataset.save_episode()
+                dataset.save_episode(force_batch_encoding=info.get(TeleopEvents.PAUSE_RECORDING, False))
                 recorded_episodes += 1
+
+                # todo: check for pause and do it here
+                if info.get(TeleopEvents.PAUSE_RECORDING, False):
+                    log_say("Pause", cfg.play_sounds)
                 continue
+
+
+
+            if paused:
+                # todo: shoul be in a loop that stays here until resume
+                if info.get(TeleopEvents.RESUME_RECORDING, False):
+                    log_say("Resume recording", cfg.play_sounds)
+                    paused = False
+                else:
+                    continue
 
             if info.get(TeleopEvents.STOP_RECORDING, False):
                 break

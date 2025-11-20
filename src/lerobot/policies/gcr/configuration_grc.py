@@ -17,15 +17,19 @@ from lerobot.policies.gcr.data_loader import LeRobotLIVWrapper
 class GCRConfig(PreTrainedConfig):
     """Configuration for the Reward Classifier model."""
 
-    model_name: str = "helper2424/resnet10"
-    img_key: str = "observation.images.left_wrist"
+    model_name: str = "RN50"
+    img_key: str = "observation.images.cam_left_wrist"
     lang_key: str = "task"
     device: str = "cpu"
     model_id: str = "RN50"
-    camera_key: str | None = None
-    doaug: str = "rc"
     load_pretrained: bool = True
 
+    # data loading
+    camera_key: str | None = None
+    doaug: str = "rctraj"
+    alpha: float = 0.95
+
+    # agent
     learning_rate: float = 1e-5
     weight_decay: float = 0.001
     discount: float = 0.98
@@ -35,7 +39,7 @@ class GCRConfig(PreTrainedConfig):
     from_scratch: bool = False
 
     vision_weight: float = 1.0
-    lang_weight: float = 1.0
+    lang_weight: float = 0.0
     clip_weight: float = 1.0
 
     contrastive_omega1: float = 1.0    # pull-together weight
@@ -65,7 +69,8 @@ class GCRConfig(PreTrainedConfig):
         return LeRobotLIVWrapper(
             base_dataset=dataset,
             doaug=self.doaug,
-            camera_key=self.img_key
+            camera_key=self.img_key,
+            alpha=self.alpha
         )
 
     def get_optimizer_preset(self) -> OptimizerConfig:
