@@ -98,7 +98,7 @@ class GCR(PreTrainedPolicy):
 
         # Encode visual and text inputs
         e_img = self.model(b_im_r, modality="vision")
-        b_token = clip.tokenize(b_lang)
+        b_token = clip.tokenize(b_lang).to(e_img.device)
         e_lang = self.model(b_token, modality="text")
 
         e_img = e_img.reshape(bs, img_stack_size, -1)

@@ -124,12 +124,12 @@ def predict_action(
         observation["robot_type"] = robot_type if robot_type else ""
 
         observation = preprocessor(observation)
-        action, inference_info = policy.select_action(observation)
+        action = policy.select_action(observation)
         action = postprocessor(action)
 
         action = action.cpu().squeeze().type(torch.float32)
 
-    return action, inference_info
+    return action
 
 
 def init_keyboard_listener():
