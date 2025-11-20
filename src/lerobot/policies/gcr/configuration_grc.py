@@ -18,7 +18,7 @@ class GCRConfig(PreTrainedConfig):
     """Configuration for the Reward Classifier model."""
 
     model_name: str = "RN50"
-    img_key: str = "observation.images.cam_left_wrist"
+    img_key: str = "observation.images.cam_top"
     lang_key: str = "task"
     device: str = "cpu"
     model_id: str = "RN50"
@@ -43,8 +43,8 @@ class GCRConfig(PreTrainedConfig):
     clip_weight: float = 1.0
 
     contrastive_omega1: float = 1.0    # pull-together weight
-    contrastive_omega2: float = 1.0,   # push-apart weight
-    contrastive_mode: str = "sc",      # "sc"  = simple-contrastive   (Eq. 3)
+    contrastive_omega2: float = 1.0   # push-apart weight
+    contrastive_mode: str = "sc"      # "sc"  = simple-contrastive   (Eq. 3)
                                        # "ic"  = InfoNCE-contrastive (Eq. 4)
 
     normalization_mapping: dict[str, NormalizationMode] = field(
@@ -76,7 +76,9 @@ class GCRConfig(PreTrainedConfig):
     def get_optimizer_preset(self) -> OptimizerConfig:
         return AdamConfig(
             lr=self.learning_rate,
-            weight_decay=self.weight_decay
+            weight_decay=self.weight_decay,
+            betas=(0.9,0.98),
+            eps = 1e-6
         )
 
     def get_scheduler_preset(self) -> LRSchedulerConfig | None:
