@@ -1,36 +1,32 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import os
 import argparse
-
 import numpy as np
+import pandas as pd
 import torch
 import imageio.v2 as imageio
 
 from tqdm import tqdm
-
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
 def tensor_to_uint8_img(t: torch.Tensor) -> np.ndarray:
     """
-    Convert a torch tensor (C,H,W) to uint8 numpy image (H,W,C).
-    Handles float [0,1] or uint8.
+    Convert torch Tensor (C, H, W) → uint8 numpy image (H, W, C).
     """
     if t.dtype == torch.uint8:
         img = t
     else:
-        # assume float in [0,1] or [0,255]
         img = t.clone()
-        if img.max() <= 1.5:
+        if img.max() <= 1.1:
             img = img * 255.0
         img = img.clamp(0, 255).to(torch.uint8)
 
-    img = img.permute(1, 2, 0).cpu().numpy()  # (H,W,C)
-    return img
+    return img.permute(1, 2, 0).cpu().numpy()
 
 
-def export_episodes_to_videos(
+def export_episodes_and_manifest(
     root: str,
     repo_id: str,
     out_dir: str,
@@ -40,111 +36,90 @@ def export_episodes_to_videos(
 ):
     os.makedirs(out_dir, exist_ok=True)
 
-    print(f"Loading LeRobotDataset from root='{root}', repo_id='{repo_id}'...")
+    print(f"Loading dataset from: root='{root}', repo_id='{repo_id}'")
     dataset = LeRobotDataset(
         root=root,
         repo_id=repo_id,
         video_backend=video_backend,
     )
 
-    # Choose camera key if not provided
     if camera_key is None:
         if len(dataset.meta.camera_keys) == 0:
-            raise ValueError("No camera_keys found in dataset.meta.camera_keys.")
+            raise ValueError("No camera keys in dataset!")
         camera_key = dataset.meta.camera_keys[0]
-        print(f"No camera_key provided, using first camera: '{camera_key}'")
+        print(f"camera_key not specified — using '{camera_key}'")
     else:
-        if camera_key not in dataset.meta.camera_keys:
-            raise ValueError(
-                f"camera_key='{camera_key}' not in dataset.meta.camera_keys={dataset.meta.camera_keys}"
-            )
         print(f"Using camera_key='{camera_key}'")
 
-    fps = dataset.fps
-    num_episodes = dataset.num_episodes
+    episodes_meta = dataset.meta.episodes
+    total_episodes = dataset.num_episodes
+
     if max_episodes is not None:
-        num_episodes = min(num_episodes, max_episodes)
+        total_episodes = min(total_episodes, max_episodes)
 
-    print(f"Found {dataset.num_episodes} episodes, exporting {num_episodes} of them.")
-    print(f"Writing videos to '{out_dir}' at {fps} fps.")
+    print(f"Exporting {total_episodes} episodes → {out_dir}")
 
-    # Use metadata to get frame index ranges per episode
-    episodes_meta = dataset.meta.episodes  # structured array / dataframe-like
+    manifest = {
+        "index": [],
+        "directory": [],
+        "num_frames": [],
+        "text": [],
+    }
 
-    for ep_idx in tqdm(range(num_episodes), desc="Episodes"):
+    for ep_idx in tqdm(range(total_episodes), desc="Episodes"):
         ep = episodes_meta[ep_idx]
+
         start_idx = int(ep["dataset_from_index"])
         end_idx = int(ep["dataset_to_index"])  # exclusive
 
-        out_path = os.path.join(out_dir, f"episode_{ep_idx:04d}.mp4")
-        if os.path.exists(out_path):
-            # Skip if already written
-            continue
+        ep_task = ep.get("task", "")
+        # If metadata does not include task, fallback to dataset[start]["task"]
+        if ep_task in ("", None):
+            ep_task = dataset[start_idx].get("task", "")
 
-        # Collect frames
-        frames = []
-        for global_idx in range(start_idx, end_idx):
-            frame = dataset[global_idx]
-            img_t = frame[camera_key]  # C x H x W
-            frames.append(tensor_to_uint8_img(img_t))
+        ep_dir = os.path.join(out_dir, f"episode_{ep_idx:04d}")
+        os.makedirs(ep_dir, exist_ok=True)
 
-        if len(frames) == 0:
-            print(f"Episode {ep_idx} has no frames, skipping.")
-            continue
+        num_frames = end_idx - start_idx
 
-        # Write video
-        with imageio.get_writer(out_path, fps=fps) as writer:
-            for f in frames:
-                writer.append_data(f)
+        # Write all frames as PNGs
+        for local_i, global_i in enumerate(range(start_idx, end_idx)):
+            frame = dataset[global_i]
+            img_t = frame[camera_key]  # CxHxW
+            img = tensor_to_uint8_img(img_t)
+            img_path = os.path.join(ep_dir, f"{local_i:06d}.png")
+            imageio.imwrite(img_path, img)
 
-    print("Done.")
+        # Add to manifest
+        manifest["index"].append(ep_idx)
+        manifest["directory"].append(ep_dir)
+        manifest["num_frames"].append(num_frames)
+        manifest["text"].append(ep_task)
+
+    # Save manifest
+    manifest_df = pd.DataFrame(manifest)
+    manifest_path = os.path.join(out_dir, "manifest.csv")
+    manifest_df.to_csv(manifest_path, index=False)
+
+    print(f"\nDone.")
+    print(f"Saved manifest: {manifest_path}")
+    print(f"Extracted episodes to: {out_dir}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Export each episode from a LeRobotDataset as a single video "
-                    "for a specified camera key."
+        description="Export each episode in a LeRobotDataset as image frames and generate LIV-style manifest.csv"
     )
-    parser.add_argument(
-        "--root",
-        type=str,
-        required=True,
-        help="Root folder where the LeRobot dataset lives.",
-    )
-    parser.add_argument(
-        "--repo-id",
-        type=str,
-        required=True,
-        help="Dataset repo_id (as used when creating/loading LeRobotDataset).",
-    )
-    parser.add_argument(
-        "--out-dir",
-        type=str,
-        required=True,
-        help="Output directory where per-episode videos will be written.",
-    )
-    parser.add_argument(
-        "--camera-key",
-        type=str,
-        default=None,
-        help="Camera key to export (defaults to first in dataset.meta.camera_keys).",
-    )
-    parser.add_argument(
-        "--video-backend",
-        type=str,
-        default="pyav",
-        help="Video backend for LeRobotDataset (default: pyav).",
-    )
-    parser.add_argument(
-        "--max-episodes",
-        type=int,
-        default=None,
-        help="Optional: limit the number of episodes to export.",
-    )
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--repo-id", required=True)
+    parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--camera-key", default=None)
+    parser.add_argument("--video-backend", default="pyav")
+    parser.add_argument("--max-episodes", type=int, default=None)
 
     args = parser.parse_args()
 
-    export_episodes_to_videos(
+    export_episodes_and_manifest(
         root=args.root,
         repo_id=args.repo_id,
         out_dir=args.out_dir,
