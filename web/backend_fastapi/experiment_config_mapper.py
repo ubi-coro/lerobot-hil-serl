@@ -231,3 +231,60 @@ class ExperimentConfigMapper:
 		except Exception as exc:  # pragma: no cover - defensive guard
 			logger.error("Failed to import experiments package: %s", exc)
 			raise
+
+	@classmethod
+	def get_demo_defaults(cls, experiment_type: str) -> Optional[Dict[str, Any]]:
+		"""Get pre-configured demo defaults for a given experiment type.
+		
+		These defaults are used to pre-fill the Demo/Replay form when the user
+		connects with a demo-enabled experiment configuration.
+		
+		Returns None if no demo defaults are configured for this experiment.
+		"""
+		data = cls._load_profile_data()
+		demo_defaults = data.get("demo_defaults", {})
+		return demo_defaults.get(experiment_type)
+
+	@classmethod
+	def is_demo_experiment(cls, experiment_type: str) -> bool:
+		"""Check if an experiment type is configured as a demo experiment."""
+		data = cls._load_profile_data()
+		demo_map = data.get("gui_map", {}).get("demo", {})
+		return experiment_type in demo_map.values()
+
+	@classmethod
+	def get_demo_config_for_mode(cls, operation_mode: str) -> Optional[Dict[str, Any]]:
+		"""Get the full demo configuration for an operation mode.
+		
+		Returns a dict with:
+		- experiment_type: the experiment name
+		- policy_path: pre-configured policy path
+		- task_description: task description
+		- fps, episode_time_s, reset_time_s, num_episodes: timing defaults
+		- interactive: whether intervention is enabled by default
+		
+		Returns None if no demo is configured for this mode.
+		"""
+		normalized = cls.normalize_operation_mode(operation_mode)
+		data = cls._load_profile_data()
+		demo_map = data.get("gui_map", {}).get("demo", {})
+		
+		experiment_type = demo_map.get(normalized)
+		if not experiment_type:
+			return None
+		
+		defaults = cls.get_demo_defaults(experiment_type) or {}
+		
+		return {
+			"experiment_type": experiment_type,
+			"operation_mode": normalized,
+			"policy_path": defaults.get("policy_path", ""),
+			"task_description": defaults.get("task_description", "Demo"),
+			"repo_id": defaults.get("repo_id", ""),
+			"root": defaults.get("root", ""),
+			"fps": defaults.get("fps", 30),
+			"episode_time_s": defaults.get("episode_time_s", 60),
+			"reset_time_s": defaults.get("reset_time_s", 10),
+			"num_episodes": defaults.get("num_episodes", 50),
+			"interactive": defaults.get("interactive", True),
+		}

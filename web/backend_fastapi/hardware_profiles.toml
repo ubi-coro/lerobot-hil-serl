@@ -115,5 +115,25 @@ right = "aloha_bimanual_lemgo_v2_right"
 [gui_map.demo]
 bimanual = "aloha_bimanual_lemgo_v2_demo"
 
+# ------------------------------------------------------------------------
+# Demo Mode Defaults
+#
+# When the user connects with a "demo" experiment type, these defaults
+# are used to pre-fill the Replay/Demo form. No dataset is saved in
+# demo mode (demo_mode=true).
+# ------------------------------------------------------------------------
+
+[demo_defaults.aloha_bimanual_lemgo_v2_demo]
+policy_path = "/mnt/DATA/lerobot/aloha_model/hoodie_folding/20251122_hoodie_folding_lemgo_act/checkpoints/last/pretrained_model"
+task_description = "Hoodie Folding Lemgo Demo"
+repo_id = "hoodie_folding/eval_20251117_hoodie_folding_lemgo_act"
+root = "/mnt/DATA/lerobot/aloha_data/hoodie_folding/eval_20251117_hoodie_folding_lemgo_act"
+fps = 30
+episode_time_s = 60
+reset_time_s = 10
+num_episodes = 50
+interactive = true
+
+# Legacy policy paths section (kept for backward compatibility)
 [gui_defaults.policy_paths]
-aloha_bimanual_lemgo_v2_demo = "/mnt/DATA/lerobot/aloha_model/hoodie_folding/20251113_hoodie_folding_lemgo_act/checkpoints/last/pretrained_model"
+aloha_bimanual_lemgo_v2_demo = "/mnt/DATA/lerobot/aloha_model/hoodie_folding/20251122_hoodie_folding_lemgo_act/checkpoints/last/pretrained_model"

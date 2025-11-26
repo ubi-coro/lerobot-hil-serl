@@ -18,6 +18,16 @@ from pydantic import BaseModel, Field, validator
 from typing import Optional, Dict, Any, List, Union
 import logging
 import json
+
+# Import ExperimentConfigMapper for demo config
+try:
+    from ..experiment_config_mapper import ExperimentConfigMapper
+except ImportError:
+    # Fallback for when running as main module
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from experiment_config_mapper import ExperimentConfigMapper
 import time
 from pathlib import Path
 from enum import Enum
@@ -619,6 +629,87 @@ def _get_file_size_kb(file_path: str) -> float:
         return size_bytes / 1024
     except:
         return 0.0
+
+
+# ============================================================================
+# Demo Mode Configuration
+# ============================================================================
+
+@router.get("/demo-config/{operation_mode}", response_model=ApiResponse)
+async def get_demo_config(operation_mode: str):
+    """
+    Get pre-configured demo settings for a given operation mode.
+    
+    When connecting with a demo-enabled experiment (e.g., aloha_bimanual_lemgo_v2_demo),
+    this endpoint returns all the pre-configured settings needed for policy evaluation
+    without requiring user input.
+    
+    Returns:
+    - policy_path: Path to the pre-trained policy
+    - task_description: Description of the demo task
+    - fps, episode_time_s, reset_time_s, num_episodes: Timing settings
+    - interactive: Whether interventions are enabled
+    """
+    try:
+        demo_config = ExperimentConfigMapper.get_demo_config_for_mode(operation_mode)
+        
+        if demo_config is None:
+            return ApiResponse(
+                status="error",
+                message=f"No demo configuration found for operation mode: {operation_mode}",
+                data={"available_modes": ["bimanual", "left", "right"]}
+            )
+        
+        return ApiResponse(
+            status="success",
+            message="Demo configuration retrieved",
+            data=demo_config
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get demo config: {e}")
+        return ApiResponse(
+            status="error",
+            message=f"Failed to get demo configuration: {str(e)}",
+            data=None
+        )
+
+
+@router.get("/demo-available", response_model=ApiResponse)
+async def get_available_demos():
+    """
+    Get list of all available demo configurations.
+    
+    Returns a list of operation modes that have demo configurations available.
+    """
+    try:
+        available_demos = {}
+        for mode in ["bimanual", "left", "right"]:
+            config = ExperimentConfigMapper.get_demo_config_for_mode(mode)
+            if config:
+                available_demos[mode] = config
+        
+        return ApiResponse(
+            status="success",
+            message=f"Found {len(available_demos)} demo configuration(s)",
+            data={
+                "demos": available_demos,
+                "count": len(available_demos)
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get available demos: {e}")
+        return ApiResponse(
+            status="error",
+            message=f"Failed to get available demos: {str(e)}",
+            data=None
+        )
+
+
+# ============================================================================
+# Initialization
+# ============================================================================
 
 # Initialize default configuration on module load
 def initialize_default_config():

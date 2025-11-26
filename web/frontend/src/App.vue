@@ -32,7 +32,7 @@
           </router-link>
         </li>
         
-        <li class="nav-item mb-1">
+        <li class="nav-item mb-1" v-if="!isDemoRobotConnected">
           <router-link 
             to="/record-dataset" 
             class="nav-link text-light d-flex align-items-center" 
@@ -46,7 +46,7 @@
           </router-link>
         </li>
         
-        <li class="nav-item mb-1">
+        <li class="nav-item mb-1" v-if="!isDemoRobotConnected">
           <div 
             class="nav-link text-light d-flex align-items-center" 
             :class="{ disabled: !robotConnected }"
@@ -58,32 +58,38 @@
           </div>
         </li>
         
-        <li class="nav-item mb-1">
+        <li class="nav-item mb-1" v-if="!isDemoRobotConnected">
           <div class="nav-link text-light d-flex align-items-center disabled" style="opacity:0.5;cursor:not-allowed;">
             <i class="bi bi-cpu me-2"></i>
             <span v-if="!sidebarCollapsed">Training</span>
           </div>
         </li>
         
-        <li class="nav-item mb-1">
-          <router-link 
-            to="/calibration" 
-            class="nav-link text-light d-flex align-items-center" 
-            active-class="active"
-            :class="{ 'calibration-needed': calibrationNeeded }"
-          >
+        <li class="nav-item mb-1" v-if="!isDemoRobotConnected">
+          <div class="nav-link text-light d-flex align-items-center disabled" style="opacity:0.5;cursor:not-allowed;">
             <i class="bi bi-tools me-2"></i>
             <span v-if="!sidebarCollapsed">Calibration</span>
-          </router-link>
+          </div>
         </li>
         
-        <li class="nav-item mb-1">
-          <router-link to="/data-visualization" class="nav-link text-light d-flex align-items-center" active-class="active">
+        <li class="nav-item mb-1" v-if="!isDemoRobotConnected">
+          <div class="nav-link text-light d-flex align-items-center disabled" style="opacity:0.5;cursor:not-allowed;">
             <i class="bi bi-graph-up me-2"></i>
             <span v-if="!sidebarCollapsed">Data Visualization</span>
-          </router-link>
+          </div>
         </li>
         
+        <!-- Demo Mode link - only visible when demo robot connected -->
+        <li class="nav-item mb-1" v-if="isDemoRobotConnected">
+          <router-link 
+            to="/demo" 
+            class="nav-link text-light d-flex align-items-center" 
+            active-class="active"
+          >
+            <i class="bi bi-rocket me-2"></i>
+            <span v-if="!sidebarCollapsed">Demo Mode</span>
+          </router-link>
+        </li>
         
       </ul>
       
@@ -168,6 +174,10 @@ export default {
   computed: {
     robotConnected() {
       return this.robotStore.status.connected;
+    },
+    isDemoRobotConnected(){
+      const robotType = this.robotStore.selectedRobotType || '';
+      return robotType.toLowerCase().includes('demo') && this.robotStore.status.connected;
     },
     currentModeLabel() {
       if (!this.robotConnected) return 'Disconnected';

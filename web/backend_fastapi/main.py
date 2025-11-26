@@ -174,34 +174,46 @@ sio = socketio.AsyncServer(
 shared.set_socketio(sio)
 
 # Recording worker (Phase 1) registration
-# We support both package and script execution contexts. When uvicorn reload/spawn runs the file
-# directly, relative imports (".modules") can fail with "attempted relative import".
 gui_recording_worker = None
-_recording_import_errors = []  # collect for diagnostics
-for import_stmt in [
-    "from .modules import recording_worker as rw",  # package style
-    "from modules import recording_worker as rw",   # absolute within backend_fastapi
-]:
-    if gui_recording_worker:
-        break
+try:
+    from modules import recording_worker as gui_recording_worker
+    logger.info("✅ GUI recording worker imported successfully")
+except ImportError as e:
+    logger.error(f"❌ Failed to import GUI recording worker: {e}")
+    # Try relative import as fallback
     try:
-        namespace: dict = {}
-        exec(import_stmt, globals(), namespace)
-        gui_recording_worker = namespace["rw"]  # type: ignore
-        logger.info(f"✅ GUI recording worker imported via: {import_stmt}")
-    except Exception as e:  # pragma: no cover
-        _recording_import_errors.append(f"{import_stmt} -> {e}")
+        from .modules import recording_worker as gui_recording_worker
+        logger.info("✅ GUI recording worker imported via relative import")
+    except ImportError as e2:
+        logger.error(f"❌ Failed to import GUI recording worker (relative): {e2}")
 
-if not gui_recording_worker:
-    logger.error(
-        "Failed to import GUI recording worker. Tried variants:\n" + "\n".join(_recording_import_errors)
-    )
-else:
+if gui_recording_worker:
     try:
-        gui_recording_worker.register_socketio_handlers(sio)  # type: ignore
+        gui_recording_worker.register_socketio_handlers(sio)
         logger.info("✅ GUI recording worker Socket.IO handlers registered")
-    except Exception as e:  # pragma: no cover
-        logger.error(f"Failed to register recording worker handlers: {e}")
+    except Exception as e:
+        logger.error(f"❌ Failed to register recording worker handlers: {e}")
+else:
+    logger.error("❌ GUI recording worker is None, handlers NOT registered")
+
+# Debug: catch-all for start_recording in case recording_worker handler isn't working
+@sio.on('start_recording')
+async def debug_start_recording(sid, data):
+    """Debug handler for start_recording - acts as fallback if worker fails"""
+    logger.warning(f"⚠️ FALLBACK: start_recording received in main.py from {sid}")
+    logger.warning(f"⚠️ This means recording_worker handler was NOT registered or found")
+    
+    if gui_recording_worker:
+        logger.info("Attempting to route to worker manually...")
+        try:
+            gui_recording_worker.start_recording_via_api(data or {})
+            await sio.emit("recording_status", gui_recording_worker.recording_worker.snapshot(), room=sid)
+            await sio.emit("recording_started", {"ok": True}, room=sid)
+            return
+        except Exception as e:
+            logger.error(f"Manual routing failed: {e}")
+    
+    await sio.emit("recording_error", {"error": "Backend handler missing (Fallback caught event)"}, room=sid)
 
 # Create Socket.IO ASGI app
 socket_app = socketio.ASGIApp(sio, app)
@@ -265,13 +277,18 @@ async def _teleop_status_broadcaster():
 async def connect(sid, environ):
     """Handle Socket.IO client connection"""
     logger.info(f"🔌 Socket.IO client connected: {sid}")
+    logger.info(f"🔌 Connection details - namespace: /, sid: {sid}")
     connected_clients.add(sid)
+    
+    # Log all registered handlers
+    handlers = sio.handlers.get('/', {})
+    logger.info(f"🔌 Registered handlers on '/': {list(handlers.keys())}")
     
     # Send welcome message and initial status
     await sio.emit('connected', {
         'status': 'success',
         'message': 'Connected to LeRobot modular backend',
-        'modules': ['robot', 'teleoperation', 'safety', 'monitoring', 'recording', 'configuration'],
+        'modules': ['robot', 'teleoperation', 'safety', 'monitoring', 'recording', 'configuration', 'dataset'],
         'api_docs': '/api/docs'
     }, room=sid)
     # Also push an immediate teleoperation status to new client
@@ -292,6 +309,13 @@ async def disconnect(sid):
 async def ping(sid, data):
     """Handle ping from client"""
     await sio.emit('pong', {'timestamp': asyncio.get_event_loop().time()}, room=sid)
+
+# Catch-all handler to see ANY custom events
+@sio.on('*')
+async def catch_all(event, sid, data):
+    """Catch all events for debugging"""
+    logger.info(f"🎯 CATCH-ALL: Received event '{event}' from {sid}")
+    logger.info(f"🎯 Data: {data}")
 
 @sio.event
 async def robot_command(sid, data):

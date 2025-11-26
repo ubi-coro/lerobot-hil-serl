@@ -444,6 +444,10 @@ def record(cfg: RecordConfig) -> LeRobotDataset | None:
 
             next_ep = (recorded_episodes + 1)
             log_say(f"Recording episode {next_ep}", cfg.play_sounds)
+            
+            # Get control time from env config if available, otherwise infinite
+            episode_control_time = getattr(cfg.env.processor, "control_time_s", None) if hasattr(cfg.env, "processor") else None
+            
             info = record_loop(
                 env=env,
                 fps=cfg.dataset.fps,
@@ -458,6 +462,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset | None:
                 single_task=cfg.dataset.single_task,
                 robot_type=cfg.env.type,
                 display_data=cfg.display_data,
+                control_time_s=episode_control_time,
             )
 
             if info.get(TeleopEvents.RERECORD_EPISODE, False):

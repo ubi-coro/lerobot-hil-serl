@@ -52,6 +52,7 @@ export const useRecordingStore = defineStore('recording', {
   interactive: false
     },
     mode: 'recording',
+    demoConfig: null,  // Cached demo configuration from backend (used for pre-filling form)
     status: {
       active: false,
       episode_index: 0,
@@ -77,6 +78,7 @@ export const useRecordingStore = defineStore('recording', {
     isActive: (s) => s.status.active,
     isIdle: (s) => !s.status.active,
     canStart: (s) => Object.keys(s.validationErrors).length === 0 && !s.status.active && !s.starting,
+    hasDemoConfig: (s) => !!s.demoConfig,
     progressPct: (s) => {
       if (!s.status.total_episodes || s.status.total_episodes === 0) return 0;
       return Math.min(100, Math.round((s.status.episode_index / s.status.total_episodes) * 100));
@@ -214,6 +216,53 @@ export const useRecordingStore = defineStore('recording', {
       this.mode = newMode;
       this.validationErrors = validateConfig(this.config, this.mode);
     },
+    
+    /**
+     * Fetch and apply demo configuration for the given operation mode.
+     * This pre-fills the form with all necessary settings for demo/evaluation.
+     * @param {string} operationMode - 'bimanual', 'left', or 'right'
+     */
+    async fetchDemoConfig(operationMode = 'bimanual') {
+      try {
+        const response = await fetch(`/api/configuration/demo-config/${operationMode}`);
+        const result = await response.json();
+        
+        if (result.status === 'success' && result.data) {
+          this.demoConfig = result.data;
+          
+          // Pre-fill the form with demo config values
+          this.config.policyPath = result.data.policy_path || '';
+          this.config.single_task = result.data.task_description || '';
+          this.config.fps = result.data.fps || 30;
+          this.config.episode_time_s = result.data.episode_time_s || 60;
+          this.config.reset_time_s = result.data.reset_time_s || 10;
+          this.config.num_episodes = result.data.num_episodes || 50;
+          this.config.interactive = result.data.interactive !== false;
+          
+          // Set sensible defaults for dataset paths
+          this.config.repo_id = 'local/eval_demo';
+          this.config.root = '/tmp/demo_session';
+          this.config.push_to_hub = false;
+          this.config.resume = false;
+          
+          // Set mode to replay
+          this.mode = 'replay';
+          
+          console.log('[recordingStore] Demo config applied:', result.data);
+          this.validationErrors = validateConfig(this.config, this.mode);
+          return true;
+        } else {
+          console.warn('[recordingStore] No demo config available:', result.message);
+          this.demoConfig = null;
+          return false;
+        }
+      } catch (error) {
+        console.error('[recordingStore] Failed to fetch demo config:', error);
+        this.demoConfig = null;
+        return false;
+      }
+    },
+    
     validateAll() {
       this.validationErrors = validateConfig(this.config, this.mode);
       return Object.keys(this.validationErrors).length === 0;
@@ -276,6 +325,9 @@ export const useRecordingStore = defineStore('recording', {
     resetForm() {
       this.config = { ...this.config, repo_id: '', single_task: '' };
       this.validationErrors = {};
+    },
+    setError(errorMsg) {
+      this.error = errorMsg;
     }
   }
 });

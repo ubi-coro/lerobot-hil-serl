@@ -6,6 +6,15 @@
       The dataset name will automatically get an <code>eval_</code> prefix by convention.
       Status shows: Warmup → Recording (Policy) → Resetting → Processing → Pushing (optional).
     </h6>
+    
+    <!-- Demo Config Loaded Banner -->
+    <div v-if="demoConfig" class="demo-banner">
+      <div class="demo-info">
+        <span class="demo-label">✓ Demo configuration loaded</span>
+        <span class="demo-task">{{ demoConfig.task_description }}</span>
+      </div>
+    </div>
+    
     <div class="layout">
       <!-- LEFT: Configuration -->
       <section class="config" :class="{ disabled: isActive }">
@@ -42,9 +51,9 @@
 
           <!-- Dataset Repo ID -->
           <div class="field">
-            <label>Dataset Repo ID <span class="err" v-if="errors.repoId">*</span></label>
-            <input v-model="cfg.repoId" @input="onChange" placeholder="local/eval_my_task" :disabled="isActive"/>
-            <div class="err" v-if="errors.repoId">{{ errors.repoId }}</div>
+            <label>Dataset Repo ID <span class="err" v-if="errors.repo_id">*</span></label>
+            <input v-model="cfg.repo_id" @input="onChange" placeholder="local/eval_my_task" :disabled="isActive"/>
+            <div class="err" v-if="errors.repo_id">{{ errors.repo_id }}</div>
             <div class="hint">Convention: prefix with "eval_" for evaluation datasets</div>
           </div>
 
@@ -78,9 +87,9 @@
 
           <!-- Task Description -->
           <div class="field">
-            <label>Task Description <span class="err" v-if="errors.singleTask">*</span></label>
-            <textarea v-model="cfg.singleTask" @input="onChange" rows="2" placeholder="Describe the evaluation task" :disabled="isActive"></textarea>
-            <div class="err" v-if="errors.singleTask">{{ errors.singleTask }}</div>
+            <label>Task Description <span class="err" v-if="errors.single_task">*</span></label>
+            <textarea v-model="cfg.single_task" @input="onChange" rows="2" placeholder="Describe the evaluation task" :disabled="isActive"></textarea>
+            <div class="err" v-if="errors.single_task">{{ errors.single_task }}</div>
           </div>
 
           <!-- Timings Grid -->
@@ -91,15 +100,15 @@
             </div>
             <div class="field">
               <label>Episode Time (s)</label>
-              <input type="number" v-model.number="cfg.episodeTimeS" @input="onChange" min="1" :disabled="isActive"/>
+              <input type="number" v-model.number="cfg.episode_time_s" @input="onChange" min="1" :disabled="isActive"/>
             </div>
             <div class="field">
               <label>Reset Time (s)</label>
-              <input type="number" v-model.number="cfg.resetTimeS" @input="onChange" min="1" :disabled="isActive"/>
+              <input type="number" v-model.number="cfg.reset_time_s" @input="onChange" min="1" :disabled="isActive"/>
             </div>
             <div class="field">
               <label>Num Episodes</label>
-              <input type="number" v-model.number="cfg.numEpisodes" @input="onChange" min="1" :disabled="isActive"/>
+              <input type="number" v-model.number="cfg.num_episodes" @input="onChange" min="1" :disabled="isActive"/>
             </div>
           </div>
 
@@ -110,11 +119,11 @@
               Encode Video
             </label>
             <label>
-              <input type="checkbox" v-model="cfg.pushToHub" @change="onChange" :disabled="isActive"/>
+              <input type="checkbox" v-model="cfg.push_to_hub" @change="onChange" :disabled="isActive"/>
               Push to Hub
             </label>
             <label>
-              <input type="checkbox" v-model="cfg.displayData" @change="onChange" :disabled="isActive"/>
+              <input type="checkbox" v-model="cfg.display_data" @change="onChange" :disabled="isActive"/>
               Display Data
             </label>
             <label>
@@ -153,7 +162,7 @@
             <div class="fill" :style="{ width: progressPct + '%' }"></div>
           </div>
           <div class="metrics-row">
-            <span>Episode {{ status.currentEpisode }} / {{ cfg.numEpisodes }}</span>
+            <span>Episode {{ status.currentEpisode }} / {{ cfg.num_episodes }}</span>
             <span>{{ progressPct.toFixed(1) }}%</span>
           </div>
         </div>
@@ -223,7 +232,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useRecordingStore } from '@/stores/recordingStore';
 import { useRobotStore } from '@/stores/robotStore';
@@ -233,7 +242,7 @@ const recStore = useRecordingStore();
 const robotStore = useRobotStore();
 recStore.ensureSocketListeners();
 
-const { config: cfg, status, validationErrors: errors, error } = storeToRefs(recStore);
+const { config: cfg, status, validationErrors: errors, error, demoConfig } = storeToRefs(recStore);
 const { isActive, canStart, progressPct, phaseBarPct, phaseLabel, phaseTimeText } = storeToRefs(recStore);
 
 function onChange() { 
@@ -256,8 +265,8 @@ function emergencyStop() { recStore.emergencyStop(); }
 function resetForm() { 
   recStore.resetForm();
   // Set eval_ prefix by default
-  if (!cfg.value.repoId.startsWith('local/eval_')) {
-    recStore.updateConfig({ repoId: 'local/eval_' });
+  if (!cfg.value.repo_id.startsWith('local/eval_')) {
+    recStore.updateConfig({ repo_id: 'local/eval_' });
   }
 }
 
@@ -281,12 +290,35 @@ function setPolicyPath(path) { recStore.updateConfig({ policyPath: path }); }
 if (!robotStore.socket) robotStore.initSocket();
 
 // Initialize with eval_ prefix
-if (!cfg.value.repoId || !cfg.value.repoId.startsWith('eval_')) {
-  recStore.updateConfig({ repoId: 'local/eval_' });
+if (!cfg.value.repo_id || !cfg.value.repo_id.startsWith('eval_')) {
+  recStore.updateConfig({ repo_id: 'local/eval_' });
 }
 
 // Set replay mode for policy evaluation
 recStore.setMode('replay');
+
+// On mount, check if we should auto-load demo config
+// Demo config is loaded when:
+// 1. URL has ?demo=true parameter
+// 2. Robot type contains "demo" (e.g., aloha_bimanual_demo)
+onMounted(async () => {
+  const urlParams = new URLSearchParams(window.location.search);
+  const demoParam = urlParams.get('demo');
+  
+  // Check if robot type is a demo type
+  const robotType = robotStore.robotType || robotStore.selectedRobotType || '';
+  const isDemoRobotType = robotType.toLowerCase().includes('demo');
+  
+  if (demoParam === 'true' || isDemoRobotType) {
+    // Get operation mode from robot type
+    let operationMode = 'bimanual';
+    if (robotType.includes('left')) operationMode = 'left';
+    else if (robotType.includes('right')) operationMode = 'right';
+    
+    console.log('[ReplayDatasetView] Loading demo config for:', operationMode);
+    await recStore.fetchDemoConfig(operationMode);
+  }
+});
 </script>
 
 <style scoped>
@@ -349,6 +381,32 @@ section.disabled { opacity:.65; pointer-events:none; }
 .root-with-browse .browse-btn svg { pointer-events:none; }
 .root-with-browse .browse-btn:hover { background:#4f46e5; }
 .root-with-browse .browse-btn:disabled { background:#6b7280; }
+
+/* Demo Config Loaded Banner */
+.demo-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+  border-radius: 12px;
+  padding: 0.75rem 1.25rem;
+  color: white;
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+  margin-bottom: 0.5rem;
+}
+.demo-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.demo-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.demo-task {
+  font-size: 0.7rem;
+  opacity: 0.9;
+}
 
 /* Dark mode */
 body.dark-mode .replay-dataset-view section { background:linear-gradient(135deg,#1f2937 0%,#111827 100%); border-color:#374151; box-shadow:0 4px 18px rgba(0,0,0,0.45); }

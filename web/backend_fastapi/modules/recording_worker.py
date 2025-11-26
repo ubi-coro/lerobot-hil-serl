@@ -53,9 +53,20 @@ from lerobot.utils.control_utils import (
 from lerobot.utils.utils import log_say, get_safe_torch_device
 from lerobot.processor.rename_processor import rename_stats
 
-from ..experiment_config_mapper import ExperimentConfigMapper, ExperimentMapping
+try:
+    from ..experiment_config_mapper import ExperimentConfigMapper, ExperimentMapping
+except (ImportError, ValueError):
+    try:
+        from experiment_config_mapper import ExperimentConfigMapper, ExperimentMapping
+    except ImportError:
+        # Fallback for when running as main module or different path structure
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from experiment_config_mapper import ExperimentConfigMapper, ExperimentMapping
 
 logger = logging.getLogger(__name__)
+logger.info("✅ recording_worker module loaded")
 
 
 @dataclass
@@ -160,6 +171,10 @@ class ApiCommandActionProcessorStep(ProcessorStep):
     """Inject GUI-issued commands into the processor pipeline as teleop events."""
 
     events: ApiEventAdapter
+
+    def transform_features(self, features: Dict[str, Any]) -> Dict[str, Any]:
+        """Required by abstract base class but not used for command injection."""
+        return features
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         new_transition = transition.copy()
@@ -436,24 +451,69 @@ def start_recording_via_api(config: Dict[str, Any]):
 
             sanity_check_dataset_name(cfg.repo_id, policy_cfg_for_name)
 
+            # Determine device for environment processor (critical for performance)
+            target_device = "cpu"
+            if demo_mode and policy_cfg_for_name:
+                target_device = str(get_safe_torch_device(getattr(policy_cfg_for_name, "device", "cpu") or "cpu"))
+            
+            logger.info(f"Initializing environment with device: {target_device}")
+
             env, env_processor, action_processor, env_cfg, mapping_local = ExperimentConfigMapper.create_env_from_gui_selection(
                 cfg.operation_mode,
                 demo_mode,
                 cfg.policyPath,
                 use_cameras=False,  # Never create new camera connections; use borrowed ones if available
+                device=target_device,
             )
             
-            # If we successfully borrowed cameras, inject them into the environment
+            # If we successfully borrowed cameras, inject them into the environment.
+            # IMPORTANT: Only inject into env.cameras, NOT into robot_dict[].cameras!
+            # The RobotEnv._get_observation() method reads images from env.cameras.
+            # If we also inject into robot.cameras, the robot's get_observation() will
+            # call async_read() on the same camera objects, clearing the frame event,
+            # which then causes env.cameras.async_read() to block waiting for a new frame.
+            # This double-read was causing ~100ms latency per step (3x slower than needed).
             if borrowed_cameras:
-                logger.info("Injecting borrowed cameras into recording environment")
+                logger.info("Injecting borrowed cameras into recording environment (env.cameras only)")
                 if hasattr(env, 'cameras'):
-                    env.cameras = borrowed_cameras
-                # Also inject into robot_dict if it exists (for bimanual setups)
-                if hasattr(env, 'robot_dict'):
-                    for robot_name, robot_instance in env.robot_dict.items():
-                        if hasattr(robot_instance, 'cameras'):
-                            robot_instance.cameras = borrowed_cameras
-                            logger.debug(f"Injected cameras into robot: {robot_name}")
+                    # Align camera keys with experiment config to match policy input_features.
+                    # For aloha_bimanual_lemgo_v2_demo, remap typical hardware keys to experiment keys.
+                    remapped = borrowed_cameras
+                    try:
+                        if getattr(env_cfg, "type", "") == "aloha_bimanual_lemgo_v2_demo":
+                            key_map = {
+                                "front": "cam_low",
+                                "top": "cam_top",
+                                "right": "cam_right_wrist",
+                                "left": "cam_left_wrist",
+                            }
+                            remapped = {}
+                            for src_key, cam in borrowed_cameras.items():
+                                dst_key = key_map.get(src_key, src_key)
+                                remapped[dst_key] = cam
+                            logger.info(f"Remapped camera keys for demo: {list(remapped.keys())}")
+                    except Exception:
+                        logger.debug("Camera key remap skipped", exc_info=True)
+                    env.cameras = remapped
+                    # Also set a default rename_map if none provided, so processors see consistent keys
+                    if not cfg.rename_map:
+                        cfg.rename_map = {
+                            # observation keys within processor typically use 'pixels.<name>'
+                            "pixels.front": "pixels.cam_low",
+                            "pixels.top": "pixels.cam_top",
+                            "pixels.right": "pixels.cam_right_wrist",
+                            "pixels.left": "pixels.cam_left_wrist",
+                        }
+                        logger.info(f"Applied default rename_map: {cfg.rename_map}")
+                
+                # CRITICAL: Update observation space so get_pipeline_dataset_features sees the cameras
+                # This is necessary because the env was created with use_cameras=False
+                if hasattr(env, '_setup_spaces'):
+                    logger.info("Re-running env._setup_spaces() to register injected cameras")
+                    try:
+                        env._setup_spaces()
+                    except Exception as e:
+                        logger.error(f"Failed to update env spaces: {e}")
             
             recording_worker.env = env
             recording_worker.env_processor = env_processor
@@ -462,11 +522,18 @@ def start_recording_via_api(config: Dict[str, Any]):
 
             action_processor.steps.append(ApiCommandActionProcessorStep(events))
 
+            # For policy execution (demo mode) or even recording, we need to know about image features
+            # if cameras are present, regardless of whether we are saving MP4s to disk (cfg.video).
+            # If we pass use_video=False here, get_pipeline_dataset_features strips out image features,
+            # causing make_policy to fail with "You must provide at least one image...".
+            # We force use_video=True if we have cameras, so the features are correctly described.
+            has_cameras = len(getattr(env, "cameras", {}) or {}) > 0
+            
             dataset_features = get_pipeline_dataset_features(
                 env=env,
                 env_processor=env_processor,
                 action_dim=env_cfg.action_dim,
-                use_video=cfg.video,
+                use_video=cfg.video or has_cameras,
             )
 
             camera_count = len(getattr(env, "cameras", {}) or {})
@@ -519,14 +586,46 @@ def start_recording_via_api(config: Dict[str, Any]):
 
                 dataset.add_frame = add_frame_hook  # type: ignore
 
+            # Ensure dataset_features has the correct structure for policy creation
+            # get_pipeline_dataset_features returns a dict of features, but make_policy expects
+            # a structure that matches what LeRobotDataset.features returns.
+            # We need to ensure that image features are correctly typed as "image" for dataset_to_policy_features
+            # to pick them up.
+            
+            # Debug: Log the features we are passing
+            logger.info(f"Dataset features for policy creation: {list(dataset_features.keys())}")
+
             if demo_mode:
                 policy_cfg = policy_cfg_for_name or PreTrainedConfig.from_pretrained(cfg.policyPath)
                 policy_cfg.pretrained_path = cfg.policyPath
-                policy_device = get_safe_torch_device(getattr(policy_cfg, "device", "cpu") or "cpu")
+                
+                # Fix: Default to CUDA if available and not specified in config
+                requested_device = getattr(policy_cfg, "device", None)
+                if not requested_device:
+                    import torch
+                    requested_device = "cuda" if torch.cuda.is_available() else "cpu"
+                
+                policy_device = get_safe_torch_device(requested_device)
                 policy_cfg.device = str(policy_device)
-                use_amp = bool(getattr(policy_cfg, "use_amp", False))
-                # In demo mode, avoid dataset dependency: infer features from env_cfg and load processors from pretrained
-                policy = make_policy(policy_cfg, env_cfg=env_cfg)
+                
+                logger.info(f"Policy path: {cfg.policyPath}")
+                logger.info(f"Policy device: {policy_device}")
+                
+                # Force use_amp to False to match CLI behavior (lerobot/share/record.py does not pass use_amp to record_loop)
+                use_amp = False
+                
+                # In demo mode, we don't have a dataset, but we need to tell the policy what features 
+                # (cameras, state) are available. We use dataset_features (which includes borrowed cameras)
+                # to create a synthetic metadata object, exactly like lerobot/share/record.py does.
+                class _SyntheticMeta:
+                    def __init__(self, features: Dict[str, Any]):
+                        self.features = features
+                
+                synthetic_meta = _SyntheticMeta(dataset_features)
+                
+                # Initialize policy with synthetic meta so it sees the cameras
+                policy = make_policy(policy_cfg, ds_meta=synthetic_meta)
+                
                 preprocessor, postprocessor = make_pre_post_processors(
                     policy_cfg=policy_cfg,
                     pretrained_path=policy_cfg.pretrained_path,
@@ -534,9 +633,7 @@ def start_recording_via_api(config: Dict[str, Any]):
                         "device_processor": {"device": str(policy_device)},
                         "rename_observations_processor": {"rename_map": cfg.rename_map},
                     },
-                    postprocessor_overrides={
-                        "device_processor": {"device": str(policy_device)},
-                    },
+                    # Remove postprocessor_overrides to match CLI behavior (defaults to CPU)
                 )
                 policy.reset()
 
@@ -774,7 +871,8 @@ def _preflight_cameras(robot, timeout_s: int = 6):
     while time.perf_counter() - start < timeout_s:
         ready = True
         for name, cam in cams.items():
-            if getattr(cam, "color_image", None) is None:
+            # Check for latest_frame (LeRobot cameras) or color_image (legacy/Aloha)
+            if getattr(cam, "latest_frame", getattr(cam, "color_image", None)) is None:
                 ready = False
                 break
         if ready:
@@ -782,7 +880,7 @@ def _preflight_cameras(robot, timeout_s: int = 6):
         time.sleep(0.1)
 
     # If here, at least one cam never produced a frame
-    missing = [name for name, cam in cams.items() if getattr(cam, "color_image", None) is None]
+    missing = [name for name, cam in cams.items() if getattr(cam, "latest_frame", getattr(cam, "color_image", None)) is None]
     raise RuntimeError(f"No frames received within {timeout_s}s from cameras: {missing}")
 
 
@@ -844,8 +942,9 @@ def command_recording(action: str):
 # Socket.IO event handler registration helpers
 def register_socketio_handlers(sio):
     logger.info("Registering Socket.IO handlers for recording worker")
-    @sio.event
-    async def start_recording(sid, data):  # type: ignore
+    
+    @sio.on('start_recording')
+    async def handle_start_recording(sid, data):  # type: ignore
         try:
             logger.info(f"start_recording event received from {sid} with payload: {data}")
             start_recording_via_api(data or {})
@@ -865,13 +964,14 @@ def register_socketio_handlers(sio):
             logger.error("start_recording error", exc_info=True)
             await sio.emit("recording_error", {"error": str(e)}, room=sid)
 
-    @sio.event
-    async def stop_recording(sid, data):  # type: ignore
+    @sio.on('stop_recording')
+    async def handle_stop_recording(sid, data):  # type: ignore
+        logger.info(f"stop_recording event received from {sid}")
         stop_recording_via_api()
         await sio.emit("recording_status", recording_worker.snapshot(), room=sid)
 
-    @sio.event
-    async def recording_command(sid, data):  # type: ignore
+    @sio.on('recording_command')
+    async def handle_recording_command(sid, data):  # type: ignore
         try:
             action = (data or {}).get("action")
             logger.info(f"recording_command event '{action}' from {sid}")

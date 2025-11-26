@@ -27,7 +27,23 @@
         </div>
       </div>
       
-  <div class="operation-card primary" @click="cardClick(startRecording, canOperate)" :class="{ disabled: !canOperate }">
+  <!-- Demo Mode moved to center column -->
+  <div class="operation-card secondary demo-mode" v-if="isDemoRobotConnected" @click="startDemo" :class="{ disabled: !canOperate }">
+        <div class="card-icon">🚀</div>
+        <h3>Demo Mode</h3>
+        <p>One-click policy demonstration</p>
+        <div class="card-features">
+          <span>• Pre-configured settings</span>
+          <span>• Instant start</span>
+          <span>• No setup required</span>
+        </div>
+        <div class="card-status demo-ready" v-if="canOperate">
+          <i class="bi bi-check-circle"></i>
+          Ready to run
+        </div>
+      </div>
+
+  <div class="operation-card primary" v-if="!isDemoRobotConnected" @click="cardClick(startRecording, canOperate)" :class="{ disabled: !canOperate }">
         <div class="card-icon">📹</div>
         <h3>Record Dataset</h3>
         <p>Capture training demonstrations</p>
@@ -43,7 +59,7 @@
       </div>
       
       <!-- Secondary Operations (Important) -->
-  <div class="operation-card secondary" @click="cardClick(replayDataset, canOperate)" :class="{ disabled: !canOperate }">
+  <div class="operation-card secondary" v-if="!isDemoRobotConnected" @click="cardClick(replayDataset, canOperate)" :class="{ disabled: !canOperate }">
         <div class="card-icon">📊</div>
         <h3>Replay Dataset</h3>
         <p>Analyze recorded episodes</p>
@@ -58,7 +74,7 @@
         </div>
       </div>
       
-  <div class="operation-card secondary" @click="canStartTraining ? startTraining() : null" :class="{ inactive: !canStartTraining }">
+  <div class="operation-card secondary" v-if="!isDemoRobotConnected" @click="canStartTraining ? startTraining() : null" :class="{ inactive: !canStartTraining }">
         <div class="card-icon">🧠</div>
         <h3>Training</h3>
         <p>Train AI models on collected data</p>
@@ -74,7 +90,7 @@
       </div>
       
       <!-- Utility Operations (When Needed) -->
-  <div class="operation-card utility" @click="openCalibration" :class="{ highlight: calibrationNeeded }">
+  <div class="operation-card utility" v-if="!isDemoRobotConnected" @click="openCalibration" :class="{ highlight: calibrationNeeded, inactive: !canAccessCalibration }">
         <div class="card-icon">⚙️</div>
         <h3>Calibration</h3>
         <p>System setup & remote support</p>
@@ -85,7 +101,7 @@
         </div>
       </div>
       
-      <div class="operation-card utility" @click="openVisualization">
+      <div class="operation-card utility" v-if="!isDemoRobotConnected" @click="openVisualization" :class="{ inactive: !canAccessVisualization }">
         <div class="card-icon">📈</div>
         <h3>Data Visualization</h3>
         <p>LeRobot dataset explorer</p>
@@ -144,7 +160,19 @@ const hasDatasets = computed(() => {
 
 const canStartTraining = computed(() => datasetCount.value >= 5);
 
-const canAccessCalibration = computed(() => true);
+// Permanently disabled features (under construction)
+const canAccessCalibration = computed(() => false);
+
+// These are referenced in template but were missing
+const canStartTeleoperation = computed(() => robotStore.status.connected);
+const canStartRecording = computed(() => robotStore.status.connected);
+const canAccessVisualization = computed(() => false); // Permanently disabled
+
+// Check if a demo robot type is connected
+const isDemoRobotConnected = computed(() => {
+  const robotType = robotStore.selectedRobotType || '';
+  return robotType.toLowerCase().includes('demo') && robotStore.status.connected;
+});
 
 // Operation handlers
 const startTeleoperation = () => { if (canOperate.value) router.push('/teleoperation') }
@@ -153,32 +181,20 @@ const startRecording = () => { if (canOperate.value) router.push('/record-datase
 
 const replayDataset = () => { if (canOperate.value) router.push('/replay-dataset') }
 
+const startDemo = () => { if (canOperate.value) router.push('/demo') }
+
 const startTraining = () => { if (canStartTraining.value) router.push('/training') }
 
-const openCalibration = () => {
-  // Navigate to calibration/setup view
-  router.push('/calibration')
-}
+const openCalibration = () => { /* disabled */ }
 
-const openVisualization = () => {
-  // Navigate to dataset visualization
-  router.push('/data-visualization')
-}
+const openVisualization = () => { /* disabled */ }
 
 // Smart recommendations system
 const generateRecommendations = () => {
   const recs = []
   
   // Check robot connection
-  if (!robotStore.status.connected) {
-    recs.push({
-      operation: 'calibration',
-      priority: 'high',
-      title: 'Connect Robot',
-      reason: 'Robot not detected - check connections and calibrate',
-      icon: '⚙️'
-    })
-  }
+  // Calibration recommendation removed (feature disabled)
   
   // Check for datasets
   if (datasetCount.value === 0) {
@@ -225,7 +241,7 @@ const generateRecommendations = () => {
 const executeRecommendation = (rec) => {
   switch (rec.operation) {
     case 'calibration':
-      openCalibration()
+      // Disabled - ignore
       break
     case 'recording':
       startRecording()
@@ -354,6 +370,27 @@ function clearCalibrationWarning(){
 .operation-card.secondary {
   border-color: #3b82f6;
   background: linear-gradient(135deg, #eff6ff 0%, #f0f9ff 100%);
+}
+
+.operation-card.secondary.demo-mode {
+  border-color: #8b5cf6;
+  background: linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%);
+  animation: demo-pulse 2s ease-in-out infinite;
+}
+
+.operation-card.secondary.demo-mode:hover:not(.disabled) {
+  border-color: #7c3aed;
+  box-shadow: 0 12px 32px rgba(139, 92, 246, 0.35);
+}
+
+@keyframes demo-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.2); }
+  50% { box-shadow: 0 0 0 8px rgba(139, 92, 246, 0); }
+}
+
+.card-status.demo-ready {
+  color: #059669;
+  font-weight: 600;
 }
 
 .operation-card.secondary:hover:not([disabled]) {

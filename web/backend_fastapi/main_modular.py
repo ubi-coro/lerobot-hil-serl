@@ -141,6 +141,7 @@ app.include_router(dataset_router, prefix="/api/dataset")
 
 # Register recording worker Socket.IO handlers
 register_socketio_handlers(sio)
+logger.info("✅ Recording worker Socket.IO handlers registered")
 
 # Create Socket.IO ASGI app
 socket_app = socketio.ASGIApp(sio, app)
@@ -171,7 +172,12 @@ async def _teleop_status_broadcaster():
 async def connect(sid, environ):
     """Handle Socket.IO client connection"""
     logger.info(f"🔌 Socket.IO client connected: {sid}")
+    logger.info(f"🔌 Connection details - namespace: /, sid: {sid}")
     connected_clients.add(sid)
+    
+    # Log all registered handlers
+    handlers = sio.handlers.get('/', {})
+    logger.info(f"🔌 Registered handlers on '/': {list(handlers.keys())}")
     
     # Send welcome message and initial status
     await sio.emit('connected', {
@@ -198,6 +204,30 @@ async def disconnect(sid):
 async def ping(sid, data):
     """Handle ping from client"""
     await sio.emit('pong', {'timestamp': asyncio.get_event_loop().time()}, room=sid)
+
+# Catch-all handler to see ANY custom events
+@sio.on('*')
+async def catch_all(event, sid, data):
+    """Catch all events for debugging"""
+    logger.info(f"🎯 CATCH-ALL: Received event '{event}' from {sid}")
+    logger.info(f"🎯 Data: {data}")
+
+# Debug: catch-all for start_recording in case recording_worker handler isn't working
+@sio.on('start_recording')
+async def debug_start_recording(sid, data):
+    """Debug handler for start_recording - should be overridden by recording_worker"""
+    logger.warning(f"⚠️ DEBUG: start_recording received in main_modular.py from {sid}")
+    logger.warning(f"⚠️ This means recording_worker handler may not be registered properly")
+    logger.info(f"Payload: {data}")
+    # Try to forward to recording worker
+    try:
+        from modules.recording_worker import start_recording_via_api, recording_worker
+        start_recording_via_api(data or {})
+        await sio.emit("recording_status", recording_worker.snapshot(), room=sid)
+        await sio.emit("recording_started", {"ok": True}, room=sid)
+    except Exception as e:
+        logger.error(f"start_recording error: {e}", exc_info=True)
+        await sio.emit("recording_error", {"error": str(e)}, room=sid)
 
 @sio.event
 async def robot_command(sid, data):
