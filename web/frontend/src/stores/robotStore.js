@@ -6,6 +6,7 @@ export const useRobotStore = defineStore('robot', {
   state: () => ({
     configs: [],
   selectedRobotType: (typeof localStorage !== 'undefined' && localStorage.getItem('lerobot.selectedRobotType')) || 'aloha_bimanual',
+    demoMode: (typeof localStorage !== 'undefined' && localStorage.getItem('lerobot.demoMode') === 'true') || false,
     status: {
       connected: false,
       available_arms: [],
@@ -48,6 +49,7 @@ export const useRobotStore = defineStore('robot', {
   errorMessage: (state) => state.internalErrorMessage || state.status.error || '',
   availableCameras: (state) => state.status.cameras || [],
   robotType: (state) => state.selectedRobotType,
+  isDemoMode: (state) => state.demoMode,
   },
 
   actions: {
@@ -130,6 +132,12 @@ export const useRobotStore = defineStore('robot', {
     setRobotType(type) {
   this.selectedRobotType = type || 'aloha_bimanual';
       try { localStorage.setItem('lerobot.selectedRobotType', this.selectedRobotType); } catch (_) {}
+    },
+
+    // Set and persist demo mode flag
+    setDemoMode(enabled) {
+      this.demoMode = !!enabled;
+      try { localStorage.setItem('lerobot.demoMode', this.demoMode.toString()); } catch (_) {}
     },
 
     // Fetch robot configurations

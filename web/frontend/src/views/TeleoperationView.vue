@@ -50,11 +50,12 @@
                 <small>Streams ALOHA cameras into the web UI</small>
               </label>
               
-              <label class="checkbox-label">
+              <label class="checkbox-label disabled">
                 <input 
                   type="checkbox" 
                   v-model="teleoperationConfig.displayData"
                   class="config-checkbox"
+                  disabled
                 />
                 Show External Display
                 <small>Open LeRobot's display window with cameras and telemetry</small>
@@ -538,6 +539,14 @@ h6 kbd {
 .checkbox-label:hover {
   background: #f3f4f6;
   border-color: #d1d5db;
+}
+.checkbox-label.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.checkbox-label.disabled:hover {
+  background: #f9fafb;
+  border-color: #e5e7eb;
 }
 .checkbox-label input.config-checkbox {
   position: absolute;

@@ -103,16 +103,16 @@ class BiViperX(Robot):
         )
 
     def connect(self, calibrate: bool = True, connect_cameras: bool = True) -> None:
-        """Connect both arms and optionally cameras.
-        
+        """Connect both arms and cameras.
+
         Args:
             calibrate: Whether to run calibration if needed
-            connect_cameras: Whether to connect cameras (lazy loading for faster connection)
+            connect_cameras: Whether to connect cameras (set False for lazy loading)
         """
-        self.left_arm.connect(calibrate, connect_cameras=False)  # Don't connect arm cameras
-        self.right_arm.connect(calibrate, connect_cameras=False)  # Don't connect arm cameras
+        # Arms don't have cameras (they're on BiViperX), so pass connect_cameras=False
+        self.left_arm.connect(calibrate, connect_cameras=False)
+        self.right_arm.connect(calibrate, connect_cameras=False)
 
-        # Lazy camera connection: only connect if requested
         if connect_cameras:
             for cam in self.cameras.values():
                 cam.connect()

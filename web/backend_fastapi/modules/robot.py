@@ -234,9 +234,8 @@ async def connect_robot(request: ConnectRequest):
             )
 
         robot_instance = make_robot_from_config(robot_config)
-        # Lazy camera connection: don't connect cameras by default for faster startup
-        # Cameras will be connected on-demand (e.g., when teleoperation or preview starts)
-        robot_instance.connect(calibrate=request.calibrate, connect_cameras=False)
+        # Connect robot and cameras. Camera sharing is handled by borrowing APIs.
+        robot_instance.connect(calibrate=request.calibrate)
 
         robot = robot_instance
         _robot_state.update(

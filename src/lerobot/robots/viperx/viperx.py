@@ -105,37 +105,62 @@ class ViperX(Robot):
 
     @property
     def is_connected(self) -> bool:
-        return self.bus.is_connected and all(cam.is_connected for cam in self.cameras.values())
+        # Robot is considered connected if bus is connected
+        # Cameras are optional (lazy loading via connect_cameras parameter)
+        return self.bus.is_connected
 
-    def connect(self, calibrate: bool = True) -> None:
+    def connect(self, calibrate: bool = True, connect_cameras: bool = True) -> None:
         """
-        We assume that at connection time, arm is in a rest position,
-        and torque can be safely disabled to run calibration.
+        Connect to the robot, applying calibration and configuration only if needed.
+        
+        This method is optimized to avoid disabling torque when the robot is already
+        configured correctly. This prevents the arm from dropping when reconnecting
+        to an already-torqued robot.
+        
+        Args:
+            calibrate: Whether to run interactive calibration if needed
+            connect_cameras: Whether to connect cameras (set False for lazy loading)
         """
         if self.is_connected:
             raise DeviceAlreadyConnectedError(f"{self} already connected")
 
-        # we disable torque to write calibration parameters to the servos
-        # then we enable it again to read them when we check if our calibration matches (weird ik)
-        # then we turn it off again during motor configuration and keep that
         self.bus.connect()
+        
+        # Check what needs to be done BEFORE disabling torque
+        needs_calibration_write = self.calibration and not self._calibration_matches()
+        # Only need interactive calibration if we have NO calibration file AND calibrate=True
+        # If we have a calibration file (self.calibration is truthy), we use that instead
+        needs_interactive_calibration = not self.calibration and calibrate
+        needs_configuration = not self._configuration_matches()
+        
+        # Only disable torque if something actually needs to change
+        if needs_calibration_write or needs_interactive_calibration or needs_configuration:
+            logger.info(f"{self}: configuration needed (calib_write={needs_calibration_write}, "
+                       f"interactive_calib={needs_interactive_calibration}, config={needs_configuration})")
+            with self.bus.torque_disabled():
+                if needs_calibration_write:
+                    self.bus.write_calibration(self.calibration)
+                    logger.info(f"{self}: calibration written to motors")
+                
+                if needs_interactive_calibration:
+                    self._run_calibration()
+                
+                if needs_configuration:
+                    self._apply_configuration()
+        else:
+            logger.info(f"{self}: already calibrated and configured; keeping torque ON")
+            # Still need to cache calibration in bus for position normalization
+            if self.calibration:
+                self.bus.calibration = dict(self.calibration)
 
+        # Ensure torque is enabled after configuration
         self.bus.enable_torque()
 
-        if self.calibration:
-            try:
-                self.bus.write_calibration(self.calibration)
-            except RuntimeError:
-                with self.bus.torque_disabled():
-                    self.bus.write_calibration(self.calibration)
+        # Connect cameras if requested
+        if connect_cameras:
+            for cam in self.cameras.values():
+                cam.connect()
 
-        if not self.is_calibrated and calibrate:
-            self.calibrate()
-
-        for cam in self.cameras.values():
-            cam.connect()
-
-        self.configure()
         self.get_observation()
         logger.info(f"{self} connected.")
 
@@ -144,80 +169,135 @@ class ViperX(Robot):
         return self.bus.is_calibrated
 
     def calibrate(self) -> None:
+        """Run interactive calibration. Requires torque to be disabled."""
         with self.bus.torque_disabled():
-            self.calibration = {
-                "waist": MotorCalibration(id=1, drive_mode=4, homing_offset=0, range_min=0, range_max=4095),
-                "shoulder": MotorCalibration(id=2, drive_mode=5, homing_offset=0, range_min=0, range_max=4095),
-                "shoulder_shadow": MotorCalibration(
-                    id=3, drive_mode=4, homing_offset=0, range_min=0, range_max=4095
-                ),
-                "elbow": MotorCalibration(id=4, drive_mode=1, homing_offset=0, range_min=0, range_max=4095),
-                "elbow_shadow": MotorCalibration(
-                    id=5, drive_mode=4, homing_offset=0, range_min=0, range_max=4095
-                ),
-                "forearm_roll": MotorCalibration(
-                    id=6, drive_mode=4, homing_offset=0, range_min=0, range_max=4095
-                ),
-                "wrist_angle": MotorCalibration(id=7, drive_mode=5, homing_offset=0, range_min=0, range_max=4095),
-                "wrist_rotate": MotorCalibration(
-                    id=8, drive_mode=4, homing_offset=0, range_min=0, range_max=4095
-                ),
-                "gripper": MotorCalibration(id=9, drive_mode=4, homing_offset=0, range_min=0, range_max=4095),
-            }
+            self._run_calibration()
 
-            print(
-                f"{self} arm: move the gripper joint through its range of motion"
-            )
+    def _run_calibration(self) -> None:
+        """Internal calibration routine. Caller must ensure torque is disabled."""
+        self.calibration = {
+            "waist": MotorCalibration(id=1, drive_mode=4, homing_offset=0, range_min=0, range_max=4095),
+            "shoulder": MotorCalibration(id=2, drive_mode=5, homing_offset=0, range_min=0, range_max=4095),
+            "shoulder_shadow": MotorCalibration(
+                id=3, drive_mode=4, homing_offset=0, range_min=0, range_max=4095
+            ),
+            "elbow": MotorCalibration(id=4, drive_mode=1, homing_offset=0, range_min=0, range_max=4095),
+            "elbow_shadow": MotorCalibration(
+                id=5, drive_mode=4, homing_offset=0, range_min=0, range_max=4095
+            ),
+            "forearm_roll": MotorCalibration(
+                id=6, drive_mode=4, homing_offset=0, range_min=0, range_max=4095
+            ),
+            "wrist_angle": MotorCalibration(id=7, drive_mode=5, homing_offset=0, range_min=0, range_max=4095),
+            "wrist_rotate": MotorCalibration(
+                id=8, drive_mode=4, homing_offset=0, range_min=0, range_max=4095
+            ),
+            "gripper": MotorCalibration(id=9, drive_mode=4, homing_offset=0, range_min=0, range_max=4095),
+        }
 
-            range_mins, range_maxes = self.bus.record_ranges_of_motion(motors="gripper", display_values=False)
-            self.calibration["gripper"].range_min = range_mins["gripper"]
-            self.calibration["gripper"].range_max = range_maxes["gripper"]
+        print(
+            f"{self} arm: move the gripper joint through its range of motion"
+        )
 
-            self.bus.write_calibration(self.calibration)
-            self._save_calibration()
-            logger.info(f"Calibration saved to {self.calibration_fpath}")
+        range_mins, range_maxes = self.bus.record_ranges_of_motion(motors="gripper", display_values=False)
+        self.calibration["gripper"].range_min = range_mins["gripper"]
+        self.calibration["gripper"].range_max = range_maxes["gripper"]
+
+        self.bus.write_calibration(self.calibration)
+        self._save_calibration()
+        logger.info(f"Calibration saved to {self.calibration_fpath}")
 
     def configure(self) -> None:
         """
-        Read current motor registers (with torque ON). If all match our desired
-        configuration, skip the torque-off writes. Otherwise, torque-off and apply.
+        Apply motor configuration. If settings already match, skips torque-off.
         """
-        # --- 1) Read current + compute desired
-        current = self._read_current_motor_settings()
-        desired = self._desired_motor_settings()
-
-        if self._settings_match(current, desired):
-            logger.info(f"{self}: motor settings already match; skipping torque-off configuration.")
+        if self._configuration_matches():
+            logger.info(f"{self}: motor settings already match; skipping configuration.")
             return
 
         logger.info(f"{self}: applying motor configuration (requires torque-off).")
         with self.bus.torque_disabled():
-            # Return delay time for all motors
-            self.bus.configure_motors(return_delay_time=0)
+            self._apply_configuration()
 
-            # Secondary IDs for shadow motors
-            if "shoulder_shadow" in self.bus.motors:
-                self.bus.write("Secondary_ID", "shoulder_shadow", 2)
-            if "elbow_shadow" in self.bus.motors:
-                self.bus.write("Secondary_ID", "elbow_shadow", 4)
+    def _apply_configuration(self) -> None:
+        """Internal configuration routine. Caller must ensure torque is disabled."""
+        # Return delay time for all motors
+        self.bus.configure_motors(return_delay_time=0)
 
-            # Drive_Mode: set bit2 (time-based profiles) while preserving other bits
-            for motor in self.bus.motors:
-                dm = self.bus.read("Drive_Mode", motor)
-                dm |= (1 << 2)
-                self.bus.write("Drive_Mode", motor, dm)
+        # Secondary IDs for shadow motors
+        if "shoulder_shadow" in self.bus.motors:
+            self.bus.write("Secondary_ID", "shoulder_shadow", 2)
+        if "elbow_shadow" in self.bus.motors:
+            self.bus.write("Secondary_ID", "elbow_shadow", 4)
 
-            # Operating Mode
-            for motor in self.bus.motors:
-                if motor != "gripper":
-                    self.bus.write("Operating_Mode", motor, OperatingMode.EXTENDED_POSITION.value)
-                else:
-                    self.bus.write("Operating_Mode", "gripper", OperatingMode.CURRENT_POSITION.value)
+        # Drive_Mode: set bit2 (time-based profiles) while preserving other bits
+        for motor in self.bus.motors:
+            dm = self.bus.read("Drive_Mode", motor)
+            dm |= (1 << 2)
+            self.bus.write("Drive_Mode", motor, dm)
 
-            # Profile velocity (ms)
-            pv = int(self.config.moving_time * 1000)
-            for motor in self.bus.motors:
-                self.bus.write("Profile_Velocity", motor, pv)
+        # Operating Mode
+        for motor in self.bus.motors:
+            if motor != "gripper":
+                self.bus.write("Operating_Mode", motor, OperatingMode.EXTENDED_POSITION.value)
+            else:
+                self.bus.write("Operating_Mode", "gripper", OperatingMode.CURRENT_POSITION.value)
+
+        # Profile velocity (ms)
+        pv = int(self.config.moving_time * 1000)
+        for motor in self.bus.motors:
+            self.bus.write("Profile_Velocity", motor, pv)
+        
+        logger.info(f"{self}: motor configuration applied.")
+
+    def _configuration_matches(self) -> bool:
+        """Check if current motor configuration matches desired settings."""
+        current = self._read_current_motor_settings()
+        desired = self._desired_motor_settings()
+        return self._settings_match(current, desired)
+
+    def _calibration_matches(self) -> bool:
+        """
+        Check if calibration values on the motors match our cached calibration.
+        This avoids unnecessary torque-off for writing already-correct values.
+        
+        Note: For Drive_Mode, we only compare bits 0-1 (direction bits), since
+        bit 2 (time-based profiles) is set by _apply_configuration() separately.
+        """
+        if not self.calibration:
+            return True  # No calibration to write
+        
+        try:
+            for motor, calib in self.calibration.items():
+                # Read current values from motor
+                homing = self.bus.read("Homing_Offset", motor)
+                min_pos = self.bus.read("Min_Position_Limit", motor)
+                max_pos = self.bus.read("Max_Position_Limit", motor)
+                drive_mode = self.bus.read("Drive_Mode", motor)
+                
+                # Compare with desired calibration
+                if homing != calib.homing_offset:
+                    logger.debug(f"Calibration mismatch {motor} Homing_Offset: have={homing}, want={calib.homing_offset}")
+                    return False
+                if min_pos != calib.range_min:
+                    logger.debug(f"Calibration mismatch {motor} Min_Position_Limit: have={min_pos}, want={calib.range_min}")
+                    return False
+                if max_pos != calib.range_max:
+                    logger.debug(f"Calibration mismatch {motor} Max_Position_Limit: have={max_pos}, want={calib.range_max}")
+                    return False
+                # For Drive_Mode, only compare bits 0-1 (direction), ignore bit 2 (time-based profiles)
+                # Bit 2 is handled by _apply_configuration()
+                direction_mask = 0b11  # bits 0-1
+                if (drive_mode & direction_mask) != (calib.drive_mode & direction_mask):
+                    logger.debug(f"Calibration mismatch {motor} Drive_Mode direction: have={drive_mode & direction_mask}, want={calib.drive_mode & direction_mask}")
+                    return False
+            
+            # All values match - cache calibration in bus for normalization
+            self.bus.calibration = dict(self.calibration)
+            return True
+        except Exception as e:
+            logger.debug(f"Error reading calibration values: {e}")
+            return False  # If we can't read, assume we need to write
 
     def get_observation(self) -> dict[str, Any]:
         """The returned observations do not have a batch dimension."""

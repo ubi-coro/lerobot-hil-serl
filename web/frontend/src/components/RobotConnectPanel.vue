@@ -9,19 +9,33 @@
         <p>{{ statusMessage }}</p>
       </div>
       <div class="status-actions" v-if="!busy">
-        <div class="robot-type-picker" v-if="!isConnected">
-          <label class="rt-label">Robot Type</label>
-          <select v-model="selectedType" @change="onTypeChange">
-            <option value="aloha_bimanual">ALOHA Bimanual</option>
-            <option value="aloha_right">ALOHA Single Right</option>
-            <option value="aloha_left">ALOHA Single Left</option>
-            <option value="koch" disabled>Koch</option>
-            <option value="koch_bimanual" disabled>Koch Bimanual</option>
-            <option value="so101" disabled>So101</option>
-            <option value="so100" disabled>So100</option>
-            <option value="lekiwi" disabled>LeKiwi</option>
-            <option value="stretch" disabled>Stretch</option>
-          </select>
+        <div class="status-controls">
+          <div class="robot-type-picker" v-if="!isConnected">
+            <label class="rt-label">Robot Type</label>
+            <select v-model="selectedType" @change="onTypeChange">
+              <option value="aloha_bimanual">ALOHA Bimanual</option>
+              <option value="aloha_right">ALOHA Single Right</option>
+              <option value="aloha_left">ALOHA Single Left</option>
+              <option value="koch" disabled>Koch</option>
+              <option value="koch_bimanual" disabled>Koch Bimanual</option>
+              <option value="so101" disabled>So101</option>
+              <option value="so100" disabled>So100</option>
+              <option value="lekiwi" disabled>LeKiwi</option>
+              <option value="stretch" disabled>Stretch</option>
+            </select>
+          </div>
+          <div class="demo-mode-toggle" v-if="isConnected">
+            <label class="toggle-label">
+              <input 
+                type="checkbox" 
+                v-model="demoMode" 
+                class="demo-checkbox"
+              >
+              <span class="toggle-slider"></span>
+              <span class="toggle-text">Demo Mode</span>
+            </label>
+            <p class="toggle-hint">no data saving</p>
+          </div>
         </div>
         <button 
           v-if="!isConnected" 
@@ -60,6 +74,7 @@ const robotStore = useRobotStore();
 const busy = ref(false);
 const error = ref('');
 const errorTips = ref([]);
+const demoMode = ref(false);
 
 const ROBOT_LABELS = {
   aloha_bimanual: 'ALOHA Bimanual',
@@ -148,7 +163,12 @@ function onTypeChange(){
   robotStore.setRobotType(selectedType.value);
 }
 
+function updateDemoMode(){
+  robotStore.setDemoMode(demoMode.value);
+}
+
 watch(() => robotStore.robotType, (val) => { if (val) selectedType.value = val; });
+watch(() => demoMode.value, updateDemoMode);
 </script>
 
 <style scoped>
@@ -171,6 +191,16 @@ watch(() => robotStore.robotType, (val) => { if (val) selectedType.value = val; 
 .robot-type-picker { display:flex; align-items:center; gap:.5rem; margin-right: .75rem; }
 .robot-type-picker .rt-label { font-size:.8rem; color:#374151; font-weight:600; }
 .robot-type-picker select { padding:.5rem .6rem; border:1px solid #d1d5db; border-radius:.5rem; background:#fff; font-size:.9rem; color:#111827; }
+.status-controls { display: flex; flex-direction: column; gap: 1rem; }
+.demo-mode-toggle { display: flex; align-items: center; gap: 1rem; }
+.toggle-label { display: flex; align-items: center; gap: 0.75rem; cursor: pointer; position: relative; }
+.demo-checkbox { display: none; }
+.toggle-slider { position: relative; width: 3.5rem; height: 2rem; background: #d1d5db; border-radius: 1rem; transition: background 0.3s ease; display: block; }
+.demo-checkbox:checked + .toggle-slider { background: #10b981; }
+.toggle-slider::after { content: ''; position: absolute; top: 0.25rem; left: 0.25rem; width: 1.5rem; height: 1.5rem; background: white; border-radius: 50%; transition: left 0.3s ease; }
+.demo-checkbox:checked + .toggle-slider::after { left: 1.75rem; }
+.toggle-text { font-size: 0.9rem; font-weight: 600; color: #1f2937; }
+.toggle-hint { margin: 0; font-size: 0.75rem; color: #9ca3af; font-style: italic; }
 button.btn { padding: 0.75rem 1.5rem; border: none; border-radius: 0.5rem; cursor: pointer; font-weight: 500; transition: all 0.2s ease; display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; }
 button.btn-primary { background: #3b82f6; color: white; }
 button.btn-primary:hover:not(:disabled) { background: #2563eb; }

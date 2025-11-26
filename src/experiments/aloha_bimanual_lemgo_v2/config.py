@@ -111,7 +111,7 @@ class AlohaBimanualEnvConfigLemgoV2(HilSerlRobotEnvConfig):
 @dataclass
 @DatasetRecordConfig.register_subclass("aloha_bimanual_lemgo_v2")
 class AlohaBimanualDatasetConfigLemgoV2(DatasetRecordConfig):
-    repo_id: str = "hoodie_folding/20251111_hoodie_folding_lemgo_left_twisted"
-    single_task: str = "Hoodie Folding Lemgo  Left Twisted"
-    root: str = "/mnt/DATA/lerobot/aloha_data/hoodie_folding/20251111_hoodie_folding_lemgo_left_twisted"
+    repo_id: str = "hoodie_folding/20251117_hoodie_folding_lemgo_right_twisted"
+    single_task: str = "Hoodie Folding Lemgo  Right Twisted"
+    root: str = "/mnt/DATA/lerobot/aloha_data/hoodie_folding/20251117_hoodie_folding_lemgo_right_twisted"
 

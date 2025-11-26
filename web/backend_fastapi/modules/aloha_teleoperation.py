@@ -43,8 +43,11 @@ except Exception:
     def log_rerun_data(*args, **kwargs):
         return None
 import shared
-from . import camera_streaming
 from experiment_config_mapper import ExperimentConfigMapper
+
+import base64
+import cv2
+import numpy as np
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.factory import make_policy, make_pre_post_processors
@@ -196,6 +199,7 @@ def aloha_teleoperation_worker(config: AlohaConfig):
     env_processor = None
     action_processor = None
     teleop_dict: dict[str, Any] = {}
+    stream_cameras = config.show_cameras
     borrowed_cameras = None
 
     try:
@@ -208,8 +212,9 @@ def aloha_teleoperation_worker(config: AlohaConfig):
         operation_key = op_mode_mapping[config.operation_mode]
         demo_enabled = bool(config.demo_mode or config.policy_path)
 
-        # Borrow cameras from robot module if available and requested
-        if config.show_cameras:
+        # Borrow cameras from robot module if streaming is requested
+        # The robot module already has cameras connected, so we reuse them
+        if stream_cameras:
             try:
                 from . import robot as robot_module
                 borrowed_cameras = robot_module.borrow_cameras("aloha_teleoperation")
@@ -217,31 +222,18 @@ def aloha_teleoperation_worker(config: AlohaConfig):
                     logger.info(f"Successfully borrowed {len(borrowed_cameras)} cameras from robot module")
                 else:
                     logger.warning("Cameras requested but not available from robot module")
-            except RuntimeError as e:
-                logger.error(f"Failed to borrow cameras: {e}")
-                borrowed_cameras = None
+                    stream_cameras = False  # Disable streaming if no cameras available
             except Exception as e:
-                logger.debug(f"Could not borrow cameras from robot module: {e}")
-                borrowed_cameras = None
+                logger.warning(f"Could not borrow cameras: {e}")
+                stream_cameras = False
 
+        # Create environment WITHOUT cameras (we use borrowed ones for streaming)
         env, env_processor, action_processor, env_cfg, mapping = ExperimentConfigMapper.create_env_from_gui_selection(
             operation_mode=operation_key,
             demo_mode=demo_enabled,
             policy_path_override=config.policy_path,
-            use_cameras=False,  # Never create new camera connections; use borrowed ones if available
+            use_cameras=False,  # Never create new camera connections; use borrowed ones
         )
-
-        # If we successfully borrowed cameras, inject them into the environment
-        if borrowed_cameras:
-            logger.info("Injecting borrowed cameras into teleoperation environment")
-            if hasattr(env, 'cameras'):
-                env.cameras = borrowed_cameras
-            # Also inject into robot_dict if it exists (for bimanual setups)
-            if hasattr(env, 'robot_dict'):
-                for robot_name, robot_instance in env.robot_dict.items():
-                    if hasattr(robot_instance, 'cameras'):
-                        robot_instance.cameras = borrowed_cameras
-                        logger.debug(f"Injected cameras into robot: {robot_name}")
 
         action_dim = env_cfg.action_dim
 
@@ -304,14 +296,16 @@ def aloha_teleoperation_worker(config: AlohaConfig):
             _init_rerun(session_name="lerobot_control_loop_teleop")
             logger.info("✅ LeRobot rerun session initialized.")
 
-        camera_proxy = SimpleNamespace(cameras=getattr(env, "cameras", {})) if getattr(env, "cameras", None) else None
-        if config.show_cameras and camera_proxy is not None:
-            try:
-                cam_fps = min(config.fps, 12)
-                camera_streaming.start_streams(camera_proxy, fps=cam_fps)
-                logger.info(f"Started camera streaming (fps={cam_fps})")
-            except Exception as exc:
-                logger.warning(f"Failed to start camera streaming: {exc}")
+        # Camera streaming: read from borrowed cameras in the control loop
+        # This avoids separate threads that compete for hardware
+        camera_frame_interval = max(1, int(config.fps / 12))  # ~12 fps for streaming
+        camera_frame_counter = 0
+        
+        if stream_cameras and borrowed_cameras:
+            # Notify frontend which cameras are available
+            camera_ids = list(borrowed_cameras.keys())
+            shared.emit_threadsafe('camera_list', {'cameras': camera_ids})
+            logger.info(f"Camera streaming enabled for: {camera_ids} (every {camera_frame_interval} frames)")
 
         obs, info = env.reset()
         env_processor.reset()
@@ -420,6 +414,39 @@ def aloha_teleoperation_worker(config: AlohaConfig):
                 except Exception:
                     logger.debug("Failed to log rerun data", exc_info=True)
 
+            # Stream camera frames from borrowed cameras (read in control loop = no hardware contention)
+            if stream_cameras and borrowed_cameras:
+                camera_frame_counter += 1
+                if camera_frame_counter >= camera_frame_interval:
+                    camera_frame_counter = 0
+                    try:
+                        for cam_id, camera in borrowed_cameras.items():
+                            # Read frame from borrowed camera using async_read (non-blocking)
+                            frame_data = camera.async_read() if hasattr(camera, 'async_read') else camera.read()
+                            if frame_data is None:
+                                continue
+                            # Handle (color, depth) tuple from RealSense
+                            if isinstance(frame_data, tuple):
+                                frame_data = frame_data[0]
+                            if not isinstance(frame_data, np.ndarray):
+                                continue
+                            # Resize for streaming efficiency
+                            h, w = frame_data.shape[:2]
+                            if w > 640:
+                                scale = 640 / w
+                                frame_data = cv2.resize(frame_data, (640, int(h * scale)))
+                            # Encode as JPEG
+                            ok, buf = cv2.imencode('.jpg', frame_data, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                            if ok:
+                                b64 = 'data:image/jpeg;base64,' + base64.b64encode(buf).decode('utf-8')
+                                shared.emit_threadsafe('camera_frame', {
+                                    'camera_id': cam_id,
+                                    'frame': b64,
+                                    'ts': time.time()
+                                })
+                    except Exception:
+                        logger.debug("Failed to emit camera frames", exc_info=True)
+
             dt_s = time.perf_counter() - loop_start
             busy_wait(max(0.0, (1 / config.fps) - dt_s))
 
@@ -441,10 +468,18 @@ def aloha_teleoperation_worker(config: AlohaConfig):
     finally:
         aloha_state["stage"] = "stopping"
 
-        try:
-            camera_streaming.stop_all_streams()
-        except Exception as exc:
-            logger.debug("Error stopping camera streams: %s", exc)
+        # Clear camera list notification
+        if stream_cameras:
+            shared.emit_threadsafe('camera_list', {'cameras': []})
+
+        # Return borrowed cameras to robot module
+        if borrowed_cameras:
+            try:
+                from . import robot as robot_module
+                robot_module.return_cameras("aloha_teleoperation")
+                logger.info("Cameras returned to robot module")
+            except Exception as e:
+                logger.debug(f"Could not return cameras: {e}")
 
         if config.display_data and _RERUN_AVAILABLE:
             try:
@@ -463,15 +498,6 @@ def aloha_teleoperation_worker(config: AlohaConfig):
                 teleop.disconnect()
             except Exception as exc:
                 logger.debug("Error disconnecting teleoperator %s: %s", getattr(teleop, "id", "unknown"), exc)
-
-        # Return borrowed cameras to robot module
-        if borrowed_cameras:
-            try:
-                from . import robot as robot_module
-                robot_module.return_cameras("aloha_teleoperation")
-                logger.info("Cameras returned to robot module")
-            except Exception as e:
-                logger.warning(f"Could not return cameras to robot module: {e}")
 
         aloha_state["robot"] = None
         aloha_state["teleop"] = None

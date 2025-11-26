@@ -116,4 +116,4 @@ right = "aloha_bimanual_lemgo_v2_right"
 bimanual = "aloha_bimanual_lemgo_v2_demo"
 
 [gui_defaults.policy_paths]
-aloha_bimanual_lemgo_v2_demo = "/media/jannick/DATA/aloha_model_lerobot/jannick-st/act-241025/pretrained_model"
+aloha_bimanual_lemgo_v2_demo = "/mnt/DATA/lerobot/aloha_model/hoodie_folding/20251113_hoodie_folding_lemgo_act/checkpoints/last/pretrained_model"
