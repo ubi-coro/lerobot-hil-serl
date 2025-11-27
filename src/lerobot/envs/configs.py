@@ -47,11 +47,6 @@ class EnvConfig(draccus.ChoiceRegistry, abc.ABC):
         """ID string used in gym.make() to instantiate the environment"""
         return f"{self.package_name}/{self.task}"
 
-    @property
-    @abc.abstractmethod
-    def gym_kwargs(self) -> dict:
-        raise NotImplementedError()
-
 
 @EnvConfig.register_subclass("aloha")
 @dataclass

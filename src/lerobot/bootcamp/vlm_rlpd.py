@@ -345,7 +345,7 @@ class SACVLMPolicy(
             if self.config.use_backup_entropy:
                 min_q = min_q - (self.temperature * action_dist.log_prob(action_dist.rsample()))
 
-            td_target = rewards + (1 - done) * self.config.discount * min_q
+            td_target = rewards.squeeze() + (1 - done.squeeze()) * self.config.discount * min_q
 
         # 3- compute predicted qs
         if self.config.num_discrete_actions is not None:
@@ -362,7 +362,7 @@ class SACVLMPolicy(
 
         # 4- Calculate loss
         # Compute state-action value loss (TD loss) for all of the Q functions in the ensemble.
-        td_target_duplicate = einops.repeat(td_target, "b -> e b", e=q_preds.shape[0])
+        td_target_duplicate = einops.repeat(td_target.squeeze(), "b -> e b", e=q_preds.shape[0])
         # You compute the mean loss of the batch for each critic and then to compute the final loss you sum them up
         critics_loss = (
             F.mse_loss(
@@ -487,87 +487,6 @@ class SACVLMPolicy(
 
         actor_loss = ((self.temperature * dist.log_prob(policy_actions)) - min_q_preds).mean()
         return actor_loss
-
-    def compute_loss_noise(
-        self,
-        actions,
-        observations,
-        observation_features: Tensor | None = None,
-    ) -> tuple[Tensor, float]:
-        with torch.no_grad():
-            dist = self.actor(observations, observation_features)
-            mean_actions = dist.rsample()
-
-        noised_actions, noise_dist, _ = self.add_structured_noise(mean_actions, observations, observation_features, step=0)
-
-        # noise_dist is in normalized action-space
-        noised_actions = self.normalize_targets({"action": noised_actions})["action"]
-        actions = self.normalize_targets({"action": actions})["action"]
-        mean_actions = self.normalize_targets({"action": mean_actions})["action"]
-
-        # score residuals
-        residual_actions = actions - mean_actions
-        noise_loss = -noise_dist.log_prob(residual_actions).mean()
-
-        # compute improvement
-        dist_to_mean = torch.norm(actions - mean_actions, dim=1)
-        dist_to_sampled = torch.norm(actions - noised_actions, dim=1)
-        dgn_improvement_ratio = (dist_to_sampled < dist_to_mean).float().mean().item()
-
-        return noise_loss, dgn_improvement_ratio
-
-    def add_structured_noise(self, mean_actions: Tensor, observations: dict[str, Tensor] , observation_features: Tensor | None = None, step: int | None = 0):
-        batch_size = mean_actions.shape[0]
-        action_dim = mean_actions.shape[1]
-
-        noise_params = self.noise_net.mean_layer(
-            self.noise_net.network(
-                self.noise_net.encoder(
-                    observations,
-                    cache=observation_features,
-                    detach=self.noise_net.encoder_is_shared
-                )
-            )
-        )
-
-        if self.config.noise_config.predict_residual:
-            cov_cholemsky = noise_params[..., action_dim:]
-            residual_means = noise_params[..., :action_dim]
-        else:
-            cov_cholemsky = noise_params
-            residual_means = torch.zeros_like(mean_actions)
-
-        # Create lower triangular matrix
-        L = torch.zeros((batch_size, action_dim, action_dim), device=mean_actions.device)
-
-        tril_indices = torch.tril_indices(row=action_dim, col=action_dim, offset=0)
-        L[:, tril_indices[0], tril_indices[1]] = cov_cholemsky
-
-        # Optionally apply softplus to diagonal elements to ensure positive definiteness
-        diagonal_indices = torch.arange(action_dim)
-        L[:, diagonal_indices, diagonal_indices] = torch.nn.functional.softplus(
-            L[:, diagonal_indices, diagonal_indices]
-        ) + 1e-6
-
-        # Compute covariance matrix explicitly via Cholesky factorization
-        cov = torch.bmm(L, L.transpose(1, 2))
-
-        # sample from multivariate normal
-        noise_dist = torch.distributions.MultivariateNormal(residual_means, covariance_matrix=cov)
-        noise = noise_dist.rsample()
-
-        # downscale noise
-        effective_step = self.get_opt_step() if step is None else step
-        eps = self.config.noise_config.initial_eps * np.exp(-effective_step /  self.config.noise_config.tau)
-        noise = eps * noise
-
-        # add actions and clamp accordingly
-        action_normalized = self.normalize_targets({"action": mean_actions})["action"]
-        action_normalized = action_normalized + noise
-        action_normalized = torch.clamp(action_normalized, -1, 1)
-
-        actions_final = self.unnormalize_outputs({"action": action_normalized})["action"]
-        return actions_final, noise_dist, eps
 
     def _init_encoders(self):
         """Initialize shared or separate encoders for actor and critic."""

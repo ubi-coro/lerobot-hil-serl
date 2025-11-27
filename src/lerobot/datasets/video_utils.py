@@ -34,6 +34,7 @@ from PIL import Image
 
 
 def get_safe_default_codec():
+    return "pyav"
     if importlib.util.find_spec("torchcodec"):
         return "torchcodec"
     else:

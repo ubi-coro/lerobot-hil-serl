@@ -35,26 +35,26 @@ from torch import nn
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader
 
-from src.lerobot.bootcamp.vlm_classifier import VLMClassifier
-from src.lerobot.datasets.lerobot_dataset import LeRobotDataset
-from src.lerobot.policies.sac.reward_model.configuration_classifier import RewardClassifierConfig
-from src.lerobot.rl.wandb_utils import WandBLogger
-from src.lerobot.share.configs import TrainRLServerPipelineConfig
-from src.lerobot.utils.constants import (
+from lerobot.bootcamp.vlm_classifier import VLMClassifier
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.policies.sac.reward_model.configuration_classifier import RewardClassifierConfig
+from lerobot.rl.wandb_utils import WandBLogger
+from lerobot.share.configs import TrainRLServerPipelineConfig
+from lerobot.utils.constants import (
     CHECKPOINTS_DIR,
     LAST_CHECKPOINT_LINK,
     TRAINING_STATE_DIR,
     REWARD,
     OBS_STATE, # Use OBS_STATE for VLM embedding input
 )
-from src.lerobot.utils.random_utils import set_seed
-from src.lerobot.utils.train_utils import (
+from lerobot.utils.random_utils import set_seed
+from lerobot.utils.train_utils import (
     get_step_checkpoint_dir,
     load_training_state as utils_load_training_state,
     save_checkpoint,
     update_last_checkpoint,
 )
-from src.lerobot.utils.utils import (
+from lerobot.utils.utils import (
     format_big_number,
     get_safe_torch_device,
     init_logging,

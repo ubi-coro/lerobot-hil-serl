@@ -792,6 +792,9 @@ def concatenate_batch_transitions(
     left_batch_transitions[ACTION] = torch.cat(
         [left_batch_transitions[ACTION], right_batch_transition[ACTION]], dim=0
     )
+    left_batch_transitions["vla_action"] = torch.cat(
+        [left_batch_transitions["vla_action"], right_batch_transition["vla_action"]], dim=0
+    )
     left_batch_transitions["reward"] = torch.cat(
         [left_batch_transitions["reward"], right_batch_transition["reward"]], dim=0
     )

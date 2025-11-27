@@ -3,7 +3,7 @@ import numpy as np
 import json_numpy
 import time  # <-- Import the time module
 
-server_url = "http://hkn0812:8000/act"
+server_url = "http://hkn0530:8000/act"
 timeout = 5
 num_requests = 20  # <-- Number of requests to send
 

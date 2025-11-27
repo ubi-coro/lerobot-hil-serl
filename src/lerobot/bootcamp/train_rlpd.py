@@ -29,62 +29,78 @@ from pathlib import Path
 from pprint import pformat
 from typing import TypedDict, Sequence
 from collections.abc import Iterator
+from pathlib import Path
 
 import torch
 
-from src.lerobot.envs import EnvConfig
-from src.lerobot.policies.sac.configuration_sac import SACConfig
+from lerobot.envs import AlohaEnv
+from lerobot.configs.types import FeatureType, PolicyFeature
+from lerobot.policies.sac.configuration_sac import SACConfig
 from termcolor import colored
 from torch import nn
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader, Dataset
 
-from src.lerobot.datasets.lerobot_dataset import LeRobotDataset
-from src.lerobot.policies.sac.modeling_sac import SACPolicy
-from src.lerobot.rl.buffer import concatenate_batch_transitions
-from src.lerobot.rl.wandb_utils import WandBLogger
-from src.lerobot.scripts.lerobot_record import DatasetRecordConfig
-from src.lerobot.share.configs import TrainRLServerPipelineConfig
-from src.lerobot.utils.constants import (
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.policies.sac.modeling_sac import SACPolicy
+from lerobot.rl.buffer import concatenate_batch_transitions
+from lerobot.rl.wandb_utils import WandBLogger
+from lerobot.scripts.lerobot_record import DatasetRecordConfig
+from lerobot.share.configs import TrainRLServerPipelineConfig
+from lerobot.utils.constants import (
     ACTION,
     CHECKPOINTS_DIR,
     LAST_CHECKPOINT_LINK,
     TRAINING_STATE_DIR,
+    OBS_STATE,
     REWARD,
     DONE,
 )
-from src.lerobot.utils.random_utils import set_seed
-from src.lerobot.utils.train_utils import (
+from lerobot.utils.random_utils import set_seed
+from lerobot.utils.train_utils import (
     get_step_checkpoint_dir,
     load_training_state as utils_load_training_state,
     save_checkpoint,
     update_last_checkpoint,
 )
-from src.lerobot.utils.transition import move_state_dict_to_device, move_transition_to_device
-from src.lerobot.utils.utils import (
+from lerobot.utils.transition import move_state_dict_to_device, move_transition_to_device
+from lerobot.utils.utils import (
     format_big_number,
     get_safe_torch_device,
     init_logging,
 )
-
-from src.lerobot.bootcamp.utils import make_sac
+from lerobot.bootcamp.xvla_client import INSTRUCTION, EMBEDDING_DIM
+from lerobot.bootcamp.utils import make_sac
+from lerobot.bootcamp.preprocess_embeddings import VLA_ACTION_KEY
 
 # --- Configuration Constants (Simplified) ---
 cfg = TrainRLServerPipelineConfig(
-    dataset=DatasetRecordConfig(),
-    env=EnvConfig(),
+    dataset=DatasetRecordConfig(
+        single_task=INSTRUCTION,
+        repo_id="lerobot/svla_so101_pickplace_vlm_states",
+        root="/home/hk-project-pai00093/id_hqc2052/.cache/huggingface/lerobot"
+    ),
+    env=AlohaEnv(
+        features={
+            "observation.state": PolicyFeature(shape=(EMBEDDING_DIM,), type=FeatureType.STATE),
+            "action": PolicyFeature(shape=(6,), type=FeatureType.ACTION),
+        }
+    ),
     policy=SACConfig(),
     output_dir="",
     resume=False,
-    batch_size=256
+    batch_size=16,
+    job_name="test",
+    num_workers=1
 )
-online_rollout_repo_id = ""
+online_rollout_repo_id = "lerobot/svla_so101_pickplace_vlm_states"
 
 # --- Type Definitions for Batched Transitions ---
 
 class BatchTransition(TypedDict):
     state: dict[str, torch.Tensor]
     action: torch.Tensor
+    vla_action: torch.Tensor
     reward: torch.Tensor
     next_state: dict[str, torch.Tensor]
     done: torch.Tensor
@@ -97,73 +113,69 @@ class BatchTransition(TypedDict):
 class RLDatasetWrapper(Dataset):
     """
     Wraps a LeRobotDataset to correctly yield RL transitions (s_t, a_t, r_t, s_{t+1}, done).
-
-    This wrapper handles episode boundaries by marking the transition at the end of an episode
-    as 'done' and setting s_{t+1} = s_t (or a zero-vector, depending on how the policy handles
-    terminal states, but s_{t+1}=s_t is safer for RLPD).
+    
+    This version is optimized to avoid looping over the dataset in __init__.
     """
 
     def __init__(self, dataset: LeRobotDataset, state_keys: Sequence[str]):
         self.dataset = dataset
         self.state_keys = state_keys
-        # We can only sample up to the second-to-last frame in each episode
-        # The true length is the number of transitions, which is total frames - num_episodes
-        self.episode_indices = self.dataset.hf_dataset.unique("episode_index")
-
-        # Build a list of valid starting indices for transitions (i)
-        # Avoids sampling the last frame of any episode
-        valid_indices = []
-        num_frames = len(dataset)
-        for i in range(num_frames - 1):
-            if i < num_frames - 1:
-                # Check if this frame and the next frame are in the same episode
-                current_ep = dataset[i]["episode_index"]
-                next_ep = dataset[i + 1]["episode_index"]
-                if current_ep == next_ep:
-                    valid_indices.append(i)
-
-        # Add the last frame of each episode as a terminal transition (s, a, r, s, True)
-        # We assume the provided dataset does NOT have a separate "next_state" key.
-        last_indices = []
-        for i in range(num_frames):
-            is_last_frame = (i == num_frames - 1) or (dataset[i]["episode_index"] != dataset[i+1]["episode_index"] if i < num_frames - 1 else True)
-            if is_last_frame:
-                last_indices.append(i)
-
-        self.valid_start_indices = valid_indices + last_indices
-        self.valid_start_indices.sort() # Ensure we keep chronological order if using sequential sampler
+        self.num_frames = len(self.dataset)
+        
+        # Cache the episode indices for fast lookups in __getitem__
+        # This is much faster than looping or indexing the dataset object repeatedly.
+        try:
+            self.episode_indices = self.dataset.hf_dataset["episode_index"]
+            logging.info(f"RLDatasetWrapper initialized with {self.num_frames} total frames.")
+        except Exception as e:
+            logging.error(f"Failed to cache episode_index: {e}")
+            logging.error("Falling back to slow, iterative lookup.")
+            self.episode_indices = None
 
     def __len__(self):
-        return len(self.valid_start_indices)
+        """
+        The total number of transitions we can sample is equal to the
+        total number of frames. Each frame is the start of one transition,
+        either terminal or non-terminal.
+        """
+        return self.num_frames
 
     def __getitem__(self, idx: int) -> dict:
         """Returns a single transition dictionary (not batched)."""
-        i = self.valid_start_indices[idx]
-        current_sample = self.dataset[i]
+        current_sample = self.dataset[idx]
 
-        # 1. State and Action
+        # 1. State (Images, Proprio) and Action
         current_state = {key: current_sample[key] for key in self.state_keys}
         action = current_sample[ACTION]
+        vla_action = current_sample[VLA_ACTION_KEY]
 
         # 2. Reward, Done, Truncated
-        # We assume the dataset has pre-processed R, D, T keys. If not, default to current R.
         reward = current_sample.get(REWARD, torch.tensor([0.0]))
-        done = current_sample.get(DONE, torch.tensor([False]))
-        truncated = torch.tensor([False]) # For now, assume done captures all episode ends
-
+        # We will determine 'done' and 'truncated' based on episode boundaries.
+        
         # --- 3. Determine Next State (s_{t+1}) and terminal flag ---
-        is_terminal_frame = True # Default for the frame index in valid_start_indices that is not followed by a consecutive frame in the same episode.
-
-        # Only check if this is *not* one of the explicitly appended last_indices
-        if i < len(self.dataset) - 1:
-            next_sample = self.dataset[i + 1]
-            if current_sample["episode_index"] == next_sample["episode_index"]:
-                is_terminal_frame = False
+        is_terminal_frame = False
+        
+        if idx == self.num_frames - 1:
+            # This is the very last frame in the dataset.
+            is_terminal_frame = True
+        else:
+            # Check if the next frame is in a different episode.
+            if self.episode_indices:
+                # Fast path: use cached indices
+                if self.episode_indices[idx] != self.episode_indices[idx+1]:
+                    is_terminal_frame = True
+            else:
+                # Slow path: index the dataset object
+                if current_sample["episode_index"] != self.dataset[idx+1]["episode_index"]:
+                    is_terminal_frame = True
 
         if not is_terminal_frame:
-            # Normal transition: s_{t+1} is the state at index i+1
-            next_sample = self.dataset[i + 1]
+            # Normal transition: s_{t+1} is the state at index idx+1
+            next_sample = self.dataset[idx + 1]
             next_state = {key: next_sample[key] for key in self.state_keys}
+            done = current_sample.get(DONE, torch.tensor([False]))
+            truncated = torch.tensor([False])
         else:
             # Terminal transition: s_{t+1} = s_t, done = True
             next_state = current_state
@@ -171,7 +183,6 @@ class RLDatasetWrapper(Dataset):
             truncated = torch.tensor([True])
 
         # 4. Complementary Info
-        # Extract keys starting with 'complementary_info.' and strip the prefix
         comp_info_prefix = "complementary_info."
         complementary_info = {
             k[len(comp_info_prefix):]: v
@@ -179,15 +190,19 @@ class RLDatasetWrapper(Dataset):
             if k.startswith(comp_info_prefix)
         }
         complementary_info = complementary_info if complementary_info else None
+        
+        # 5. Language Instruction (Placeholder)
+        # TODO: This must be loaded from your dataset if it changes per sample
+        instruction = "Move the gripper to the target position"
 
-        # NOTE: Unsqueeze tensors to prepare for collate_fn handling
+        # 6. Unsqueeze tensors
         for key in current_state:
-            current_state[key] = current_state[key].unsqueeze(0)
-            next_state[key] = next_state[key].unsqueeze(0)
-        action = action.unsqueeze(0)
-        reward = reward.unsqueeze(0)
-        done = done.unsqueeze(0)
-        truncated = truncated.unsqueeze(0)
+            current_state[key] = current_state[key]
+            next_state[key] = next_state[key]
+        action = action
+        reward = reward
+        done = done
+        truncated = truncated
 
         return {
             "state": current_state,
@@ -197,6 +212,8 @@ class RLDatasetWrapper(Dataset):
             "done": done,
             "truncated": truncated,
             "complementary_info": complementary_info,
+            "instruction": instruction, # Added for VLA client
+            "vla_action": vla_action
         }
 
 # --- Collate Function ---
@@ -217,17 +234,18 @@ def rl_collate_fn(batch: list[dict]) -> BatchTransition:
         nested_dict = {}
         for state_key in first_item[key].keys():
             tensors = [item[key][state_key] for item in batch]
-            nested_dict[state_key] = torch.cat(tensors, dim=0)
+            nested_dict[state_key] = torch.stack(tensors, dim=0)
         return nested_dict
 
     batch_state = collate_nested_dict("state")
     batch_next_state = collate_nested_dict("next_state")
 
     # Collate simple tensor fields
-    batch_action = torch.cat([item["action"] for item in batch], dim=0)
-    batch_reward = torch.cat([item["reward"] for item in batch], dim=0)
-    batch_done = torch.cat([item["done"] for item in batch], dim=0)
-    batch_truncated = torch.cat([item["truncated"] for item in batch], dim=0)
+    batch_action = torch.stack([item["action"] for item in batch], dim=0)
+    batch_vla_action = torch.stack([item["vla_action"] for item in batch], dim=0)
+    batch_reward = torch.stack([item["reward"] for item in batch], dim=0)
+    batch_done = torch.stack([item["done"] for item in batch], dim=0)
+    batch_truncated = torch.stack([item["truncated"] for item in batch], dim=0)
 
     # Collate complementary_info (if present and homogeneous)
     batch_complementary_info = None
@@ -237,11 +255,12 @@ def rl_collate_fn(batch: list[dict]) -> BatchTransition:
         for key in info_keys:
             # Concatenate all tensors for this info key
             tensors = [item["complementary_info"][key] for item in batch]
-            batch_complementary_info[key] = torch.cat(tensors, dim=0)
+            batch_complementary_info[key] = torch.stack(tensors, dim=0)
 
     return BatchTransition(
         state=batch_state,
         action=batch_action,
+        vla_action=batch_vla_action,
         reward=batch_reward,
         next_state=batch_next_state,
         done=batch_done,
@@ -276,8 +295,8 @@ def infinite_data_iterator(dataset: LeRobotDataset, batch_size: int, num_workers
     """
     # Wrap the LeRobotDataset to construct the RL transitions
     # Since we are in VLM embedding mode, we only expect 'observation.state' (VLM embedding)
-    state_keys = ['observation.state']
-    wrapped_dataset = RLDatasetWrapper(dataset, state_keys)
+    state_keys = ["observation.state"]
+    wrapped_dataset = RLDatasetWrapper(dataset, state_keys=state_keys)
 
     iterator = create_dataloader_iterator(wrapped_dataset, batch_size, num_workers)
     while True:
@@ -314,17 +333,17 @@ def load_static_datasets(
     logging.info(f"Loading Expert Dataset: {offline_repo_id}")
     offline_dataset = LeRobotDataset(
         repo_id=offline_repo_id,
-        root=cfg.output_dir / Path(offline_repo_id).name,
+        root=Path(cfg.dataset.root) / offline_repo_id,
     )
 
     logging.info(f"Loading Rollout Dataset: {online_rollout_repo_id}")
     online_rollout_dataset = LeRobotDataset(
         repo_id=online_rollout_repo_id,
-        root=cfg.output_dir / Path(online_rollout_repo_id).name,
+        root=Path(cfg.dataset.root) / online_rollout_repo_id,
     )
 
     batch_size_half = cfg.batch_size // 2
-    num_workers = cfg.policy.concurrency.learner_data_workers
+    num_workers = cfg.num_workers
 
     # 2. Create infinite iterators for 50/50 sampling
     offline_iterator = infinite_data_iterator(
@@ -347,7 +366,7 @@ def run_offline_training(
     # Extract all configuration variables at the beginning
     device = get_safe_torch_device(try_device=cfg.policy.device, log=True)
     clip_grad_norm_value = cfg.policy.grad_clip_norm
-    utd_ratio = cfg.policy.utd_ratio
+    utd_ratio = cfg.policy.cta_ratio
     log_freq = cfg.log_freq
     save_freq = cfg.save_freq
     policy_update_freq = cfg.policy.policy_update_freq
@@ -362,7 +381,7 @@ def run_offline_training(
 
     # Initialize policy and optimizers
     logging.info("Initializing policy")
-    policy: SACPolicy = make_sac(cfg=cfg.policy, ds_meta=offline_dataset.meta).to(device)
+    policy: SACPolicy = make_sac(sac_cfg=cfg.policy, ds_meta=offline_dataset.meta).to(device)
     policy.train()
     optimizers, _ = make_optimizers_and_scheduler(cfg=cfg, policy=policy)
 
@@ -409,19 +428,17 @@ def run_offline_training(
             next_observations = batch["next_state"] # NOTE: next_state is correctly available here
             done = batch["done"]
 
-            # VLM embedding mode does not use image features cache
-            observation_features, next_observation_features = None, None
-
             # Create a batch dictionary with all required elements for the forward method
             forward_batch = {
                 ACTION: actions,
                 "reward": rewards,
                 "state": observations,
                 "next_state": next_observations,
-                "done": done,
-                "observation_feature": observation_features,
-                "next_observation_feature": next_observation_features,
+                "done": done.to(dtype=torch.int).squeeze(),
+                "observation_feature": None,
+                "next_observation_feature": None,
                 "complementary_info": batch.get("complementary_info", {}),
+                "vla_action": batch[VLA_ACTION_KEY]
             }
 
             # 1. Critic Optimization (UTD * N)
@@ -652,6 +669,7 @@ def train_cli():
     global cfg
 
     logging.info("[LEARNER] train_cli finished")
+    train(cfg, job_name=cfg.job_name)
 
 
 def train(cfg: TrainRLServerPipelineConfig, job_name: str | None = None):
@@ -673,7 +691,6 @@ def train(cfg: TrainRLServerPipelineConfig, job_name: str | None = None):
 
     init_logging(log_file=log_file, display_pid=False)
     logging.info(f"Learner logging initialized, writing to {log_file}")
-    logging.info(pformat(cfg.to_dict()))
 
     # Setup WandB logging if enabled
     if cfg.wandb.enable and cfg.wandb.project:
