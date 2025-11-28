@@ -78,7 +78,8 @@ class VLAClient:
         self, 
         batch: Dict[str, Any], 
         device: torch.device, 
-        use_next_state: bool = False
+        use_next_state: bool = False,
+        steps=10
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Sends a batch of observations to the VLA server and returns batched 
@@ -112,7 +113,7 @@ class VLAClient:
                 "image0": json_numpy.dumps(image0_np),
                 "image1": json_numpy.dumps(image1_np),
                 "domain_id": 0,
-                "steps": 10, 
+                "steps": steps, 
                 "skip_action_generation": should_skip_action
             }
             all_payloads.append(payload)

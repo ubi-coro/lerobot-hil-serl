@@ -35,7 +35,8 @@ from torch import nn
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader
 
-from lerobot.bootcamp.vlm_classifier import VLMClassifier
+from lerobot.configs.types import FeatureType, PolicyFeature
+from lerobot.bootcamp.vlm_classifier import VLMClassifier # <-- Assuming VLMClassifier is the final implementation
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.sac.reward_model.configuration_classifier import RewardClassifierConfig
 from lerobot.rl.wandb_utils import WandBLogger
@@ -59,6 +60,8 @@ from lerobot.utils.utils import (
     get_safe_torch_device,
     init_logging,
 )
+from lerobot.bootcamp.train_rlpd import cfg
+from lerobot.bootcamp.xvla_client import INSTRUCTION, EMBEDDING_DIM
 
 # --- Type Definitions ---
 
@@ -98,8 +101,9 @@ def infinite_data_iterator(dataset: LeRobotDataset, batch_size: int, num_workers
 
             # Create the input dictionary: { 'state': { OBS_STATE: VLM_TENSOR }, 'reward': REWARD_TENSOR }
             input_batch = BatchClassification(
+                # Ensure the input dictionary key matches what the VLMEmbeddingEncoder expects
                 state={state_key: batch[state_key]},
-                reward=batch[REWARD].float() # Labels must be float for BCE loss
+                reward=batch.get(REWARD, torch.tensor([0.0] * batch[state_key].shape[0])).float() # Labels must be float for BCE loss
             )
             yield input_batch
         except StopIteration:
@@ -111,12 +115,6 @@ def load_static_datasets(
 ) -> tuple[Iterator, LeRobotDataset]:
     """
     Loads a single LeRobotDataset and prepares an infinite iterator for training the classifier.
-
-    Args:
-        cfg: Configuration object containing dataset information (assumed under cfg.dataset.repo_id).
-
-    Returns:
-        tuple: (data_iterator, dataset)
     """
     repo_id = cfg.dataset.repo_id
 
@@ -124,11 +122,11 @@ def load_static_datasets(
     logging.info(f"Loading Classifier Training Dataset: {repo_id}")
     dataset = LeRobotDataset(
         repo_id=repo_id,
-        root=cfg.output_dir / Path(repo_id).name,
+        root=Path(cfg.dataset.root) / repo_id,
     )
 
     batch_size = cfg.batch_size
-    num_workers = cfg.policy.concurrency.learner_data_workers
+    num_workers = cfg.num_workers
 
     # 2. Create infinite iterator
     data_iterator = infinite_data_iterator(
@@ -142,8 +140,6 @@ def load_static_datasets(
 
 def make_optimizer(cfg: TrainRLServerPipelineConfig, model: nn.Module) -> Optimizer:
     """Creates the Adam optimizer for the classifier model."""
-    # NOTE: Assuming classifier learning rate is configured in a 'classifier' section
-    # If not, fall back to actor_lr
     lr = getattr(cfg.classifier, 'learning_rate', cfg.policy.actor_lr) if hasattr(cfg, 'classifier') else cfg.policy.actor_lr
     optimizer = torch.optim.Adam(params=model.parameters(), lr=lr)
     return optimizer
@@ -151,21 +147,15 @@ def make_optimizer(cfg: TrainRLServerPipelineConfig, model: nn.Module) -> Optimi
 def initialize_classifier(cfg: TrainRLServerPipelineConfig) -> VLMClassifier:
     """Initializes the reward classifier model."""
     # Assuming classifier config is passed in cfg.classifier
-    # If not present, default to a standard config using input features from RL policy config
-    if not hasattr(cfg, 'classifier'):
-        logging.warning("No specific 'classifier' config found. Using defaults derived from policy config.")
-
-        # NOTE: This part is highly dependent on the model's constructor.
-        # We assume the Classifier constructor can take a config object.
-        classifier_config = RewardClassifierConfig(
-            input_features={OBS_STATE: cfg.policy.input_features[OBS_STATE]},
-            latent_dim=256, # Placeholder
-            hidden_dim=256, # Placeholder
-            num_classes=2, # Binary classification (0/1)
-        )
-    else:
-        # Load the configuration object from the provided config
-        classifier_config = RewardClassifierConfig.from_pretrained(cfg.classifier.config_path)
+    
+    # Re-use the feature definition from the policy for the classifier
+    classifier_config = RewardClassifierConfig(
+        # Pass the feature dictionary so the classifier knows the shape of OBS_STATE
+        input_features={OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(EMBEDDING_DIM, ))}, 
+        latent_dim=256, 
+        hidden_dim=256, 
+        num_classes=2,
+    )
 
     classifier: VLMClassifier = VLMClassifier(config=classifier_config)
 
@@ -219,17 +209,18 @@ def run_classifier_training(
         observations = batch["state"]
         labels = batch["reward"]
 
-        # NOTE: move_transition_to_device is not suitable for this batch structure, move manually
+        # NOTE: Observations contains {OBS_STATE: VLM_TENSOR}. Move manually.
         observations = {k: v.to(device) for k, v in observations.items()}
         labels = labels.to(device)
 
         # --- 2. Forward Pass and Loss Calculation ---
-
-        # Classifier forward expects a dictionary containing 'state' and 'reward' (labels)
-        loss, metrics = classifier.forward(batch={
-            'state': observations,
-            REWARD: labels
-        })
+        
+        # The classifier forward method expects a dictionary with the state and reward label
+        # We pass the input state dict and the reward labels
+        # NOTE: We assume VLMClassifier's forward method is compatible with the general API:
+        # loss, metrics = model.forward(batch={'state': ..., REWARD: labels, ACTION: optional_action})
+        observations[REWARD] = labels
+        loss, metrics = classifier.forward(observations)
 
         # --- 3. Optimization Step ---
         optimizer.zero_grad()
@@ -380,9 +371,11 @@ def log_training_info(cfg: TrainRLServerPipelineConfig, model: nn.Module) -> Non
     logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
 
-def train_cli(cfg: TrainRLServerPipelineConfig):
+def train_cli():
+    global cfg
+
     # Use the job_name from the config
-    train(cfg, job_name=cfg.job_name)
+    train(cfg, job_name=cfg.job_name + "_classifier")
 
     logging.info("[CLASSIFIER] train_cli finished")
 
@@ -429,4 +422,5 @@ def train(cfg: TrainRLServerPipelineConfig, job_name: str | None = None):
     )
 
 if __name__ == "__main__":
+    # NOTE: Placeholder for running the script outside a full system.
     train_cli()
