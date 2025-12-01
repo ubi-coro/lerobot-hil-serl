@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-import types
+
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -28,8 +28,20 @@ from huggingface_hub import hf_hub_download, snapshot_download
 from torch import Tensor
 
 from lerobot.configs.types import FeatureType, PolicyFeature
-from lerobot.utils.constants import OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE, REWARD, DONE
+from lerobot.utils.constants import OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STR, OBS_STATE, REWARD, DONE
 from lerobot.utils.utils import get_channel_first_image_shape
+
+
+def _convert_nested_dict(d):
+    result = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            result[k] = _convert_nested_dict(v)
+        elif isinstance(v, np.ndarray):
+            result[k] = torch.from_numpy(v)
+        else:
+            result[k] = v
+    return result
 
 
 def preprocess_observation(observations: dict[str, np.ndarray]) -> dict[str, Tensor]:
@@ -77,12 +89,14 @@ def preprocess_observation(observations: dict[str, np.ndarray]) -> dict[str, Ten
 
         return_observations[OBS_ENV_STATE] = env_state
 
-    # TODO(rcadene): enable pixels only baseline with `obs_type="pixels"` in environment by removing
-    agent_pos = torch.from_numpy(observations["agent_pos"]).float()
-    if agent_pos.dim() == 1:
-        agent_pos = agent_pos.unsqueeze(0)
-    return_observations[OBS_STATE] = agent_pos
+    if "agent_pos" in observations:
+        agent_pos = torch.from_numpy(observations["agent_pos"]).float()
+        if agent_pos.dim() == 1:
+            agent_pos = agent_pos.unsqueeze(0)
+        return_observations[OBS_STATE] = agent_pos
 
+    if "robot_state" in observations:
+        return_observations[f"{OBS_STR}.robot_state"] = _convert_nested_dict(observations["robot_state"])
     return return_observations
 
 
@@ -188,11 +202,6 @@ def _close_single_env(env: Any) -> None:
     except Exception as exc:
         print(f"Exception while closing env {env}: {exc}")
 
-def is_union_with_dict(field_type) -> bool:
-    origin = get_origin(field_type)
-    if origin is types.UnionType or origin is Union:
-        return any(get_origin(arg) is dict for arg in get_args(field_type))
-    return False
 
 @singledispatch
 def close_envs(obj: Any) -> None:

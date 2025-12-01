@@ -26,22 +26,56 @@ import torch
 from lerobot.cameras import opencv  # noqa: F401
 from lerobot.configs import parser
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.envs.configs import HILSerlRobotEnvConfig
+from lerobot.model.kinematics import RobotKinematics
 from lerobot.processor import (
+    AddBatchDimensionProcessorStep,
+    AddTeleopActionAsComplimentaryDataStep,
+    AddTeleopEventsAsInfoStep,
     DataProcessorPipeline,
+    DeviceProcessorStep,
     EnvTransition,
+    GripperPenaltyProcessorStep,
+    ImageCropResizeProcessorStep,
+    InterventionActionProcessorStep,
+    JointVelocityProcessorStep,
+    MapDeltaActionToRobotActionStep,
+    MapTensorToDeltaActionDictStep,
+    MotorCurrentProcessorStep,
+    Numpy2TorchActionProcessorStep,
+    RewardClassifierProcessorStep,
+    RobotActionToPolicyActionProcessorStep,
+    TimeLimitProcessorStep,
+    Torch2NumpyActionProcessorStep,
     TransitionKey,
+    VanillaObservationProcessorStep,
     create_transition,
 )
-from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
+from lerobot.processor.converters import identity_transition
 from lerobot.robots import (  # noqa: F401
     RobotConfig,
     make_robot_from_config,
     so100_follower,
 )
-from lerobot.teleoperators import TeleopEvents
+from lerobot.robots.robot import Robot
+from lerobot.robots.so100_follower.robot_kinematic_processor import (
+    EEBoundsAndSafety,
+    EEReferenceAndDelta,
+    ForwardKinematicsJointsToEEObservation,
+    GripperVelocityToJoint,
+    InverseKinematicsRLStep,
+)
+from lerobot.teleoperators import (
+    gamepad,  # noqa: F401
+    keyboard,  # noqa: F401
+    make_teleoperator_from_config,
+    so101_leader,  # noqa: F401
+)
 from lerobot.teleoperators.teleoperator import Teleoperator
-from lerobot.utils.constants import ACTION, DONE, OBS_STATE, REWARD
+from lerobot.teleoperators.utils import TeleopEvents
+from lerobot.utils.constants import ACTION, DONE, OBS_IMAGES, OBS_STATE, REWARD
 from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.utils import log_say
 
 logging.basicConfig(level=logging.INFO)
 
@@ -62,13 +96,209 @@ class DatasetConfig:
 class GymManipulatorConfig:
     """Main configuration for gym manipulator environment."""
 
-    env: 'HilSerlRobotEnvConfig'
+    env: HILSerlRobotEnvConfig
     dataset: DatasetConfig
     mode: str | None = None  # Either "record", "replay", None
     device: str = "cpu"
 
 
-def make_robot_env(cfg: 'HilSerlRobotEnvConfig', device: str = "cpu") -> tuple[gym.Env, Any, Any]:
+def reset_follower_position(robot_arm: Robot, target_position: np.ndarray) -> None:
+    """Reset robot arm to target position using smooth trajectory."""
+    current_position_dict = robot_arm.bus.sync_read("Present_Position")
+    current_position = np.array(
+        [current_position_dict[name] for name in current_position_dict], dtype=np.float32
+    )
+    trajectory = torch.from_numpy(
+        np.linspace(current_position, target_position, 50)
+    )  # NOTE: 30 is just an arbitrary number
+    for pose in trajectory:
+        action_dict = dict(zip(current_position_dict, pose, strict=False))
+        robot_arm.bus.sync_write("Goal_Position", action_dict)
+        busy_wait(0.015)
+
+
+class RobotEnv(gym.Env):
+    """Gym environment for robotic control with human intervention support."""
+
+    def __init__(
+        self,
+        robot,
+        use_gripper: bool = False,
+        display_cameras: bool = False,
+        reset_pose: list[float] | None = None,
+        reset_time_s: float = 5.0,
+    ) -> None:
+        """Initialize robot environment with configuration options.
+
+        Args:
+            robot: Robot interface for hardware communication.
+            use_gripper: Whether to include gripper in action space.
+            display_cameras: Whether to show camera feeds during execution.
+            reset_pose: Joint positions for environment reset.
+            reset_time_s: Time to wait during reset.
+        """
+        super().__init__()
+
+        self.robot = robot
+        self.display_cameras = display_cameras
+
+        # Connect to the robot if not already connected.
+        if not self.robot.is_connected:
+            self.robot.connect()
+
+        # Episode tracking.
+        self.current_step = 0
+        self.episode_data = None
+
+        self._joint_names = [f"{key}.pos" for key in self.robot.bus.motors]
+        self._image_keys = self.robot.cameras.keys()
+
+        self.reset_pose = reset_pose
+        self.reset_time_s = reset_time_s
+
+        self.use_gripper = use_gripper
+
+        self._joint_names = list(self.robot.bus.motors.keys())
+        self._raw_joint_positions = None
+
+        self._setup_spaces()
+
+    def _get_observation(self) -> dict[str, Any]:
+        """Get current robot observation including joint positions and camera images."""
+        obs_dict = self.robot.get_observation()
+        raw_joint_joint_position = {f"{name}.pos": obs_dict[f"{name}.pos"] for name in self._joint_names}
+        joint_positions = np.array([raw_joint_joint_position[f"{name}.pos"] for name in self._joint_names])
+
+        images = {key: obs_dict[key] for key in self._image_keys}
+
+        return {"agent_pos": joint_positions, "pixels": images, **raw_joint_joint_position}
+
+    def _setup_spaces(self) -> None:
+        """Configure observation and action spaces based on robot capabilities."""
+        current_observation = self._get_observation()
+
+        observation_spaces = {}
+
+        # Define observation spaces for images and other states.
+        if current_observation is not None and "pixels" in current_observation:
+            prefix = OBS_IMAGES
+            observation_spaces = {
+                f"{prefix}.{key}": gym.spaces.Box(
+                    low=0, high=255, shape=current_observation["pixels"][key].shape, dtype=np.uint8
+                )
+                for key in current_observation["pixels"]
+            }
+
+        if current_observation is not None:
+            agent_pos = current_observation["agent_pos"]
+            observation_spaces[OBS_STATE] = gym.spaces.Box(
+                low=0,
+                high=10,
+                shape=agent_pos.shape,
+                dtype=np.float32,
+            )
+
+        self.observation_space = gym.spaces.Dict(observation_spaces)
+
+        # Define the action space for joint positions along with setting an intervention flag.
+        action_dim = 3
+        bounds = {}
+        bounds["min"] = -np.ones(action_dim)
+        bounds["max"] = np.ones(action_dim)
+
+        if self.use_gripper:
+            action_dim += 1
+            bounds["min"] = np.concatenate([bounds["min"], [0]])
+            bounds["max"] = np.concatenate([bounds["max"], [2]])
+
+        self.action_space = gym.spaces.Box(
+            low=bounds["min"],
+            high=bounds["max"],
+            shape=(action_dim,),
+            dtype=np.float32,
+        )
+
+    def reset(
+        self, *, seed: int | None = None, options: dict[str, Any] | None = None
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Reset environment to initial state.
+
+        Args:
+            seed: Random seed for reproducibility.
+            options: Additional reset options.
+
+        Returns:
+            Tuple of (observation, info) dictionaries.
+        """
+        # Reset the robot
+        # self.robot.reset()
+        start_time = time.perf_counter()
+        if self.reset_pose is not None:
+            log_say("Reset the environment.", play_sounds=True)
+            reset_follower_position(self.robot, np.array(self.reset_pose))
+            log_say("Reset the environment done.", play_sounds=True)
+
+        busy_wait(self.reset_time_s - (time.perf_counter() - start_time))
+
+        super().reset(seed=seed, options=options)
+
+        # Reset episode tracking variables.
+        self.current_step = 0
+        self.episode_data = None
+        obs = self._get_observation()
+        self._raw_joint_positions = {f"{key}.pos": obs[f"{key}.pos"] for key in self._joint_names}
+        return obs, {TeleopEvents.IS_INTERVENTION: False}
+
+    def step(self, action) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+        """Execute one environment step with given action."""
+        joint_targets_dict = {f"{key}.pos": action[i] for i, key in enumerate(self.robot.bus.motors.keys())}
+
+        self.robot.send_action(joint_targets_dict)
+
+        obs = self._get_observation()
+
+        self._raw_joint_positions = {f"{key}.pos": obs[f"{key}.pos"] for key in self._joint_names}
+
+        if self.display_cameras:
+            self.render()
+
+        self.current_step += 1
+
+        reward = 0.0
+        terminated = False
+        truncated = False
+
+        return (
+            obs,
+            reward,
+            terminated,
+            truncated,
+            {TeleopEvents.IS_INTERVENTION: False},
+        )
+
+    def render(self) -> None:
+        """Display robot camera feeds."""
+        import cv2
+
+        current_observation = self._get_observation()
+        if current_observation is not None:
+            image_keys = [key for key in current_observation if "image" in key]
+
+            for key in image_keys:
+                cv2.imshow(key, cv2.cvtColor(current_observation[key].numpy(), cv2.COLOR_RGB2BGR))
+                cv2.waitKey(1)
+
+    def close(self) -> None:
+        """Close environment and disconnect robot."""
+        if self.robot.is_connected:
+            self.robot.disconnect()
+
+    def get_raw_joint_positions(self) -> dict[str, float]:
+        """Get raw joint positions."""
+        return self._raw_joint_positions
+
+
+def make_robot_env(cfg: HILSerlRobotEnvConfig) -> tuple[gym.Env, Any]:
     """Create robot environment from configuration.
 
     Args:
@@ -310,7 +540,7 @@ def control_loop(
             transition = env_processor(transition)
 
         # Maintain fps timing
-        busy_wait(dt - (time.perf_counter() - step_start_time))
+        precise_sleep(dt - (time.perf_counter() - step_start_time))
 
     if dataset is not None and cfg.dataset.push_to_hub:
         logging.info("Pushing dataset to hub")
@@ -342,7 +572,7 @@ def replay_trajectory(
         )
         transition = action_processor(transition)
         env.step(transition[TransitionKey.ACTION])
-        busy_wait(1 / cfg.env.fps - (time.perf_counter() - start_time))
+        precise_sleep(1 / cfg.env.fps - (time.perf_counter() - start_time))
 
 
 @parser.wrap()
