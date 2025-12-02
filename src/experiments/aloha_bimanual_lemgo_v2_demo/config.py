@@ -64,7 +64,7 @@ class AlohaBimanualEnvConfigLemgoV2Demo(HilSerlRobotEnvConfig):
         self.processor.reset.teleop_on_reset = True
         self.processor.reset.reset_time_s = 10.0
         self.processor.events.foot_switch_mapping = {
-            (TeleopEvents.IS_INTERVENTION,): {"device": 7, "toggle": True},
+            (TeleopEvents.IS_INTERVENTION,): {"device": 5, "toggle": True},
         }
         self.processor.events.key_mapping = {
             TeleopEvents.RERECORD_EPISODE: keyboard.Key.left,
