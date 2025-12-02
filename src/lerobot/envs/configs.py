@@ -21,6 +21,7 @@ import draccus
 from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.robots.ur.tf_controller import TaskFrameCommand
 from lerobot.robots import RobotConfig
+from lerobot.teleoperators import TeleopEvents
 from lerobot.teleoperators.config import TeleoperatorConfig
 from lerobot.utils.constants import (
     ACTION,
@@ -286,3 +287,105 @@ class MetaworldEnv(EnvConfig):
             "obs_type": self.obs_type,
             "render_mode": self.render_mode,
         }
+
+
+
+@dataclass
+class ImagePreprocessingConfig:
+    crop_params_dict: dict[str, tuple[int, int, int, int]] | None = None  # cam_name -> (top, left, height, width)
+    resize_size: tuple[int, int] | None = None
+
+
+@dataclass
+class RewardClassifierConfig:
+    """Configuration for reward classification."""
+
+    enable: bool = False
+    pretrained_path: str | None = None
+    success_threshold: float = 0.5
+    success_reward: float = 1.0
+
+
+@dataclass
+class InverseKinematicsConfig:
+    """Configuration for inverse kinematics processing."""
+
+    enable: bool | dict[str, bool] = False
+    urdf_path: str | dict[str, str | None] | None = None
+    target_frame_name: str | dict[str, str | None] | None = None
+    end_effector_bounds: dict[str, list[float]] | dict[str, dict[str, list[float]]] | None = None
+    end_effector_step_sizes: dict[str, float] | dict[str, dict[str, float]] | None = None
+
+
+@dataclass
+class ObservationConfig:
+    """Configuration for observation processing."""
+
+    add_joint_velocity_to_observation: bool | dict[str, bool] = False
+    add_current_to_observation: bool | dict[str, bool] = False
+    add_ee_velocity_to_observation: bool | dict[str, bool] = False
+    add_ee_wrench_to_observation: bool | dict[str, bool] = False
+    ee_pos_mask: list[int] | dict[str, list[int]] = field(default_factory=lambda: [1] * 6)
+    stack_frames: int | dict[str, int] = 0
+
+
+@dataclass
+class GripperConfig:
+    """Configuration for gripper control and penalties."""
+
+    use_gripper: bool | dict[str, bool] = False
+    penalty: float | dict[str, float | None] | None = None
+    max_pos: float | dict[str, float] = 1.0
+    min_pos: float | dict[str, float] = 0.0
+
+
+@dataclass
+class ResetConfig:
+    """Configuration for environment reset behavior."""
+
+    fixed_reset_joint_positions: Any | dict[str, Any | None] | None = None
+    terminate_on_success: bool | dict[str, bool] = True
+    reset_time_s: float = 5.0
+    teleop_on_reset: bool = False
+
+
+@dataclass
+class TaskFrameConfig:
+    command: TaskFrameCommand | dict[str, TaskFrameCommand] = field(default_factory=TaskFrameCommand.make_default_cmd)
+    control_mask: list[int] | dict[str, list[int]] = field(default_factory=lambda: [1] * 6)
+    action_scale: float | list[float] | None = None
+
+
+@dataclass
+class EventConfig:
+    key_mapping: dict[TeleopEvents, dict] = field(default_factory=lambda: {})
+    foot_switch_mapping: dict[tuple[TeleopEvents], dict] = field(default_factory=lambda: {})
+
+
+@dataclass
+class HookConfig:
+    time_env_processor: bool = False
+    time_action_processor: bool = False
+    log_every: int = 10
+
+
+@dataclass
+class HILSerlProcessorConfig:
+    """Configuration for environment processing pipeline."""
+
+    control_time_s: float | None = None
+    display_cameras: bool = False
+
+    image_preprocessing: ImagePreprocessingConfig | None = None
+    reward_classifier: RewardClassifierConfig | None = None
+    events: EventConfig = EventConfig()
+    hooks: HookConfig = HookConfig()
+
+    observation: ObservationConfig = ObservationConfig()
+    gripper: GripperConfig = GripperConfig()
+    reset: ResetConfig = ResetConfig()
+    inverse_kinematics: InverseKinematicsConfig = InverseKinematicsConfig()
+    task_frame: TaskFrameConfig = TaskFrameConfig()
+
+
+

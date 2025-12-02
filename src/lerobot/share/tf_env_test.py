@@ -10,7 +10,7 @@ from lerobot.processor import create_transition, TransitionKey
 from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
 from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.constants import OBS_STATE
-from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.robot_utils import precise_sleep
 
 
 # === LIVE PLOT SETUP (NEW) ===
@@ -110,4 +110,4 @@ while True:
     t_rel = time.monotonic() - t0
     live_update(t_rel, float(transition[TransitionKey.OBSERVATION][OBS_STATE][0, 0]))
 
-    busy_wait(1/10.0)
+    precise_sleep(1/10.0)

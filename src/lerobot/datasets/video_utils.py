@@ -648,7 +648,7 @@ class VideoEncodingManager:
             self.dataset._batch_save_episode_video(start_ep, end_ep)
 
         # Finalize the dataset to properly close all writers
-        self.dataset.finalize()
+        #self.dataset.finalize()
 
         # Clean up episode images if recording was interrupted
         if exc_type is not None:

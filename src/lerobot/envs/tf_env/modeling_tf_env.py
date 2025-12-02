@@ -14,7 +14,7 @@ from lerobot.robots.ur import TF_UR
 from lerobot.robots.ur.tf_controller import TaskFrameCommand, AxisMode
 from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.constants import ACTION
-from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
 
 
@@ -176,7 +176,7 @@ class TaskFrameEnv(RobotEnvInterface):
                     tf_cmd = self.reset_task_frame[name]
                     tf_cmd.target = pose
                     robot.send_action(tf_cmd.to_robot_action())
-                    busy_wait(self.reset_time_s[name] * 0.8 / 50)
+                    precise_sleep(self.reset_time_s[name] * 0.8 / 50)
 
                 log_say(f"Robot {name} reset done.", play_sounds=True)
 

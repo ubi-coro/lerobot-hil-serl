@@ -27,7 +27,7 @@ from lerobot.envs import EnvConfig
 from lerobot.envs.robot_env import RobotEnv
 from lerobot.processor import create_transition
 from lerobot.rl.gym_manipulator import step_env_and_process_transition
-from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 from lerobot.utils.utils import init_logging
 
@@ -79,7 +79,7 @@ def teleop(cfg: TeleopConfig):
 
             # Maintain loop rate
             dt_s = time.perf_counter() - start_t
-            busy_wait(1 / fps - dt_s)
+            precise_sleep(1 / fps - dt_s)
 
     except KeyboardInterrupt:
         logging.info("Teleoperation stopped.")

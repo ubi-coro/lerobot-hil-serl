@@ -14,7 +14,7 @@ from lerobot.processor.hil_processor import GRIPPER_KEY
 from lerobot.robots import Robot
 from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.constants import ACTION
-from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
 
 
@@ -30,7 +30,7 @@ def reset_follower_position(robot_arm: Robot, target_position: np.ndarray) -> No
     for pose in trajectory:
         action_dict = dict(zip(current_position_dict, pose, strict=False))
         #robot_arm.bus.sync_write("Goal_Position", action_dict)
-        busy_wait(0.015)
+        precise_sleep(0.015)
 
 
 class RobotEnv(RobotEnvInterface):
@@ -191,7 +191,7 @@ class RobotEnv(RobotEnvInterface):
                 reset_follower_position(robot, np.array(self.reset_pose[name]))
                 log_say("Reset the environment done.", play_sounds=True)
 
-                busy_wait(self.reset_time_s.get(name, 5.0) - (time.perf_counter() - start_time))
+                precise_sleep(self.reset_time_s.get(name, 5.0) - (time.perf_counter() - start_time))
 
         super().reset(seed=seed, options=options)
 

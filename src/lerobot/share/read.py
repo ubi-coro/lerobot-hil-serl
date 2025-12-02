@@ -8,7 +8,7 @@ from lerobot.teleoperators import TeleopEvents
 #from lerobot.teleoperators.gello import Gello
 from lerobot.teleoperators.widowx import WidowXConfig, WidowX
 from lerobot.utils.constants import OBS_STATE
-from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.robot_utils import precise_sleep
 
 motor = "elbow"
 
@@ -43,6 +43,6 @@ while True:
     action_transition = action_processor(create_transition(action=action))
     print("ROS action:", action_transition[TransitionKey.ACTION])
 
-    busy_wait(1.0)
+    precise_sleep(1.0)
 
 

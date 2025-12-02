@@ -13,7 +13,7 @@ from typing import Union, Tuple, OrderedDict
 
 import numpy as np
 
-from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.shared_memory import SharedMemoryQueue, SharedMemoryRingBuffer, Empty
 
 
@@ -257,7 +257,7 @@ class RTDERobotiqController(mp.Process):
 
                 # 5) Regulate frequency
                 t_end = t_start + dt * iter_idx
-                busy_wait(max([t_end - time.perf_counter(), 0.0]))
+                precise_sleep(max([t_end - time.perf_counter(), 0.0]))
 
         finally:
             self.ready_event.set()

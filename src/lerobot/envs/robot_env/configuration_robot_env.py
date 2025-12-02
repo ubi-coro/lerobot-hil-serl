@@ -1,5 +1,6 @@
+import types
 from dataclasses import dataclass, field, fields
-from typing import Tuple, Any, Type
+from typing import Tuple, Any, Type, get_origin, Union, get_args
 
 from lerobot.cameras import CameraConfig, make_cameras_from_configs
 from lerobot.configs.types import FeatureType, PolicyFeature, PipelineFeatureType
@@ -31,12 +32,16 @@ from lerobot.processor.hil_processor import AddFootswitchEventsAsInfoStep, AddKe
 from lerobot.processor.robot_kinematic_processor import EEReferenceAndDelta, EEBoundsAndSafety, GripperVelocityToJoint, \
     InverseKinematicsRLStep
 from lerobot.robots import RobotConfig, make_robot_from_config
-from lerobot.envs.utils import is_union_with_dict
 from lerobot.teleoperators import make_teleoperator_from_config
 from lerobot.teleoperators.config import TeleoperatorConfig
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE, DEFAULT_ROBOT_NAME
 
 
+def is_union_with_dict(field_type) -> bool:
+    origin = get_origin(field_type)
+    if origin is types.UnionType or origin is Union:
+        return any(get_origin(arg) is dict for arg in get_args(field_type))
+    return False
 
 
 @EnvConfig.register_subclass(name="robot_env")
