@@ -70,7 +70,7 @@ class VanillaTFFProcessorStep(VanillaObservationProcessorStep):
         state_parts = []
         for name in self.add_ee_velocity_to_observation:
             for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"]):
-                if f"{name}.{ax}.ee_pos" in observation and self.ee_pos_mask.get(name, [1]*6)[i]:
+                if f"{name}.{ax}.ee_pos" in observation and self.ee_pos_mask.get(name, [1] * 6)[i]:
                     state_parts.append(observation[f"{name}.{ax}.ee_pos"])
 
                 if f"{name}.{ax}.ee_vel" in observation and self.add_ee_velocity_to_observation.get(name, False):
@@ -88,7 +88,7 @@ class VanillaTFFProcessorStep(VanillaObservationProcessorStep):
         return processed_obs
 
     def transform_features(
-        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+            self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         """
         Transforms feature keys from the Gym standard to the LeRobot standard.
@@ -135,9 +135,9 @@ class VanillaTFFProcessorStep(VanillaObservationProcessorStep):
                     idx_map = {ax: i for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"])}
 
                     if (state_type == "ee_vel" and self.add_ee_velocity_to_observation[name]) or \
-                       (state_type == "ee_wrench" and self.add_ee_velocity_to_observation[name]) or \
-                       (state_type == "ee_pos" and self.ee_pos_mask.get(name, [1]*6)[idx_map[axis]]) or \
-                       (state_type == "pos" and axis == "gripper" and self.use_gripper[name]):
+                            (state_type == "ee_wrench" and self.add_ee_velocity_to_observation[name]) or \
+                            (state_type == "ee_pos" and self.ee_pos_mask.get(name, [1] * 6)[idx_map[axis]]) or \
+                            (state_type == "pos" and axis == "gripper" and self.use_gripper[name]):
                         state_dim += 1
 
                 if handled:
@@ -150,14 +150,14 @@ class VanillaTFFProcessorStep(VanillaObservationProcessorStep):
                 for old_prefix, new_prefix in prefix_pairs.items():
                     prefixed_old = f"{OBS_STR}.{old_prefix}"
                     if key.startswith(prefixed_old):
-                        suffix = key[len(prefixed_old) :]
+                        suffix = key[len(prefixed_old):]
                         new_key = f"{new_prefix}{suffix}"
                         new_features[src_ft][new_key] = feat
                         handled = True
                         break
 
                     if key.startswith(old_prefix):
-                        suffix = key[len(old_prefix) :]
+                        suffix = key[len(old_prefix):]
                         new_key = f"{new_prefix}{suffix}"
                         new_features[src_ft][new_key] = feat
                         handled = True
@@ -181,13 +181,12 @@ class VanillaTFFProcessorStep(VanillaObservationProcessorStep):
                 new_features[src_ft][key] = feat
 
             if state_dim > 0:
-                new_features[src_ft][OBS_STATE] = PolicyFeature(type=FeatureType.STATE, shape=(state_dim, ))
+                new_features[src_ft][OBS_STATE] = PolicyFeature(type=FeatureType.STATE, shape=(state_dim,))
 
         return new_features
 
     def is_state_key(self, key):
         return "pos" in key or "vel" in key or "wrench" in key
-
 
 
 @dataclass
@@ -208,7 +207,7 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
 
         action = transition.get(TransitionKey.ACTION)
         assert isinstance(action, PolicyAction), f"Action should be a PolicyAction type got {type(action)}"
-        #assert len(action) == sum([len(self.teleoperators[name].action_features) for name in self.teleoperators])
+        # assert len(action) == sum([len(self.teleoperators[name].action_features) for name in self.teleoperators])
 
         info = transition.get(TransitionKey.INFO, {})
         complementary_data = transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
@@ -234,7 +233,7 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
 
                 if isinstance(teleop_action, dict):
                     for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"]):
-                        if self.control_mask.get(name, [True]*6)[i]:
+                        if self.control_mask.get(name, [True] * 6)[i]:
                             action_list.append(teleop_action.get(f"{ax}.vel", 0.0))
                     if self.use_gripper.get(name, False):
                         action_list.append(teleop_action.get(f"{GRIPPER_KEY}.pos", 1.0))
@@ -275,110 +274,9 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
         }
 
     def transform_features(
-        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+            self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         return features
 
     def reset(self) -> None:
         self._intervention_occurred = False
-
-
-@dataclass
-@ProcessorStepRegistry.register("action_scaling_processor")
-class ActionScalingProcessorStep(ProcessorStep):
-    """
-    Multi-robot intervention processor.
-    """
-
-    action_scale: list[float] | np.ndarray
-
-    def __post_init__(self):
-        if not isinstance(self.action_scale, np.ndarray):
-            self.action_scale = np.array(self.action_scale)
-        self.action_scale = torch.from_numpy(self.action_scale).to(dtype=torch.float32)
-
-    def __call__(self, transition: EnvTransition) -> EnvTransition:
-        new_transition = transition.copy()
-
-        action = new_transition[TransitionKey.ACTION]
-        action = action * self.action_scale
-        new_transition[TransitionKey.ACTION] = action
-
-        complementary_data = new_transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
-        if TELEOP_ACTION_KEY in complementary_data:
-            teleop_action = complementary_data[TELEOP_ACTION_KEY]
-            teleop_action *= self.action_scale
-            complementary_data[TELEOP_ACTION_KEY] = teleop_action
-            new_transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
-
-        return new_transition
-
-
-    def get_config(self) -> dict[str, Any]:
-        return {
-            "action_scale": self.action_scale,
-        }
-
-    def transform_features(
-            self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
-    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
-        return features
-
-
-# current
-# obs is large dict with 1-dimensional states and images
-# action is task frame command dict
-
-
-# goal
-# lerobot conform dict
-
-# idea:
-
-# action comes from
-
-# AddTeleopActionAsComplimentaryDataStep
-# AddTeleopEventsAsInfoStep
-# InterventionActionProcessorStep
-
-# GELLO: commands in q space -> mapped to vel space (rip from lerobot-hil-serl)
-# SpaceMouse / keyboard: commands in vel space
-
-
-
-
-
-# EEF or EEF speed action space  | maps <action_type> actions to appropriate command (any axes can have any control mode and be fixed as well)
-
-
-
-
-
-# policy
-
-
-
-
-
-# gym manipulator obs: "agent_pos": ndarray and "pixels": dict
-
-# env pipeline:
-# VanillaObservationProcessorStep        | turns "pixels", "agent_pos" etc into standard lerobot dict (flat)
-# JointVelocityProcessorStep             | doubles state with fixed dt
-# MotorCurrentProcessorStep              | adds current to state
-# ForwardKinematicsJointsToEEObservation | adds ee position
-# ImageCropResizeProcessorStep           | crops and resizes image keys
-# TimeLimitProcessorStep                 | sets time limit
-# GripperPenaltyProcessorStep            | adds gripper penalty
-# reward classifier
-# batch dim
-# device processor
-
-
-# action pipeline:
-# AddTeleopActionAsComplimentaryDataStep
-# AddTeleopEventsAsInfoStep
-# InterventionActionProcessorStep
-
-
-

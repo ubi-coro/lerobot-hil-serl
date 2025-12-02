@@ -23,8 +23,7 @@ from lerobot.processor.hil_processor import (
 )
 from lerobot.processor.tf_processor import (
     VanillaTFFProcessorStep,
-    SixDofVelocityInterventionActionProcessorStep,
-    ActionScalingProcessorStep
+    SixDofVelocityInterventionActionProcessorStep
 )
 from lerobot.utils.constants import ACTION
 
@@ -93,7 +92,6 @@ class TFRobotEnvConfig(RobotEnvConfig):
                 control_mask=self.processor.task_frame.control_mask,
                 terminate_on_success=self.processor.reset.terminate_on_success,
             ),
-            ActionScalingProcessorStep(action_scale=self.processor.task_frame.action_scale),
             DiscretizeGripperProcessorStep(
                 gripper_idc=self.gripper_idc,
                 min_pos=self.processor.gripper.min_pos,

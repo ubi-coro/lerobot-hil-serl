@@ -145,7 +145,10 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
 
         # write velocity action dict
         latest_action = self.latest_data.get("action", [0.0] * 6)
-        action = {f"{ax}.vel": latest_action[i] for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"])}
+        action = {
+            f"{ax}.vel": latest_action[i] * self.config.action_scale[i]
+            for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"])
+        }
 
         # handle gripper action
         if self._has_gripper:

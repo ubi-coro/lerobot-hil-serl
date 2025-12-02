@@ -26,14 +26,17 @@ class SpacemouseConfig(TeleoperatorConfig):
     """KeyboardTeleopConfig"""
     device: Optional[str] = None
     path: Optional[str] = None
+    action_scale: list[float] = field(default_factory=lambda: [1.0 * 6])
 
+    # gripper
     initial_gripper_pos: float = 0.0
-    gripper_close_button_idx: bool | None = 1
-    gripper_open_button_idx: bool | None = 0
+    gripper_close_button_idx: int | None = 1
+    gripper_open_button_idx: int | None = 0
     gripper_continuous: bool = False
     gripper_gain: float = 0.05
 
-    button_mapping: dict[str, dict[str, TeleopEvents | int]] = field(default_factory=dict)
+    # buttons
+    button_mapping: dict[int, dict[str, TeleopEvents | bool]] = field(default_factory=dict)
 
 
 

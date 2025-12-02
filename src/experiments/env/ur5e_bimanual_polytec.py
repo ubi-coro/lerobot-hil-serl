@@ -258,14 +258,18 @@ class UR5eBimanualPolytecEnvConfig(TFRobotEnvConfig):
                 wrench_limits=[300.0, 300.0, 300.0, 20.0, 20.0, 20.0]
             ),
         }
+
+        action_scale = 3 * [self.v_ee] + 3 * [self.omega_ee]
         self.teleop = {
             "left": SpacemouseConfig(
                 path="/dev/hidraw6",
+                action_scale=action_scale,
                 gripper_close_button_idx=0,
                 gripper_open_button_idx=1
             ),
             "right": SpacemouseConfig(
                 path="/dev/hidraw2",
+                action_scale=action_scale,
                 button_mapping={
                     0: {
                         "event": TeleopEvents.IS_INTERVENTION,
@@ -311,12 +315,12 @@ class UR5eBimanualPolytecEnvConfig(TFRobotEnvConfig):
                 min_pose_rpy=min_pose_rpy_right
             )
         }
+
         # 1 if mode[i] != POS
         self.processor.task_frame.control_mask = {
             "left": [1, 1, 1, 0, 0, 1],
             "right": [1, 1, 1, 0, 0, 0]
         }
-        self.processor.task_frame.action_scale = 3 * [self.v_ee] + [self.omega_ee] + [1.0] + 3 * [self.v_ee]
 
         # Hard-code stats for online learning without offline datasets
         self.stats = {

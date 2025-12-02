@@ -353,7 +353,6 @@ class ResetConfig:
 class TaskFrameConfig:
     command: TaskFrameCommand | dict[str, TaskFrameCommand] = field(default_factory=TaskFrameCommand.make_default_cmd)
     control_mask: list[int] | dict[str, list[int]] = field(default_factory=lambda: [1] * 6)
-    action_scale: float | list[float] | None = None
 
 
 @dataclass
