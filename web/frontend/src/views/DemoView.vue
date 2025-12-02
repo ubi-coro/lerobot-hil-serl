@@ -55,6 +55,18 @@
           <span v-else>▶ Start Demo</span>
         </button>
         
+        <!-- Move robots to user-defined start position -->
+        <button
+          v-if="!status.active"
+          class="btn-start"
+          style="margin-left: 0.75rem; background: linear-gradient(135deg, #3b82f6, #2563eb)"
+          @click="moveToStartPosition"
+          :disabled="!canStart || movingToStart"
+        >
+          <span v-if="movingToStart">Moving...</span>
+          <span v-else>⟲ Robot to Start-Pos</span>
+        </button>
+
         <button 
           v-if="status.active" 
           class="btn-stop" 
@@ -111,6 +123,7 @@ const policyPathShort = computed(() => {
 // State
 const allowInterventions = ref(true);
 const starting = ref(false);
+const movingToStart = ref(false);
 const error = ref('');
 const status = ref({
   active: false,
@@ -266,6 +279,63 @@ function stopDemo() {
     rawSocket.emit('stop_recording', {});
   }
   status.value.active = false;
+}
+
+// Move robots to previously recorded start positions
+function moveToStartPosition() {
+  if (!canStart.value || movingToStart.value) return;
+
+  const rawSocket = toRaw(robotStore.socket);
+  if (!rawSocket) {
+    error.value = 'Socket unavailable - please refresh the page';
+    return;
+  }
+  if (!rawSocket.connected) {
+    error.value = 'Socket not connected - please wait and try again';
+    return;
+  }
+
+  // Start position source: localStorage key 'lerobot_start_positions'
+  // Expected shape:
+  // {
+  //   "left": {"waist.pos": ..., "shoulder.pos": ..., ...},
+  //   "right": {"waist.pos": ..., "shoulder.pos": ..., ...},
+  //   "leaders": {"left": {...}, "right": {...}} // optional
+  // }
+  let startPositions = null;
+  try {
+    const raw = localStorage.getItem('lerobot_start_positions');
+    if (raw) {
+      startPositions = JSON.parse(raw);
+    }
+  } catch (e) {
+    // ignore parse errors
+  }
+
+  if (!startPositions || (!startPositions.left && !startPositions.right)) {
+    error.value = 'No start positions found. Save positions under localStorage key "lerobot_start_positions".';
+    return;
+  }
+
+  movingToStart.value = true;
+  error.value = '';
+
+  const teleopConfig = robotStore.teleoperationConfig || {};
+  const operationMode = teleopConfig.operationMode || 'bimanual';
+
+  const payload = {
+    operation_mode: operationMode,
+    start_positions: startPositions,
+  };
+
+  // Emit a Socket.IO event the backend can implement
+  // Backend handler name: 'move_to_start_positions'
+  rawSocket.emit('move_to_start_positions', payload);
+
+  // Provide optimistic UI feedback; backend can emit confirmations
+  setTimeout(() => {
+    movingToStart.value = false;
+  }, 2000);
 }
 </script>
 

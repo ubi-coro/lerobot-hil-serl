@@ -160,6 +160,50 @@ HOME_LEADER = {
     },
 }
 
+# Measured "Start" poses per arm (followers) from your policy rollout request
+START_FOLLOWER = {
+    "left": {
+        "elbow.pos": 1.1561,
+        "forearm_roll.pos": 0.1143,
+        "gripper.pos": 0.5979,
+        "shoulder.pos": -1.3234,
+        "waist.pos": 0.0453,
+        "wrist_angle.pos": 0.4902,
+        "wrist_rotate.pos": -0.0376,
+    },
+    "right": {
+        "elbow.pos": 1.1500,
+        "forearm_roll.pos": -0.0882,
+        "gripper.pos": 0.7564,
+        "shoulder.pos": -1.2942,
+        "waist.pos": -0.0284,
+        "wrist_angle.pos": 0.3629,
+        "wrist_rotate.pos": 0.0453,
+    },
+}
+
+# Measured "Start" poses per arm (leaders/teleoperators)
+START_LEADER = {
+    "left": {
+        "elbow.pos": 1.1792,
+        "forearm_roll.pos": 0.1143,
+        "gripper.pos": 0.5985,
+        "shoulder.pos": -1.3096,
+        "waist.pos": 0.0575,
+        "wrist_angle.pos": 0.4826,
+        "wrist_rotate.pos": -0.0361,
+    },
+    "right": {
+        "elbow.pos": 1.1316,
+        "forearm_roll.pos": -0.0882,
+        "gripper.pos": 0.7580,
+        "shoulder.pos": -1.2743,
+        "waist.pos": -0.0269,
+        "wrist_angle.pos": 0.3583,
+        "wrist_rotate.pos": 0.0453,
+    },
+}
+
 
 def _format_connection_error(exc: Exception) -> str:
     message = str(exc).strip()
@@ -668,6 +712,137 @@ async def move_robot_home(request: HomeRequest):
     except Exception as exc:
         logger.error("Failed to move to Home: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to move to Home: {exc}")
+
+
+class StartPositionRequest(BaseModel):
+    duration_seconds: float = 5.0
+    move_leaders: bool = True
+
+
+@router.post("/start-position", response_model=ApiResponse)
+async def move_robot_to_start(request: StartPositionRequest):
+    """
+    Move the robot (and optionally leaders) to the measured Start position
+    used for policy rollout. Keeps torque ON and leaves robots at target.
+    """
+    global robot
+    if not robot or not getattr(robot, "is_connected", False):
+        raise HTTPException(status_code=400, detail="Robot is not connected")
+
+    try:
+        import time
+
+        # 1. Build follower target from START_FOLLOWER per active arm
+        target_pos = {}
+        available_arms = _robot_state.get("available_arms", [])
+        for arm in available_arms:
+            if arm not in START_FOLLOWER:
+                raise HTTPException(status_code=400, detail=f"Missing follower START pose for arm '{arm}'")
+            base = START_FOLLOWER[arm]
+            for joint, val in base.items():
+                target_pos[f"{arm}_{joint}"] = val
+
+        # 2. Interpolate follower movement
+        steps = int(request.duration_seconds * 30)
+        if steps < 1:
+            steps = 1
+
+        current = robot.get_observation() or {}
+        start_vals = {k: current.get(k, 0.0) for k in target_pos.keys()}
+
+        for i in range(steps):
+            alpha = (i + 1) / steps
+            action = {k: start_vals[k] + (target_pos[k] - start_vals[k]) * alpha for k in target_pos}
+            robot.send_action(action)
+            time.sleep(1.0 / 30.0)
+
+        # 3. Optionally move leaders to START_LEADER using same strategy
+        if request.move_leaders:
+            try:
+                from . import aloha_teleoperation as teleop_module  # type: ignore
+                reused = dict(teleop_module.aloha_state.get("teleop") or {})
+            except Exception:
+                reused = {}
+
+            def _move_leader_with_teleop(teleop_obj) -> None:
+                af = getattr(teleop_obj, "action_features", {})
+                if not af:
+                    return
+                keys = list(af.keys())
+                has_prefix = any(k.startswith("left_") or k.startswith("right_") for k in keys)
+                # Prime
+                try:
+                    teleop_obj.get_action()
+                except Exception:
+                    pass
+                target = {}
+                for k in keys:
+                    if has_prefix:
+                        if k.startswith("left_") and "left" in available_arms:
+                            joint = k[len("left_"):]
+                            target[k] = START_LEADER["left"][joint]
+                        elif k.startswith("right_") and "right" in available_arms:
+                            joint = k[len("right_"):]
+                            target[k] = START_LEADER["right"][joint]
+                    else:
+                        if len(available_arms) == 1:
+                            arm = available_arms[0]
+                            target[k] = START_LEADER[arm][k]
+                try:
+                    cur = teleop_obj.get_action() or {}
+                except Exception:
+                    cur = {}
+                start = {k: cur.get(k, target.get(k, 0.0)) for k in target}
+                for i in range(steps):
+                    alpha = (i + 1) / steps
+                    payload = {k: start[k] + (target[k] - start[k]) * alpha for k in target}
+                    teleop_obj.send_feedback(payload)
+                    time.sleep(1.0 / 30.0)
+                teleop_obj.send_feedback(target)
+
+            if reused:
+                for name, teleop_obj in reused.items():
+                    try:
+                        _move_leader_with_teleop(teleop_obj)
+                    except Exception:
+                        logger.debug("Leader start-position move failed for %s", name, exc_info=True)
+            else:
+                # Fallback: connect fresh teleop from cached config
+                tcfg = _robot_state.get("teleop_config")
+                if not tcfg and _robot_state.get("teleop_cfg") is not None:
+                    try:
+                        _, tcfg_le = to_lerobot_configs(_robot_state.get("robot_cfg"), _robot_state.get("teleop_cfg"))
+                        tcfg = tcfg_le
+                        _robot_state["teleop_config"] = tcfg
+                    except Exception:
+                        tcfg = None
+                if tcfg:
+                    try:
+                        if getattr(tcfg, "type", "") == "bi_widowx":
+                            from lerobot.teleoperators.bi_widowx import BiWidowX
+                            leader = BiWidowX(tcfg)
+                        else:
+                            from lerobot.teleoperators import make_teleoperator_from_config
+                            leader = make_teleoperator_from_config(tcfg)
+                        leader.connect(calibrate=False)
+                        try:
+                            leader.enable_torque()
+                        except Exception:
+                            pass
+                        _move_leader_with_teleop(leader)
+                        leader.disconnect()
+                    except Exception:
+                        logger.debug("Fresh leader start-position move failed", exc_info=True)
+
+        return ApiResponse(
+            status="success",
+            message="Robot moved to Start position",
+            data={"leaders_moved": bool(request.move_leaders)}
+        )
+
+    except Exception as exc:
+        logger.error("Failed to move to Start position: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to move to Start position: {exc}")
 
 
 # ---------------------------------------------------------------------------

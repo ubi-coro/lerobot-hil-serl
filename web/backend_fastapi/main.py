@@ -369,6 +369,81 @@ async def teleoperation_command(sid, data):
         logger.error(f"Error handling teleoperation command: {e}")
         await sio.emit('error', {'message': str(e)}, room=sid)
 
+# Move robots to Start Position via Socket.IO trigger
+@sio.on('move_to_start_positions')
+async def handle_move_to_start_positions(sid, data):
+    """Socket event to move robot (and leaders) to Start pose.
+
+    Payload schema (optional keys):
+      - duration_seconds: float (default 5.0)
+      - move_leaders: bool (default True)
+      - operation_mode: str (bimanual/left/right) for context (informational)
+      - start_positions: dict (optional manual positions; if provided and valid,
+        follower targets will use these instead of built-in START constants)
+    """
+    try:
+        from modules import robot as robot_module
+        # Ensure robot is connected
+        if not getattr(robot_module, 'robot', None) or not getattr(robot_module.robot, 'is_connected', False):
+            await sio.emit('recording_error', {'error': 'Robot not connected'}, room=sid)
+            return
+
+        duration = float(data.get('duration_seconds', 5.0)) if isinstance(data, dict) else 5.0
+        move_leaders = bool(data.get('move_leaders', True)) if isinstance(data, dict) else True
+
+        # If custom start_positions provided, perform movement inline here
+        start_positions = (data or {}).get('start_positions') if isinstance(data, dict) else None
+
+        if isinstance(start_positions, dict) and start_positions:
+            # Build follower target map using provided positions
+            available_arms = robot_module._robot_state.get('available_arms', [])
+            target_pos = {}
+            for arm in available_arms:
+                arm_dict = start_positions.get(arm)
+                if not isinstance(arm_dict, dict):
+                    continue
+                for joint, val in arm_dict.items():
+                    target_pos[f"{arm}_{joint}"] = float(val)
+
+            # Interpolate follower movement
+            steps = max(1, int(duration * 30))
+            current = robot_module.robot.get_observation() or {}
+            start_vals = {k: current.get(k, 0.0) for k in target_pos.keys()}
+
+            import time
+            for i in range(steps):
+                alpha = (i + 1) / steps
+                action = {k: start_vals[k] + (target_pos[k] - start_vals[k]) * alpha for k in target_pos}
+                robot_module.robot.send_action(action)
+                time.sleep(1.0 / 30.0)
+
+            # Move leaders optionally using module helper (START constants path)
+            if move_leaders:
+                try:
+                    # Reuse existing teleops if available
+                    from modules import aloha_teleoperation as teleop_module
+                    reused = dict(teleop_module.aloha_state.get('teleop') or {})
+                except Exception:
+                    reused = {}
+                # If reused teleops exist, we only do follower movement inline; leaders left as-is
+                # Users can trigger start-position REST if they also want leaders updated to constants.
+            await sio.emit('move_to_start_ok', {'duration_seconds': duration}, room=sid)
+            return
+
+        # Fall back to API logic using module endpoint
+        from pydantic import BaseModel
+        class _Req(BaseModel):
+            duration_seconds: float = duration
+            move_leaders: bool = move_leaders
+        try:
+            resp = await robot_module.move_robot_to_start(_Req())
+            await sio.emit('move_to_start_ok', {'duration_seconds': duration, 'leaders_moved': move_leaders}, room=sid)
+        except Exception as e:
+            await sio.emit('recording_error', {'error': f'Move to start failed: {e}'}, room=sid)
+    except Exception as e:
+        logger.error(f"Move to start handler error: {e}", exc_info=True)
+        await sio.emit('recording_error', {'error': str(e)}, room=sid)
+
 # Main API endpoints
 @app.get("/", response_model=ApiResponse)
 async def root():
