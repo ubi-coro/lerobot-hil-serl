@@ -87,6 +87,9 @@ def resolve(req: TeleopRequest) -> Tuple[RobotCfg, TeleopCfg, dict]:
             teleop.port = prof_teleop.port
         if prof_teleop.calibration_dir:
             teleop.calibration_dir = prof_teleop.calibration_dir
+        # Propagate gripper servo type from profile
+        if prof_teleop.use_aloha2_gripper_servo:
+            teleop.use_aloha2_gripper_servo = prof_teleop.use_aloha2_gripper_servo
 
     # 3) Umgebung (z. B. ENV-Mapping für Ports)
     # robot = apply_env_overrides(robot); teleop = apply_env_overrides(teleop)

@@ -10,6 +10,7 @@ type = "widowx"
 id = "right_v3"
 port = "/dev/ttyDXL_leader_right"
 calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/teleoperators/widowx"
+use_aloha2_gripper_servo = true
 
 [profiles.viperx_right.robot.cameras.right]
 serial_number_or_name = "130322274116"
@@ -40,6 +41,7 @@ type = "widowx"
 id = "left_v3"
 port = "/dev/ttyDXL_leader_left"
 calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/teleoperators/widowx"
+use_aloha2_gripper_servo = true
 
 [profiles.viperx_left.robot.cameras.left]
 serial_number_or_name = "218622276088"
@@ -94,6 +96,7 @@ type = "bi_widowx"
 id = "bi_widowx"
 left_arm = { port = "/dev/ttyDXL_leader_left", id = "left_v3", calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/teleoperators/widowx" }
 right_arm = { port = "/dev/ttyDXL_leader_right", id = "right_v3", calibration_dir = "/home/jannick/.cache/huggingface/lerobot/calibration/teleoperators/widowx" }
+use_aloha2_gripper_servo = true
 
 # ------------------------------------------------------------------------
 # GUI Experiment Mappings

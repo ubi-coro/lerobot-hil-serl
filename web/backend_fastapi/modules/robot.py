@@ -116,17 +116,48 @@ def _arms_for_mode(mode: Optional[str]) -> List[str]:
         return ["right"]
     return ["left", "right"]
 
+# Measured "Sleep" poses per arm from your prints (followers)
+HOME_FOLLOWER = {
+    "left": {
+        "elbow.pos": 1.6364,
+        "forearm_roll.pos": 0.1266,
+        "gripper.pos": 0.6014,
+        "shoulder.pos": -1.8834,
+        "waist.pos": -0.0161,
+        "wrist_angle.pos": 0.6743,
+        "wrist_rotate.pos": -0.2371,
+    },
+    "right": {
+        "elbow.pos": 1.6241,
+        "forearm_roll.pos": -0.1987,
+        "gripper.pos": 0.7691,
+        "shoulder.pos": -1.9049,
+        "waist.pos": 0.0176,
+        "wrist_angle.pos": 0.7081,
+        "wrist_rotate.pos": 0.2447,
+    },
+}
 
-# Approximate "Sleep" / "Home" pose for ViperX 6DOF
-# This folds the arm back and down to a safe resting position.
-SINGLE_ARM_HOME = {
-    "waist.pos": 0.0,
-    "shoulder.pos": -1.5,
-    "elbow.pos": 1.5,
-    "forearm_roll.pos": 0.0,
-    "wrist_angle.pos": 0.0,
-    "wrist_rotate.pos": 0.0,
-    "gripper.pos": 0.0
+# Measured "Sleep" poses per arm from your prints (leaders)
+HOME_LEADER = {
+    "left": {
+        "elbow.pos": 1.5689,
+        "forearm_roll.pos": 0.1818,
+        "gripper.pos": 0.5985,
+        "shoulder.pos": -1.7791,
+        "waist.pos": -0.0176,
+        "wrist_angle.pos": 0.2279,
+        "wrist_rotate.pos": -0.1496,
+    },
+    "right": {
+        "elbow.pos": 1.5827,
+        "forearm_roll.pos": -0.0345,
+        "gripper.pos": 0.7675,
+        "shoulder.pos": -1.8896,
+        "waist.pos": -0.0100,
+        "wrist_angle.pos": 0.3030,
+        "wrist_rotate.pos": 0.0176,
+    },
 }
 
 
@@ -403,11 +434,13 @@ async def move_robot_home(request: HomeRequest):
         target_pos = {}
         available_arms = _robot_state.get("available_arms", [])
         
-        # Construct full target dictionary
+        # Construct full target dictionary (followers): use measured per-arm home; require presence
         for arm in available_arms:
-            prefix = f"{arm}_"
-            for joint, val in SINGLE_ARM_HOME.items():
-                target_pos[f"{prefix}{joint}"] = val
+            if arm not in HOME_FOLLOWER:
+                raise HTTPException(status_code=400, detail=f"Missing follower HOME pose for arm '{arm}'")
+            base = HOME_FOLLOWER[arm]
+            for joint, val in base.items():
+                target_pos[f"{arm}_{joint}"] = val
 
         # 2. Get current position
         current_pos = robot.get_observation()
@@ -433,42 +466,179 @@ async def move_robot_home(request: HomeRequest):
             time.sleep(1.0 / 30.0)
 
         # 4. Move Leader (Teleoperator) if available
-        teleop_config = _robot_state.get("teleop_config")
-        if teleop_config:
+        # Attempt to reuse active teleop instances (as in interventions)
+        reused_teleops: Dict[str, Any] = {}
+        try:
+            from . import aloha_teleoperation as teleop_module  # type: ignore
+            reused_teleops = dict(teleop_module.aloha_state.get("teleop") or {})
+            if reused_teleops:
+                logger.info("Reusing %d active teleop instance(s) for leader homing", len(reused_teleops))
+        except Exception:
+            logger.debug("No active teleoperation to reuse for leader homing", exc_info=True)
+
+        if reused_teleops:
             try:
-                logger.info("Connecting to leader arms for homing...")
-                leader = make_robot_from_config(teleop_config)
-                # Connect leader without cameras (faster, less conflict)
-                leader.connect(calibrate=False)
-                
-                # Determine leader target position (same logic as follower)
-                leader_target_pos = {}
-                # Leader arms usually have same joint names
-                for arm in available_arms:
-                    prefix = f"{arm}_"
-                    for joint, val in SINGLE_ARM_HOME.items():
-                        leader_target_pos[f"{prefix}{joint}"] = val
-                
-                leader_current_pos = leader.get_observation()
-                leader_start_pos = {k: leader_current_pos.get(k, 0.0) for k in leader_target_pos.keys()}
-                
-                logger.info(f"Moving leader to Home position over {request.duration_seconds}s...")
-                for i in range(steps):
-                    alpha = (i + 1) / steps
-                    interp_action = {}
-                    for k in leader_target_pos.keys():
-                        start_val = leader_start_pos.get(k, 0.0)
-                        target_val = leader_target_pos[k]
-                        interp_action[k] = start_val + (target_val - start_val) * alpha
-                    
-                    leader.send_action(interp_action)
-                    time.sleep(1.0 / 30.0)
-                
-                logger.info("Leader homing complete. Disconnecting leader.")
-                leader.disconnect()
+                # Build target strictly using each teleop's advertised action_features to match keys
+                logger.info(f"Moving reused teleops to Home over {request.duration_seconds}s...")
+                # Precompute per-arm base targets
+                for name, teleop in reused_teleops.items():
+                    af = getattr(teleop, "action_features", {})
+                    if not af:
+                        logger.warning("Teleop %s has no action_features; skipping", name)
+                        continue
+
+                    feature_keys = list(af.keys())
+                    has_prefix = any(k.startswith("left_") or k.startswith("right_") for k in feature_keys)
+
+                    # Prime last obs for relative safety caps
+                    try:
+                        teleop.get_action()
+                    except Exception:
+                        logger.debug("teleop.get_action failed prior to homing (continuing)", exc_info=True)
+
+                    # Build target map in the exact feature space
+                    target = {}
+                    for k in feature_keys:
+                        if has_prefix:
+                            if k.startswith("left_") and "left" in available_arms:
+                                joint = k[len("left_"):]
+                                target[k] = HOME_LEADER["left"][joint]
+                            elif k.startswith("right_") and "right" in available_arms:
+                                joint = k[len("right_"):]
+                                target[k] = HOME_LEADER["right"][joint]
+                        else:
+                            # Single-arm teleop; assume the active arm from available_arms
+                            if len(available_arms) != 1:
+                                logger.warning("Single-arm teleop but ambiguous available_arms=%s; skipping %s", available_arms, name)
+                                continue
+                            arm = available_arms[0]
+                            target[k] = HOME_LEADER[arm][k]
+
+                    # Read start once to interpolate smoothly
+                    try:
+                        start = teleop.get_action()
+                    except Exception:
+                        start = {}
+                    start = {k: start.get(k, target.get(k, 0.0)) for k in target}
+
+                    for i in range(steps):
+                        alpha = (i + 1) / steps
+                        payload = {k: start[k] + (target[k] - start[k]) * alpha for k in target}
+                        teleop.send_feedback(payload)
+                        time.sleep(1.0 / 30.0)
+                    # Final latch
+                    teleop.send_feedback(target)
+
+                logger.info("Leader homing via reused teleops complete.")
             except Exception as e:
-                logger.warning(f"Failed to home leader arms: {e}")
-                # Don't fail the whole request if leader fails, as follower is more critical
+                logger.warning("Leader homing via reused teleops failed: %s", e)
+        else:
+            # Fall back to creating a fresh teleop connection
+            teleop_config = _robot_state.get("teleop_config")
+            # Fallback: rebuild teleop_config from last resolved Pydantic cfg if missing
+            if not teleop_config and _robot_state.get("teleop_cfg") is not None:
+                try:
+                    _, teleop_config_rebuilt = to_lerobot_configs(
+                        _robot_state.get("robot_cfg"), _robot_state.get("teleop_cfg")
+                    )
+                    teleop_config = teleop_config_rebuilt
+                    _robot_state["teleop_config"] = teleop_config
+                    logger.info("Rebuilt teleop_config from last resolved configs")
+                except Exception as e:
+                    logger.warning(f"Could not rebuild teleop_config: {e}")
+
+            if teleop_config:
+                def _home_with_teleop_config(tcfg) -> bool:
+                    """Connect leader with given config and run homing. Returns True on success."""
+                    logger.info("Connecting to leader arms for homing (fresh teleop)...")
+                    # Handle teleoperators (leaders) properly
+                    if getattr(tcfg, "type", "") == "bi_widowx":
+                        from lerobot.teleoperators.bi_widowx import BiWidowX
+                        leader_local = BiWidowX(tcfg)
+                    else:
+                        from lerobot.teleoperators import make_teleoperator_from_config
+                        leader_local = make_teleoperator_from_config(tcfg)
+
+                    leader_local.connect(calibrate=False)
+                    try:
+                        leader_local.enable_torque()
+                    except Exception:
+                        pass
+
+                    leader_current_pos_local = leader_local.get_action()
+                    logger.info(
+                        "Leader connected. Read %d joint keys for homing.",
+                        len(leader_current_pos_local) if isinstance(leader_current_pos_local, dict) else -1,
+                    )
+
+                    leader_has_prefix_local = any(k.startswith("left_") or k.startswith("right_") for k in leader_current_pos_local)
+                    leader_target_pos_local = {}
+                    for arm in available_arms:
+                        if arm not in HOME_LEADER:
+                            raise HTTPException(status_code=400, detail=f"Missing leader HOME pose for arm '{arm}'")
+                        base = HOME_LEADER[arm]
+                        for joint, val in base.items():
+                            key = f"{arm}_{joint}" if leader_has_prefix_local else joint
+                            leader_target_pos_local[key] = val
+                    leader_start_pos_local = {k: leader_current_pos_local.get(k, 0.0) for k in leader_target_pos_local.keys()}
+
+                    logger.info(f"Moving leader to Home position over {request.duration_seconds}s (fresh teleop)...")
+                    for i in range(steps):
+                        alpha = (i + 1) / steps
+                        interp_action = {}
+                        for k in leader_target_pos_local.keys():
+                            start_val = leader_start_pos_local.get(k, 0.0)
+                            target_val = leader_target_pos_local[k]
+                            interp_action[k] = start_val + (target_val - start_val) * alpha
+                        leader_local.send_feedback(interp_action)
+                        time.sleep(1.0 / 30.0)
+                    try:
+                        leader_local.send_feedback(leader_target_pos_local)
+                    except Exception:
+                        logger.debug("Final leader target send failed (already at target?)", exc_info=True)
+
+                    logger.info("Leader homing complete. Disconnecting leader (fresh teleop).")
+                    leader_local.disconnect()
+                    return True
+
+                try:
+                    # First attempt with current config
+                    if _home_with_teleop_config(teleop_config):
+                        pass
+                except Exception as e:
+                    # If motor model mismatch (XL vs XC gripper), retry with toggled gripper flag
+                    msg = str(e)
+                    logger.warning(f"Failed to home leader arms: {e}")
+                    try:
+                        tcfg_pyd = _robot_state.get("teleop_cfg")
+                        rcfg_pyd = _robot_state.get("robot_cfg")
+                        if tcfg_pyd is not None and rcfg_pyd is not None:
+                            # Decide which way to toggle based on error content
+                            toggle_to = None
+                            if "expected 1060, found 1070" in msg:
+                                # Expected XL but have XC -> set aloha2=True
+                                toggle_to = True
+                            elif "expected 1070, found 1060" in msg:
+                                # Expected XC but have XL -> set aloha2=False
+                                toggle_to = False
+                            if toggle_to is not None:
+                                logger.info("Retrying leader connect with use_aloha2_gripper_servo=%s", toggle_to)
+                                tcfg_retry = tcfg_pyd.copy(update={"use_aloha2_gripper_servo": toggle_to})
+                                _, tcfg_retry_le = to_lerobot_configs(rcfg_pyd, tcfg_retry)
+                                try:
+                                    _home_with_teleop_config(tcfg_retry_le)
+                                    # Persist the corrected teleop config for subsequent Home calls
+                                    _robot_state["teleop_cfg"] = tcfg_retry
+                                    _robot_state["teleop_config"] = tcfg_retry_le
+                                    logger.info("Updated cached teleop config with use_aloha2_gripper_servo=%s", toggle_to)
+                                except Exception as e2:
+                                    logger.warning(f"Leader homing retry failed: {e2}")
+                            else:
+                                logger.debug("No gripper model hint in error; not retrying teleop connect")
+                        else:
+                            logger.debug("teleop_cfg or robot_cfg missing; cannot rebuild teleop config for retry")
+                    except Exception:
+                        logger.debug("Leader homing retry path crashed", exc_info=True)
         
         # 5. Disable torque if requested
         if request.torque_off:
