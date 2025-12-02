@@ -28,6 +28,7 @@ from torch.utils.data import IterableDataset
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets.factory import make_dataset
+from lerobot.datasets.lerobot_dataset import MultiLeRobotDataset
 from lerobot.datasets.sampler import EpisodeAwareSampler
 from lerobot.datasets.utils import cycle
 from lerobot.envs.factory import make_env, make_env_pre_post_processors
@@ -190,6 +191,13 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     if not is_main_process:
         dataset = make_dataset(cfg)
 
+    if isinstance(dataset, MultiLeRobotDataset):
+        ds_meta = dataset._datasets[0].meta
+        ds_stats = dataset.stats
+    else:
+        ds_meta = dataset.meta
+        ds_stats = ds_meta.stats
+
     # Create environment used for evaluating checkpoints during training on simulation data.
     # On real-world data, no need to create an environment as evaluations are done outside train.py,
     # using the eval.py instead, with gym_dora environment and dora-rs.
@@ -203,7 +211,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info("Creating policy")
     policy = make_policy(
         cfg=cfg.policy,
-        ds_meta=dataset.meta,
+        ds_meta=ds_meta,
         rename_map=cfg.rename_map,
     )
 
@@ -215,13 +223,13 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     postprocessor_kwargs = {}
     if (cfg.policy.pretrained_path and not cfg.resume) or not cfg.policy.pretrained_path:
         # Only provide dataset_stats when not resuming from saved processor state
-        processor_kwargs["dataset_stats"] = dataset.meta.stats
+        processor_kwargs["dataset_stats"] = ds_stats
 
     if cfg.policy.pretrained_path is not None:
         processor_kwargs["preprocessor_overrides"] = {
             "device_processor": {"device": device.type},
             "normalizer_processor": {
-                "stats": dataset.meta.stats,
+                "stats": ds_stats,
                 "features": {**policy.config.input_features, **policy.config.output_features},
                 "norm_map": policy.config.normalization_mapping,
             },
@@ -231,7 +239,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         }
         postprocessor_kwargs["postprocessor_overrides"] = {
             "unnormalizer_processor": {
-                "stats": dataset.meta.stats,
+                "stats": ds_stats,
                 "features": policy.config.output_features,
                 "norm_map": policy.config.normalization_mapping,
             },
@@ -276,8 +284,8 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     if hasattr(cfg.policy, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(
-            dataset.meta.episodes["dataset_from_index"],
-            dataset.meta.episodes["dataset_to_index"],
+            ds_meta.episodes["dataset_from_index"],
+            ds_meta.episodes["dataset_to_index"],
             episode_indices_to_use=dataset.episodes,
             drop_n_last_frames=cfg.policy.drop_n_last_frames,
             shuffle=True,

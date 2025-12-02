@@ -1,14 +1,15 @@
+
 from dataclasses import dataclass
 
 from lerobot.share.configs import DatasetRecordConfig
 
 
 @dataclass
-@DatasetRecordConfig.register_subclass("aloha_folding")
-class AlohaFoldingDatasetConfig(DatasetRecordConfig):
-    repo_id: str = "hoodie_folding_v3/test2"
-    single_task: str = "Fold the hoodie"
-    root: str = "/media/nvme1/jstranghoener/lerobot/data/jannick-st/hoodie_folding_v3/test2"
+@DatasetRecordConfig.register_subclass("aloha_cable")
+class AlohaCableDatasetConfig(DatasetRecordConfig):
+    repo_id: str = "cable_v3/test"
+    single_task: str = "Insert the cable"
+    root: str = "/media/nvme1/jstranghoener/lerobot/data/jannick-st/cable_v3/test"
     num_episodes: int = 30
     episode_time_s: int = 80.0
     reset_time_s: int = 10.0

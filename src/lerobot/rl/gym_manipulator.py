@@ -26,55 +26,23 @@ import torch
 from lerobot.cameras import opencv  # noqa: F401
 from lerobot.configs import parser
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.envs.configs import HILSerlRobotEnvConfig
-from lerobot.model.kinematics import RobotKinematics
 from lerobot.processor import (
-    AddBatchDimensionProcessorStep,
-    AddTeleopActionAsComplimentaryDataStep,
-    AddTeleopEventsAsInfoStep,
     DataProcessorPipeline,
-    DeviceProcessorStep,
     EnvTransition,
-    GripperPenaltyProcessorStep,
-    ImageCropResizeProcessorStep,
-    InterventionActionProcessorStep,
-    JointVelocityProcessorStep,
-    MapDeltaActionToRobotActionStep,
-    MapTensorToDeltaActionDictStep,
-    MotorCurrentProcessorStep,
-    Numpy2TorchActionProcessorStep,
-    RewardClassifierProcessorStep,
-    RobotActionToPolicyActionProcessorStep,
-    TimeLimitProcessorStep,
-    Torch2NumpyActionProcessorStep,
     TransitionKey,
-    VanillaObservationProcessorStep,
-    create_transition,
+    create_transition, make_default_processors,
 )
-from lerobot.processor.converters import identity_transition
+from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
 from lerobot.robots import (  # noqa: F401
     RobotConfig,
     make_robot_from_config,
     so100_follower,
 )
 from lerobot.robots.robot import Robot
-from lerobot.robots.so100_follower.robot_kinematic_processor import (
-    EEBoundsAndSafety,
-    EEReferenceAndDelta,
-    ForwardKinematicsJointsToEEObservation,
-    GripperVelocityToJoint,
-    InverseKinematicsRLStep,
-)
-from lerobot.teleoperators import (
-    gamepad,  # noqa: F401
-    keyboard,  # noqa: F401
-    make_teleoperator_from_config,
-    so101_leader,  # noqa: F401
-)
 from lerobot.teleoperators.teleoperator import Teleoperator
 from lerobot.teleoperators.utils import TeleopEvents
 from lerobot.utils.constants import ACTION, DONE, OBS_IMAGES, OBS_STATE, REWARD
-from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
 
 logging.basicConfig(level=logging.INFO)
@@ -90,6 +58,11 @@ class DatasetConfig:
     num_episodes_to_record: int = 5
     replay_episode: int | None = None
     push_to_hub: bool = False
+
+
+@dataclass
+class HILSerlRobotEnvConfig:
+    pass
 
 
 @dataclass
@@ -114,7 +87,7 @@ def reset_follower_position(robot_arm: Robot, target_position: np.ndarray) -> No
     for pose in trajectory:
         action_dict = dict(zip(current_position_dict, pose, strict=False))
         robot_arm.bus.sync_write("Goal_Position", action_dict)
-        busy_wait(0.015)
+        precise_sleep(0.015)
 
 
 class RobotEnv(gym.Env):
@@ -238,7 +211,7 @@ class RobotEnv(gym.Env):
             reset_follower_position(self.robot, np.array(self.reset_pose))
             log_say("Reset the environment done.", play_sounds=True)
 
-        busy_wait(self.reset_time_s - (time.perf_counter() - start_time))
+        precise_sleep(self.reset_time_s - (time.perf_counter() - start_time))
 
         super().reset(seed=seed, options=options)
 

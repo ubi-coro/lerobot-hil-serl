@@ -85,8 +85,6 @@ lerobot-record \
 
 import logging
 import time
-from dataclasses import asdict
-from pprint import pformat
 from typing import Any
 
 import numpy as np
@@ -97,9 +95,7 @@ from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraCon
 from lerobot.configs import parser
 from lerobot.datasets.image_writer import safe_stop_image_writer
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.datasets.video_utils import VideoEncodingManager
 from lerobot.envs.robot_env import RobotEnv
-from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.processor import (
     PolicyAction,
@@ -108,7 +104,6 @@ from lerobot.processor import (
     create_transition,
     TransitionKey,
 )
-from lerobot.processor.rename_processor import rename_stats
 from lerobot.rl.gym_manipulator import step_env_and_process_transition
 from lerobot.robots import (  # noqa: F401
     Robot,
@@ -132,20 +127,11 @@ from lerobot.teleoperators import (  # noqa: F401
     so101_leader, TeleopEvents,
 )
 from lerobot.utils.constants import ACTION, REWARD, DONE, OBS_STR
-from lerobot.utils.control_utils import (
-    predict_action,
-    sanity_check_dataset_name,
-    sanity_check_dataset_robot_compatibility,
-)
-from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.control_utils import predict_action
+from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.transition import Transition
-from lerobot.utils.utils import (
-    get_safe_torch_device,
-    init_logging,
-    log_say,
-)
-from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
-from lerobot.share.utils import get_pipeline_dataset_features
+from lerobot.utils.utils import get_safe_torch_device
+from lerobot.utils.visualization_utils import log_rerun_data
 
 
 """ --------------- record_loop() data flow --------------------------
@@ -323,7 +309,7 @@ def record_loop(
 
         # (7) Handle frequency
         dt_load = time.perf_counter() - start_loop_t
-        busy_wait(1 / fps - dt_load)
+        precise_sleep(1 / fps - dt_load)
         dt_loop = time.perf_counter() - start_loop_t
         logging.info(
             f"dt_load: {dt_loop * 1000:5.2f}ms ({1 / dt_loop:3.1f}hz), "
@@ -360,7 +346,7 @@ def replay(cfg: RecordConfig) -> LeRobotDataset:
             action_processor=action_processor,
             info={}
         )
-        busy_wait(1 / cfg.env.fps - (time.perf_counter() - start_time))
+        precise_sleep(1 / cfg.env.fps - (time.perf_counter() - start_time))
 
 if __name__ == "__main__":
     import experiments

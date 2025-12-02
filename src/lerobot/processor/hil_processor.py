@@ -164,7 +164,7 @@ class AddTeleopActionAsComplimentaryDataStep(ProcessorStep):
         teleop_device: The teleoperator instance to get the action from.
     """
 
-    teleoperators: dict[str, Teleoperator] = field(default_factory={})
+    teleoperators: dict[str, Teleoperator] = field(default_factory=dict)
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         """Applies the `complementary_data` method to the transition's data."""
@@ -206,7 +206,7 @@ class AddTeleopEventsAsInfoStep(InfoProcessorStep):
                        `HasTeleopEvents` protocol.
     """
 
-    teleoperators: dict[str, Teleoperator] = field(default_factory={})
+    teleoperators: dict[str, Teleoperator] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validates that the provided teleoperator supports events after initialization."""

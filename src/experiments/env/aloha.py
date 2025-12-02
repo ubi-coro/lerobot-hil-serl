@@ -61,8 +61,8 @@ class AlohaBimanualEnvConfig(RobotEnvConfig):
         self.processor.gripper.use_gripper = True
         self.processor.reset.terminate_on_success = True
         self.processor.events.foot_switch_mapping = {
-            (TeleopEvents.SUCCESS,): {"device": 3, "toggle": False},
-            (TeleopEvents.IS_INTERVENTION,): {"device": 6, "toggle": True},
+            (TeleopEvents.SUCCESS,): {"device": 2, "toggle": False},
+            (TeleopEvents.IS_INTERVENTION,): {"device": 7, "toggle": True},
         }
         self.processor.events.key_mapping = {
             TeleopEvents.RERECORD_EPISODE: keyboard.Key.left
@@ -71,6 +71,8 @@ class AlohaBimanualEnvConfig(RobotEnvConfig):
         if self.benchmark:
             self.processor.hooks.time_env_processor = True
             self.processor.hooks.time_action_processor = True
+
+        super().__post_init__()
 
 
 @dataclass

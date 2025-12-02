@@ -137,7 +137,7 @@ from lerobot.utils.control_utils import (
     sanity_check_dataset_name,
     sanity_check_dataset_robot_compatibility,
 )
-from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.transition import Transition
 from lerobot.utils.utils import (
     get_safe_torch_device,
@@ -323,7 +323,7 @@ def record_loop(
 
         # (7) Handle frequency
         dt_load = time.perf_counter() - start_loop_t
-        busy_wait(1 / fps - dt_load)
+        precise_sleep(1 / fps - dt_load)
         dt_loop = time.perf_counter() - start_loop_t
         logging.info(
             f"dt_load: {dt_loop * 1000:5.2f}ms ({1 / dt_loop:3.1f}hz), "
