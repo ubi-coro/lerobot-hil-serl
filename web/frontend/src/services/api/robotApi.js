@@ -176,12 +176,12 @@ export default {
     return apiCall('/status');
   },
 
-  // Move robot to safe position
-  moveToSafePosition(config = {}) {
-    console.log('Calling moveToSafePosition with config:', config);
-    return apiCall('/robot/safe-position', {
+  // Move robot to safe position (Home)
+  goHome(torqueOff = true) {
+    console.log('Calling goHome...');
+    return apiCall('/home', {
       method: 'POST',
-      body: config
+      body: { torque_off: torqueOff, duration_seconds: 5.0 }
     });
   },
 

@@ -41,6 +41,15 @@
         >
           <i class="bi bi-power me-2"></i>Disconnect
         </button>
+        <button 
+          v-if="isConnected" 
+          @click="goHome" 
+          class="btn btn-warning"
+          :disabled="busy"
+          title="Move to safe home position"
+        >
+          <i class="bi bi-house-door me-2"></i>Home
+        </button>
       </div>
     </div>
     <div v-if="error && !isConnected" class="error-details">
@@ -147,6 +156,18 @@ async function disconnect(){
   try { await robotStore.disconnectRobot(); } catch { /* ignore */ }
 }
 
+async function goHome(){
+  if(!confirm("Move robot to Home position? Ensure the workspace is clear.")) return;
+  try {
+    busy.value = true;
+    await robotApi.goHome(true);
+  } catch(e){
+    error.value = e.message || 'Failed to go home';
+  } finally {
+    busy.value = false;
+  }
+}
+
 function onTypeChange(){
   robotStore.setRobotType(selectedType.value);
 }
@@ -179,6 +200,8 @@ button.btn-primary { background: #3b82f6; color: white; }
 button.btn-primary:hover:not(:disabled) { background: #2563eb; }
 button.btn-secondary { background: #6b7280; color: white; }
 button.btn-secondary:hover { background: #4b5563; }
+button.btn-warning { background: #f59e0b; color: white; }
+button.btn-warning:hover:not(:disabled) { background: #d97706; }
 button[disabled] { opacity: 0.5; cursor: not-allowed; }
 .error-details { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid #f3f4f6; }
 .error-details h4 { color: #dc2626; margin: 0 0 0.5rem 0; }

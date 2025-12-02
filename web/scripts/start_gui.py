@@ -94,6 +94,7 @@ def start_backend(backend_dir: Path):
     print(f"{Colors.BLUE}🚀 Starting FastAPI backend (production mode)...{Colors.RESET}")
     env = os.environ.copy()
     env['LEROBOT_GUI_MODE'] = 'production'
+    env['LEROBOT_GUI_SERVE_FRONTEND'] = '1'  # Serve built frontend from dist/
     # No --reload here
     return subprocess.Popen([
         sys.executable, "-m", "uvicorn", "main:socket_app", "--host","0.0.0.0","--port","8000"

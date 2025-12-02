@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="/home/jannick/PycharmProjects/lerobot/web/scripts"
-REPO_ROOT="/home/jannick/PycharmProjects/lerobot"
+SCRIPT_DIR="/home/jannick/PycharmProjects/lerobot-hil-serl/web/scripts"
+REPO_ROOT="/home/jannick/PycharmProjects/lerobot-hil-serl"
 LOG_DIR="$HOME/.local/share/lerobot"
 LOG_FILE="$LOG_DIR/gui-launch.log"
 
@@ -70,9 +70,9 @@ fi
 # Try to find a Python executable that has lerobot installed
 PYTHON_EXE=""
 
-# 1) Prefer conda 'lerobot' env by reading environments.txt (works without interactive shells)
+# 1) Prefer conda 'lerobotHilSerl' env by reading environments.txt (works without interactive shells)
 if [[ -z "${PYTHON_EXE}" ]] && [[ -f "$HOME/.conda/environments.txt" ]]; then
-    if ENV_PATH=$(grep -E "/envs/lerobot$|/lerobot$" "$HOME/.conda/environments.txt" | tail -n1); then
+    if ENV_PATH=$(grep -E "/envs/lerobotHilSerl$" "$HOME/.conda/environments.txt" | tail -n1); then
         if [[ -n "$ENV_PATH" && -x "$ENV_PATH/bin/python" ]]; then
             PYTHON_EXE="$ENV_PATH/bin/python"
             log "Found conda env via environments.txt: $ENV_PATH"
@@ -80,11 +80,11 @@ if [[ -z "${PYTHON_EXE}" ]] && [[ -f "$HOME/.conda/environments.txt" ]]; then
     fi
 fi
 
-# 2) Common default locations for conda/miniconda
+# 2) Common default locations for conda/miniconda - check lerobotHilSerl first
 for BASE in "$HOME/miniconda3" "$HOME/mambaforge" "$HOME/anaconda3"; do
-    if [[ -z "${PYTHON_EXE}" && -x "$BASE/envs/lerobot/bin/python" ]]; then
-        PYTHON_EXE="$BASE/envs/lerobot/bin/python"
-        log "Found conda env at: $BASE/envs/lerobot"
+    if [[ -z "${PYTHON_EXE}" && -x "$BASE/envs/lerobotHilSerl/bin/python" ]]; then
+        PYTHON_EXE="$BASE/envs/lerobotHilSerl/bin/python"
+        log "Found conda env at: $BASE/envs/lerobotHilSerl"
         break
     fi
 done
@@ -93,9 +93,9 @@ done
 if [[ -z "${PYTHON_EXE}" ]] && command -v conda >/dev/null 2>&1; then
     # shellcheck disable=SC1091
     source "$(conda info --base)/etc/profile.d/conda.sh" || true
-    if conda env list | grep -q "^[^#].*\blerobot\b"; then
+    if conda env list | grep -q "^[^#].*\blerobotHilSerl\b"; then
         # Try to get the absolute path of the env
-        ENV_DIR=$(conda env list | awk '/\blerobot\b/ {print $NF}' | tail -n1)
+        ENV_DIR=$(conda env list | awk '/\blerobotHilSerl\b/ {print $NF}' | tail -n1)
         if [[ -n "$ENV_DIR" && -x "$ENV_DIR/bin/python" ]]; then
             PYTHON_EXE="$ENV_DIR/bin/python"
             log "Found conda env via conda env list: $ENV_DIR"
