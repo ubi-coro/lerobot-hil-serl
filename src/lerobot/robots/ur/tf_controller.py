@@ -544,8 +544,11 @@ class RTDETFFController(mp.Process):
                 wrench_W = np.zeros(6, dtype=np.float64)
 
                 # --- translation ---
-                mask_virtual = np.array([1 if AxisMode(self.mode[i]) in (AxisMode.IMPEDANCE_VEL, AxisMode.POS) else 0 for i in range(3, 6)])
-                if np.any(mask_virtual):
+                mask_virtual_trans = np.array(
+                    [1 if AxisMode(self.mode[i]) in (AxisMode.IMPEDANCE_VEL, AxisMode.POS) else 0
+                     for i in range(3)]
+                )
+                if np.any(mask_virtual_trans):
                     pos_err_vec = x_cmd[:3] - np.array(pose_F[:3])
 
                 for i in range(3):
@@ -564,7 +567,11 @@ class RTDETFFController(mp.Process):
                         wrench_W[i] = 0.0  # safety fallback
 
                 # --- rotation ---
-                if np.any(mask_virtual):
+                mask_virtual_rot = np.array(
+                    [1 if AxisMode(self.mode[i]) in (AxisMode.IMPEDANCE_VEL, AxisMode.POS) else 0
+                     for i in range(3, 6)]
+                )
+                if np.any(mask_virtual_rot):
                     R_cmd = R.from_rotvec(x_cmd[3:6])
                     R_act = R.from_rotvec(pose_F[3:6])
                     R_err = R_cmd * R_act.inv()
