@@ -22,8 +22,8 @@ class AlohaBimanualEnvConfig(RobotEnvConfig):
 
     def __post_init__(self):
         self.robot = {
-            "left": ViperXConfig(port="/dev/ttyDXL_follower_left", id="left"),
-            "right": ViperXConfig(port="/dev/ttyDXL_follower_right", id="right")
+            "left": ViperXConfig(port="/dev/ttyDXL_follower_left", id="left", max_relative_target=None),
+            "right": ViperXConfig(port="/dev/ttyDXL_follower_right", id="right", max_relative_target=None),
         }
         self.teleop = {
             "left": WidowXConfig(port="/dev/ttyDXL_leader_left", id="left"),

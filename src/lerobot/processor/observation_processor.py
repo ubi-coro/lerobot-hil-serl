@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import time
 from collections import deque
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
@@ -204,6 +205,7 @@ class VanillaObservationProcessorStep(ObservationProcessorStep):
     -   Adds a batch dimension if one is not already present.
     """
     device: str
+    _img_float: torch.Tensor | None = None
 
     def _process_single_image(self, img: np.ndarray) -> Tensor:
         """
@@ -214,31 +216,24 @@ class VanillaObservationProcessorStep(ObservationProcessorStep):
                  (H, W, C) format with a `uint8` dtype.
 
         Returns:
-            A `float32` PyTorch tensor in channel-first (B, C, H, W) format, with
+            A `float32` PyTorch tensor in channel-first (C, H, W) format, with
             pixel values normalized to the [0, 1] range.
-
-        Raises:
-            ValueError: If the input image does not appear to be in channel-last
-                        format or is not of `uint8` dtype.
         """
-        # Convert to tensor
-        img_tensor = torch.from_numpy(img).to(self.device)
 
-        # Validate image format
+        img_tensor = torch.from_numpy(img)  # zero-copy view over numpy
+
         h, w, c = img_tensor.shape
         if not (c < h and c < w):
             raise ValueError(f"Expected channel-last images, but got shape {img_tensor.shape}")
+        img_tensor = einops.rearrange(img_tensor, "h w c -> c h w")
 
-        if img_tensor.dtype != torch.uint8:
-            raise ValueError(f"Expected torch.uint8 images, but got {img_tensor.dtype}")
+        if self._img_float is None or self._img_float.shape != img_tensor.shape:
+            self._img_float = torch.empty_like(img_tensor, dtype=torch.float32)
 
-        # Convert to channel-first format
-        img_tensor = einops.rearrange(img_tensor, "h w c -> c h w").contiguous()
+        self._img_float.copy_(img_tensor)
+        self._img_float.mul_(1.0 / 255.0)
 
-        # Convert to float32 and normalize to [0, 1]
-        img_tensor = img_tensor.type(torch.float32) / 255.0
-
-        return img_tensor
+        return self._img_float
 
     def _process_observation(self, observation):
         """
@@ -260,12 +255,12 @@ class VanillaObservationProcessorStep(ObservationProcessorStep):
 
         if "environment_state" in processed_obs:
             env_state_np = processed_obs.pop("environment_state")
-            env_state = torch.from_numpy(env_state_np).float().to(self.device)
+            env_state = torch.from_numpy(env_state_np).float()
             processed_obs[OBS_ENV_STATE] = env_state
 
         if "agent_pos" in processed_obs:
             agent_pos_np = processed_obs.pop("agent_pos")
-            agent_pos = torch.from_numpy(agent_pos_np).float().to(self.device)
+            agent_pos = torch.from_numpy(agent_pos_np).float()
             processed_obs[OBS_STATE] = agent_pos
 
         return processed_obs

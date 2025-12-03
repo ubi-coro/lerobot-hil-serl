@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import threading
 import time
 from typing import Any
 
@@ -65,6 +66,9 @@ class WidowX(Teleoperator):
         )
         self._last_motor_obs = None
         self._torque_enabled = False
+        self._lock = threading.Lock()
+        self._poll_thread: threading.Thread | None = None
+        self._stop_poll = threading.Event()
 
     @property
     def action_features(self) -> dict[str, type]:
@@ -102,7 +106,19 @@ class WidowX(Teleoperator):
             self.calibrate()
 
         self.configure()
+
+        # Start background polling
+        if self.config.read_fps is not None:
+            self._stop_poll.clear()
+            self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+            self._poll_thread.start()
+
+            # Block until we have at least one reading
+            while self._last_motor_obs is None:
+                time.sleep(0.01)
+
         self.get_action()
+
         logger.info(f"{self} connected.")
 
     @property
@@ -133,9 +149,7 @@ class WidowX(Teleoperator):
             "gripper": MotorCalibration(id=9, drive_mode=0, homing_offset=0, range_min=0, range_max=4095),
         }
 
-        print(
-            f"{self} arm: move the gripper joint through its range of motion"
-        )
+        print(f"{self} arm: move the gripper joint through its range of motion")
 
         range_mins, range_maxes = self.bus.record_ranges_of_motion(motors="gripper", display_values=False)
         self.calibration["gripper"].range_min = range_mins["gripper"]
@@ -178,16 +192,17 @@ class WidowX(Teleoperator):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        start = time.perf_counter()
-        action = self.bus.sync_read("Present_Position")
-        action = {f"{motor}.pos": val for motor, val in action.items() if not motor.endswith("_shadow")}
-        #action["finger.pos"] = gripper_to_linear(action.pop("gripper.pos"))
-        dt_ms = (time.perf_counter() - start) * 1e3
-        logger.debug(f"{self} read action: {dt_ms:.1f}ms")
+        if self.config.read_fps is None:
+            raw = self.bus.sync_read("Present_Position")
+            self._last_motor_obs = {f"{motor}.pos": val for motor, val in raw.items() if not motor.endswith("_shadow")}
+        else:
+            with self._lock:
+                if self._last_motor_obs is None:
+                    # Fallback: do a blocking read once
+                    raw = self.bus.sync_read("Present_Position")
+                    self._last_motor_obs = {f"{motor}.pos": val for motor, val in raw.items() if not motor.endswith("_shadow")}
 
-        self._last_motor_obs = action
-
-        return action
+        return dict(self._last_motor_obs)  # return a copy
 
     def send_feedback(self, feedback: dict[str, float]) -> None:
         if not self.is_connected:
@@ -230,5 +245,21 @@ class WidowX(Teleoperator):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
+        self._stop_poll.set()
+        if self._poll_thread is not None:
+            self._poll_thread.join(timeout=1.0)
+
         self.bus.disconnect()
         logger.info(f"{self} disconnected.")
+
+    def _poll_loop(self):
+        read_dt = 1.0 / self.config.read_fps
+        while not self._stop_poll.is_set() and self.is_connected:
+            try:
+                raw = self.bus.sync_read("Present_Position")
+                obs = {f"{motor}.pos": val for motor, val in raw.items() if not motor.endswith("_shadow")}
+                with self._lock:
+                    self._last_motor_obs = obs
+            except Exception as e:
+                logger.warning(f"{self} poll failed: {e}")
+            time.sleep(read_dt)

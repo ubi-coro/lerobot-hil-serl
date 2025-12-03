@@ -33,7 +33,7 @@ class ViperXConfig(RobotConfig):
     # For Aloha, for every goal position request, motor rotations are capped at 5 degrees by default.
     # When you feel more confident with teleoperation or running the policy, you can extend
     # this safety limit and even removing it by setting it to `null`.
-    max_relative_target: float = 5.0
+    max_relative_target: float | None = 5.0
 
     # The duration of the velocity-based time profile
     # Higher values lead to smoother motions, but increase lag.
