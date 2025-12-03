@@ -206,11 +206,11 @@ def record_loop(
 
         # (9) Handle done
         if (
-                done or
-                truncated or
-                info.get(TeleopEvents.RERECORD_EPISODE, False) or
-                info.get(TeleopEvents.TERMINATE_EPISODE, False) or
-                info.get(TeleopEvents.PAUSE_RECORDING, False)
+            done or
+            truncated or
+            info.get(TeleopEvents.RERECORD_EPISODE, False) or
+            info.get(TeleopEvents.TERMINATE_EPISODE, False) or
+            info.get(TeleopEvents.PAUSE_RECORDING, False)
         ):
             episode_time = time.perf_counter() - episode_start_time
             logging.info(
@@ -262,7 +262,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 num_processes=cfg.dataset.num_image_writer_processes,
                 num_threads=cfg.dataset.num_image_writer_threads_per_camera * len(env.cameras),
             )
-        sanity_check_dataset_robot_compatibility(dataset, cfg.env.type, cfg.dataset.fps, features)
+        sanity_check_dataset_robot_compatibility(dataset, cfg.env.type, cfg.env.fps, features)
     else:
         # Create empty dataset or load existing saved episodes
         sanity_check_dataset_name(cfg.dataset.repo_id, cfg.policy)
@@ -296,7 +296,6 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     info = {}
     with ((VideoEncodingManager(dataset))):
         recorded_episodes = 0
-        paused = False
         while recorded_episodes < cfg.dataset.num_episodes and not info.get(TeleopEvents.STOP_RECORDING, False):
 
             # Execute a few seconds without recording to give time to manually reset the environment
@@ -345,35 +344,19 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 display_data=cfg.display_data
             )
 
-            if info.get(TeleopEvents.RERECORD_EPISODE, False):
-                log_say("Re-record episode", cfg.play_sounds)
-                dataset.clear_episode_buffer()
-                continue
-
-            if dataset.episode_buffer["size"] > 0:
-                dataset.save_episode()
-                recorded_episodes += 1
-
-                # todo: check for pause and do it here
-                if info.get(TeleopEvents.PAUSE_RECORDING, False):
-                    log_say("Pause", cfg.play_sounds)
-                continue
-
-
-
-            if paused:
-                # todo: shoul be in a loop that stays here until resume
-                if info.get(TeleopEvents.RESUME_RECORDING, False):
-                    log_say("Resume recording", cfg.play_sounds)
-                    paused = False
-                else:
-                    continue
-
             if info.get(TeleopEvents.STOP_RECORDING, False):
                 break
-
-            if dataset.episode_buffer["size"] == 0:
+            elif info.get(TeleopEvents.RERECORD_EPISODE, False):
+                log_say("Re-record episode", cfg.play_sounds, blocking=True)
+                dataset.clear_episode_buffer()
+            elif dataset.episode_buffer["size"] > 0:
+                log_say("Save episode", cfg.play_sounds, blocking=False)
+                dataset.save_episode()
+                recorded_episodes += 1
+            else:
                 log_say("Dataset is empty, re-record episode", cfg.play_sounds, blocking=True)
+
+
 
     log_say("Stop recording", cfg.play_sounds, blocking=True)
 

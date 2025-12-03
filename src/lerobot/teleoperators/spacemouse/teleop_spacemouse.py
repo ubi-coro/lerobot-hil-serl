@@ -1,6 +1,7 @@
 import logging
 import multiprocessing
 import time
+from copy import copy
 from typing import Any
 
 import numpy as np
@@ -98,6 +99,7 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
         self.latest_data["gripper_pos"] = [0] * 4
         self._last_gripper_pos = config.initial_gripper_pos
         self._has_gripper = self.config.gripper_close_button_idx is not None and self.config.gripper_open_button_idx is not None
+        self._gripper_state: int = 1
         self._event_states: dict[str, bool] = {
             data["event"]: False for data in self.config.button_mapping.values()
         }
@@ -112,7 +114,9 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
 
     @property
     def feedback_features(self) -> dict[str, type]:
-        return {}
+        feedback_ft = copy(self.action_features)
+        feedback_ft["gripper.pos"] = float
+        return feedback_ft
 
     @property
     def is_connected(self) -> bool:
@@ -156,10 +160,14 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
             close_gripper = latest_buttons[self.config.gripper_close_button_idx]
             open_gripper = latest_buttons[self.config.gripper_open_button_idx]
 
-            action["gripper.pos"] = 0.0
             if open_gripper:
-                action["gripper.pos"] = np.random.uniform(-1, -0.9)
+                self._gripper_state = 1
             elif close_gripper:
+                self._gripper_state = 0
+
+            if self._gripper_state == 1:
+                action["gripper.pos"] = np.random.uniform(0.0, 0.1)
+            else:
                 action["gripper.pos"] = np.random.uniform(0.9, 1.0)
 
         dt_ms = (time.perf_counter() - start) * 1e3
@@ -228,8 +236,8 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
             time.sleep(0.002)
 
     def send_feedback(self, feedback: dict[str, float]) -> None:
-        # TODO(rcadene, aliberts): Implement force feedback
-        raise NotImplementedError
+        if "gripper.pos" in feedback:
+            self._gripper_state = 1 - round(feedback["gripper.pos"])
 
     def disconnect(self) -> None:
         if not self.is_connected:

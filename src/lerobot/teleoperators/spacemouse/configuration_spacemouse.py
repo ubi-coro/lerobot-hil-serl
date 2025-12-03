@@ -26,7 +26,7 @@ class SpacemouseConfig(TeleoperatorConfig):
     """KeyboardTeleopConfig"""
     device: Optional[str] = None
     path: Optional[str] = None
-    action_scale: list[float] = field(default_factory=lambda: [1.0 * 6])
+    action_scale: list[float] = field(default_factory=lambda: [1.0] * 6)
 
     # gripper
     initial_gripper_pos: float = 0.0

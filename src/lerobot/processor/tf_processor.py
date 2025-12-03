@@ -10,7 +10,7 @@ from . import EnvTransition, TransitionKey, PolicyAction, VanillaObservationProc
 from .hil_processor import TELEOP_ACTION_KEY, GRIPPER_KEY
 
 from .pipeline import ProcessorStepRegistry, ProcessorStep
-from ..teleoperators import TeleopEvents
+from ..teleoperators import TeleopEvents, Teleoperator
 
 
 @dataclass
@@ -196,6 +196,7 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
     Multi-robot intervention processor.
     """
 
+    teleoperators: dict[str, Teleoperator]
     use_gripper: dict[str, bool] = field(default_factory=dict)
     terminate_on_success: dict[str, bool] = field(default_factory=dict)
     control_mask: dict[str, list[bool]] = field(default_factory=dict)
@@ -244,6 +245,23 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
 
             teleop_action_tensor = torch.tensor(action_list, dtype=action.dtype, device=action.device)
             new_transition[TransitionKey.ACTION] = teleop_action_tensor
+
+
+        elif not self._intervention_occurred:  # dont write feedback on intervention end
+            # send the current action as feedback to the robots
+            idx = 0
+            for name, teleop in self.teleoperators.items():
+                feedback_action = {}
+                for i, ft in enumerate(teleop.action_features):
+                    if self.control_mask.get(name, [True] * 6)[i]:
+                        feedback_action[ft] = action[idx].item()
+                        idx += 1
+
+                if self.use_gripper.get(name, False):
+                    feedback_action["gripper.pos"] = action[idx].item()
+                    idx += 1
+
+                teleop.send_feedback(feedback_action)
 
         # Termination / reward
         new_transition[TransitionKey.DONE] = (
