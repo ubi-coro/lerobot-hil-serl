@@ -87,7 +87,7 @@ class LeRobotDatasetMetadata:
         root: str | Path | None = None,
         revision: str | None = None,
         force_cache_sync: bool = False,
-        metadata_buffer_size: int = 10,
+        metadata_buffer_size: int = 1,
     ):
         self.repo_id = repo_id
         self.revision = revision if revision else CODEBASE_VERSION
@@ -501,7 +501,7 @@ class LeRobotDatasetMetadata:
         robot_type: str | None = None,
         root: str | Path | None = None,
         use_videos: bool = True,
-        metadata_buffer_size: int = 10,
+        metadata_buffer_size: int = 1,
         chunks_size: int | None = None,
         data_files_size_in_mb: int | None = None,
         video_files_size_in_mb: int | None = None,

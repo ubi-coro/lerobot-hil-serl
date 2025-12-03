@@ -19,7 +19,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable, Literal
 
 import evdev
 import numpy as np
@@ -609,6 +609,7 @@ class DiscretizeGripperProcessorStep(ActionProcessorStep):
     min_pos: dict[str, float] = field(default_factory=dict)
     max_pos: dict[str, float] = field(default_factory=dict)
     threshold: float = 0.5
+    mode: Literal["state", "pulse"] = "state"
 
     def __post_init__(self):
         # Ensure we have consistent keys for indices and min positions
@@ -636,6 +637,9 @@ class DiscretizeGripperProcessorStep(ActionProcessorStep):
             The same tensor, with gripper entries replaced by the internal
             discretized gripper state.
         """
+        # Important: clone so we never modify an inference tensor in-place
+        out = action.clone()
+
         for name in self._robot_names:
             gripper_idx = self.gripper_idc[name]
             if gripper_idx is None:
@@ -644,19 +648,24 @@ class DiscretizeGripperProcessorStep(ActionProcessorStep):
             gi = int(gripper_idx)
 
             # Read current (continuous) gripper input
-            input_val = float(action[gi].item())
+            input_val = float(out[gi].item())
 
             # Update internal state based on thresholds
-            if input_val > self.threshold:
-                self._gripper_state[name] = self.max_pos[name]
-            elif input_val < -self.threshold:
-                self._gripper_state[name] = self.min_pos[name]
-            # else: within deadzone -> keep previous state
+            if self.mode == "pulse":
+                if input_val > self.threshold:
+                    self._gripper_state[name] = self.max_pos[name]
+                elif input_val < -self.threshold:
+                    self._gripper_state[name] = self.min_pos[name]
+            elif self.mode == "state":
+                if input_val > self.threshold:
+                    self._gripper_state[name] = self.max_pos[name]
+                elif input_val < self.threshold:
+                    self._gripper_state[name] = self.min_pos[name]
 
-            # Write discretized value back to action tensor
-            action[gi] = torch.as_tensor(self._gripper_state[name], dtype=action.dtype)
+            # Write discretized value back to the *output* tensor
+            out[gi] = out.new_tensor(self._gripper_state[name])
 
-        return action
+        return out
 
     def get_config(self) -> dict[str, Any]:
         return {

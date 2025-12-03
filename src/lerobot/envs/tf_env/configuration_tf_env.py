@@ -32,21 +32,6 @@ from lerobot.utils.constants import ACTION
 class TFRobotEnvConfig(RobotEnvConfig):
     """Configuration for the HILSerlRobotEnv environment."""
 
-    def __post_init__(self):
-        super().__post_init__()
-
-        # validate action scaling
-        action_dim = self.features[ACTION].shape[0]
-
-        if self.processor.task_frame.action_scale is None:
-            self.processor.task_frame.action_scale = 1.0
-
-        if isinstance(self.processor.task_frame.action_scale, float):
-            s = self.processor.task_frame.action_scale
-            self.processor.task_frame.action_scale = [s] * action_dim
-
-        assert action_dim == len(self.processor.task_frame.action_scale)
-
     @property
     def env_cls(self) -> Type[RobotEnvInterface]:
         return TaskFrameEnv
@@ -88,9 +73,10 @@ class TFRobotEnvConfig(RobotEnvConfig):
             AddFootswitchEventsAsInfoStep(mapping=self.processor.events.foot_switch_mapping),
             AddTeleopActionAsComplimentaryDataStep(teleoperators=teleoperators),  # this checks events and should come after Add*EventsAsInfoStep's
             SixDofVelocityInterventionActionProcessorStep(
+                teleoperators=teleoperators,
                 use_gripper=self.processor.gripper.use_gripper,
                 control_mask=self.processor.task_frame.control_mask,
-                terminate_on_success=self.processor.reset.terminate_on_success,
+                terminate_on_success=self.processor.reset.terminate_on_success
             ),
             DiscretizeGripperProcessorStep(
                 gripper_idc=self.gripper_idc,
