@@ -79,7 +79,7 @@
           </div>
         </li>
         
-        <!-- Demo Mode link - only visible when demo robot connected -->
+        <!-- Presentation link - only visible when demo robot connected -->
         <li class="nav-item mb-1" v-if="isDemoRobotConnected">
           <router-link 
             to="/demo" 
@@ -87,7 +87,7 @@
             active-class="active"
           >
             <i class="bi bi-rocket me-2"></i>
-            <span v-if="!sidebarCollapsed">Demo Mode</span>
+            <span v-if="!sidebarCollapsed">Presentation</span>
           </router-link>
         </li>
         
@@ -202,7 +202,8 @@ export default {
         'calibration': 'Calibration',
         'data-visualization': 'Data Visualization',
         'datasets': 'Dataset Management',
-        'policies': 'Policy Management'
+        'policies': 'Policy Management',
+        'demo': 'Presentation'
       };
       return titles[routeName] || 'LeRobot Interface';
     }

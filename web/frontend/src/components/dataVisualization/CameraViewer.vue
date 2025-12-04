@@ -1,7 +1,7 @@
 <template>
-  <div class="camera-viewer" :class="{ expanded: isExpanded }" ref="viewerRef">
-    <!-- Actions bar -->
-    <div class="viewer-actions d-flex justify-content-end align-items-center mb-2">
+  <div class="camera-viewer" :class="{ expanded: isExpanded, 'modal-mode': modalMode }" ref="viewerRef">
+    <!-- Actions bar (hidden in modal mode) -->
+    <div v-if="!modalMode" class="viewer-actions d-flex justify-content-end align-items-center mb-2">
       <button class="btn btn-sm" :class="isExpanded ? 'btn-outline-light' : 'btn-outline-secondary'" @click="toggleExpanded">
         {{ isExpanded ? 'Collapse' : 'Expand' }}
       </button>
@@ -73,6 +73,13 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRobotStore } from '@/stores/robotStore';
+
+const props = defineProps({
+  modalMode: {
+    type: Boolean,
+    default: false
+  }
+});
 
 const robotStore = useRobotStore();
 const isExpanded = ref(false);
@@ -289,5 +296,80 @@ const toggleFullscreen = async () => {
   .camera-feed, .camera-placeholder {
     min-height: 200px;
   }
+}
+
+/* Modal mode: 2x2 grid that fills available space without scrolling */
+.camera-viewer.modal-mode {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.camera-viewer.modal-mode > .row {
+  display: grid !important;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 0.5rem;
+  flex: 1;
+  margin: 0 !important;
+  padding: 0 !important;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.camera-viewer.modal-mode > .row > div {
+  margin: 0 !important;
+  padding: 0 !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.camera-viewer.modal-mode .card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #1a1a1a;
+  border-color: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.camera-viewer.modal-mode .card-header {
+  padding: 0.35rem 0.5rem;
+  font-size: 0.75rem;
+  background: rgba(0, 0, 0, 0.4);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #e5e7eb;
+  flex-shrink: 0;
+}
+
+.camera-viewer.modal-mode .card-body {
+  flex: 1;
+  display: flex;
+  padding: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.camera-viewer.modal-mode .camera-feed,
+.camera-viewer.modal-mode .camera-placeholder {
+  min-height: 0 !important;
+  height: 100%;
+  width: 100%;
+}
+
+.camera-viewer.modal-mode .camera-feed img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.camera-viewer.modal-mode .no-cameras {
+  flex: 1;
+  background: #1a1a1a;
+  color: #9ca3af;
 }
 </style>

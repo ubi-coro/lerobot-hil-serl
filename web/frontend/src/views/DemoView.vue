@@ -2,7 +2,7 @@
   <div class="demo-view">
     <div class="demo-card">
       <div class="demo-header">
-        <h1>🎬 Demo Mode</h1>
+        <h1>🎤 Presentation Mode</h1>
         <p class="subtitle">Run the pre-trained policy on the robot</p>
       </div>
       
@@ -52,7 +52,7 @@
           :disabled="!canStart || starting"
         >
           <span v-if="starting">Starting...</span>
-          <span v-else>▶ Start Demo</span>
+          <span v-else>▶ Start Presentation</span>
         </button>
         
         <!-- Move robots to user-defined start position -->
@@ -72,7 +72,7 @@
           class="btn-stop" 
           @click="stopDemo"
         >
-          ⬛ Stop Demo
+          ⬛ Stop Presentation
         </button>
       </div>
       
@@ -81,7 +81,7 @@
       </div>
       
       <div class="demo-note" v-if="!status.active">
-        <p>💡 No data will be saved in demo mode. The robot will execute the trained policy autonomously.</p>
+        <p>💡 No data will be saved in presentation mode. The robot will execute the trained policy autonomously.</p>
       </div>
     </div>
   </div>
@@ -281,61 +281,32 @@ function stopDemo() {
   status.value.active = false;
 }
 
-// Move robots to previously recorded start positions
-function moveToStartPosition() {
+// Move robots to measured start positions (defined in backend robot.py)
+async function moveToStartPosition() {
   if (!canStart.value || movingToStart.value) return;
-
-  const rawSocket = toRaw(robotStore.socket);
-  if (!rawSocket) {
-    error.value = 'Socket unavailable - please refresh the page';
-    return;
-  }
-  if (!rawSocket.connected) {
-    error.value = 'Socket not connected - please wait and try again';
-    return;
-  }
-
-  // Start position source: localStorage key 'lerobot_start_positions'
-  // Expected shape:
-  // {
-  //   "left": {"waist.pos": ..., "shoulder.pos": ..., ...},
-  //   "right": {"waist.pos": ..., "shoulder.pos": ..., ...},
-  //   "leaders": {"left": {...}, "right": {...}} // optional
-  // }
-  let startPositions = null;
-  try {
-    const raw = localStorage.getItem('lerobot_start_positions');
-    if (raw) {
-      startPositions = JSON.parse(raw);
-    }
-  } catch (e) {
-    // ignore parse errors
-  }
-
-  if (!startPositions || (!startPositions.left && !startPositions.right)) {
-    error.value = 'No start positions found. Save positions under localStorage key "lerobot_start_positions".';
-    return;
-  }
 
   movingToStart.value = true;
   error.value = '';
 
-  const teleopConfig = robotStore.teleoperationConfig || {};
-  const operationMode = teleopConfig.operationMode || 'bimanual';
+  try {
+    const response = await fetch('/api/robot/start-position', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        duration_seconds: 5.0,
+        move_leaders: true
+      })
+    });
 
-  const payload = {
-    operation_mode: operationMode,
-    start_positions: startPositions,
-  };
-
-  // Emit a Socket.IO event the backend can implement
-  // Backend handler name: 'move_to_start_positions'
-  rawSocket.emit('move_to_start_positions', payload);
-
-  // Provide optimistic UI feedback; backend can emit confirmations
-  setTimeout(() => {
+    const data = await response.json();
+    if (!response.ok) {
+      error.value = data.detail || 'Failed to move to start position';
+    }
+  } catch (e) {
+    error.value = `Error moving to start position: ${e.message}`;
+  } finally {
     movingToStart.value = false;
-  }, 2000);
+  }
 }
 </script>
 

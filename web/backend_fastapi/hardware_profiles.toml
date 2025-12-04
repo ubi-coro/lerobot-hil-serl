@@ -107,7 +107,7 @@ use_aloha2_gripper_servo = true
 # cameras, processors, etc.).
 #
 # "teleop"  entries are used for manual teleoperation / recording.
-# "demo"    entries are used for policy-driven demos or evaluation runs.
+# "demo"    entries (internally) are used for presentation/evaluation runs.
 # ------------------------------------------------------------------------
 
 [gui_map.teleop]
@@ -119,16 +119,16 @@ right = "aloha_bimanual_lemgo_v2_right"
 bimanual = "aloha_bimanual_lemgo_v2_demo"
 
 # ------------------------------------------------------------------------
-# Demo Mode Defaults
+# Presentation Mode Defaults
 #
-# When the user connects with a "demo" experiment type, these defaults
-# are used to pre-fill the Replay/Demo form. No dataset is saved in
-# demo mode (demo_mode=true).
+# When the user connects with a presentation (internally 'demo') experiment type,
+# these defaults are used to pre-fill the Replay/Presentation form. No dataset is saved in
+# presentation mode (demo_mode=true).
 # ------------------------------------------------------------------------
 
 [demo_defaults.aloha_bimanual_lemgo_v2_demo]
 policy_path = "/mnt/DATA/lerobot/aloha_model/hoodie_folding/20251128_hoodie_folding_lemgo_act/checkpoints/last/pretrained_model"
-task_description = "Hoodie Folding Lemgo Demo"
+task_description = "Hoodie Folding Lemgo Presentation"
 repo_id = "hoodie_folding/eval_20251117_hoodie_folding_lemgo_act"
 root = "/mnt/DATA/lerobot/aloha_data/hoodie_folding/eval_20251117_hoodie_folding_lemgo_act"
 fps = 30

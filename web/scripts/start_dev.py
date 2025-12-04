@@ -209,7 +209,7 @@ def print_banner():
     banner = f"""
 {Colors.BOLD}{Colors.CYAN}
 ╔══════════════════════════════════════════════════════════════╗
-║                 🤖 LeRobot Web GUI Development                ║
+║                    Web GUI Development                       ║
 ║                     FastAPI Launcher                         ║
 ╚══════════════════════════════════════════════════════════════╝
 {Colors.RESET}
@@ -243,7 +243,6 @@ def print_status(backend_url: str, frontend_url: str):
 - Backend logs show in this terminal
 - Frontend auto-reloads on file changes
 - Use {Colors.BOLD}Ctrl+C{Colors.RESET} to stop both services
-- For Flask backend, use start_dev_advanced.py --backend flask
 
 {Colors.GREEN}🚀 Ready for FastAPI development!{Colors.RESET}
 """

@@ -46,8 +46,8 @@
                   v-model="teleoperationConfig.showCameras"
                   class="config-checkbox"
                 />
-                Show Camera Feeds
-                <small>Streams ALOHA cameras into the web UI</small>
+                Enable Camera Streaming
+                <small>Stream camera feeds to the browser during teleoperation</small>
               </label>
               
               <label class="checkbox-label disabled">
@@ -79,6 +79,13 @@
           <div v-if="isOperating" class="active-controls">
             <button @click="stopTeleoperation" class="btn btn-warning btn-lg">
               <i class="bi bi-stop-circle me-2"></i>Stop Teleoperation
+            </button>
+            <button 
+              v-if="teleoperationConfig.showCameras" 
+              @click="showCameraModal = true" 
+              class="btn btn-info"
+            >
+              <i class="bi bi-camera-video me-2"></i>View Cameras
             </button>
             <button @click="emergencyStop" class="btn btn-danger">
               <i class="bi bi-exclamation-triangle me-2"></i>Emergency Stop
@@ -119,11 +126,12 @@
       </div>
     </div>
 
-    <!-- Camera Feeds -->
-    <div v-if="isOperating && teleoperationConfig.showCameras" class="camera-section">
-      <h3><i class="bi bi-camera-video me-2"></i>Camera Feeds</h3>
-      <CameraViewer />
-    </div>
+    <!-- Camera Modal (appears when cameras enabled during teleoperation) -->
+    <CameraModal
+      :open="showCameraModal"
+      @update:open="showCameraModal = $event"
+      @close="showCameraModal = false"
+    />
   </div>
 </template>
 
@@ -131,7 +139,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRobotStore } from '@/stores/robotStore'
 import robotApi from '@/services/api/robotApi'
-import CameraViewer from '@/components/dataVisualization/CameraViewer.vue'
+import CameraModal from '@/components/CameraModal.vue'
 
 const robotStore = useRobotStore()
 // Removed storeToRefs usage (not imported) – we access reactive store state directly.
@@ -141,6 +149,7 @@ const isStarting = ref(false)
 const isOperating = ref(false)
 const operationStartTime = ref(null)
 const operationDuration = ref(0)
+const showCameraModal = ref(false)
 const teleopStatus = computed(() => robotStore.status?.teleoperation || {})
 
 // Teleoperation configuration
@@ -160,6 +169,13 @@ watch(() => teleoperationConfig.value.showCameras, (newValue) => {
 watch(() => teleoperationConfig.value.displayData, (newValue) => {
   if (newValue) {
     teleoperationConfig.value.showCameras = false
+  }
+})
+
+// Close camera modal when teleoperation stops
+watch(() => isOperating.value, (operating) => {
+  if (!operating) {
+    showCameraModal.value = false
   }
 })
 
@@ -212,6 +228,11 @@ const startTeleoperation = async () => {
     
     isOperating.value = true
     operationStartTime.value = Date.now()
+    
+    // Auto-open camera modal if camera streaming was enabled
+    if (teleoperationConfig.value.showCameras) {
+      showCameraModal.value = true
+    }
     
     console.log('✅ Teleoperation started successfully:', response.data)
     

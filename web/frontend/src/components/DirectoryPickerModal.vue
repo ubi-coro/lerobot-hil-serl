@@ -27,7 +27,7 @@
       </div>
       <div class="dm-body" v-if="!loading">
         <ul class="folder-list" @dblclick.prevent>
-          <li v-for="f in folders" :key="f.path" @click="select(f)" :class="{ selected: selectedPath===f.path }" @dblclick="enter(f)">
+          <li v-for="f in folders" :key="f.path" @click="select(f)" :class="{ selected: selectedPath===f.path }" @dblclick="enter(f)" :title="f.path">
             <span class="icon">📁</span>
             <span class="name">{{ f.name }}</span>
           </li>

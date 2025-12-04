@@ -19,7 +19,7 @@
           <div class="field root-with-browse">
             <label>Root Path *</label>
             <div class="root-row">
-              <input v-model="cfg.root" :disabled="isActive" placeholder="/data/my-datasets" @input="onChange" class="root-input" />
+              <input v-model="cfg.root" :disabled="isActive" placeholder="/data/my-datasets" @input="onChange" class="root-input" :title="cfg.root" />
               <button type="button" class="browse-btn icon-only" @click="openBrowse" :disabled="isActive" aria-label="Browse for folder" title="Browse for folder">
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
                   <path d="M10 4l2 2h8a2 2 0 0 1 2 2v1H2V6a2 2 0 0 1 2-2h6zm12 6v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-8h20z" />

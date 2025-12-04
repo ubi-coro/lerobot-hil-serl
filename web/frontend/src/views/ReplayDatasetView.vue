@@ -7,10 +7,10 @@
       Status shows: Warmup → Recording (Policy) → Resetting → Processing → Pushing (optional).
     </h6>
     
-    <!-- Demo Config Loaded Banner -->
+    <!-- Presentation Config Loaded Banner -->
     <div v-if="demoConfig" class="demo-banner">
       <div class="demo-info">
-        <span class="demo-label">✓ Demo configuration loaded</span>
+        <span class="demo-label">✓ Presentation configuration loaded</span>
         <span class="demo-task">{{ demoConfig.task_description }}</span>
       </div>
     </div>
@@ -31,6 +31,7 @@
                   @input="onChange" 
                   placeholder="/path/to/model/checkpoints/last/pretrained_model"
                   :disabled="isActive"
+                  :title="cfg.policyPath"
                 />
                 <button 
                   type="button" 
@@ -68,6 +69,7 @@
                   @input="onChange" 
                   placeholder="/media/user/DATA/eval_datasets/my_task"
                   :disabled="isActive"
+                  :title="cfg.root"
                 />
                 <button 
                   type="button" 

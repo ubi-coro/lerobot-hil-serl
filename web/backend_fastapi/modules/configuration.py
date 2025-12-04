@@ -19,7 +19,7 @@ from typing import Optional, Dict, Any, List, Union
 import logging
 import json
 
-# Import ExperimentConfigMapper for demo config
+# Import ExperimentConfigMapper for presentation config (internally named 'demo')
 try:
     from ..experiment_config_mapper import ExperimentConfigMapper
 except ImportError:
@@ -632,21 +632,21 @@ def _get_file_size_kb(file_path: str) -> float:
 
 
 # ============================================================================
-# Demo Mode Configuration
+# Presentation Mode Configuration (API keeps 'demo' path for compatibility)
 # ============================================================================
 
 @router.get("/demo-config/{operation_mode}", response_model=ApiResponse)
 async def get_demo_config(operation_mode: str):
     """
-    Get pre-configured demo settings for a given operation mode.
+    Get pre-configured presentation settings for a given operation mode.
     
-    When connecting with a demo-enabled experiment (e.g., aloha_bimanual_lemgo_v2_demo),
+    When connecting with a presentation-enabled experiment (e.g., aloha_bimanual_lemgo_v2_demo),
     this endpoint returns all the pre-configured settings needed for policy evaluation
     without requiring user input.
     
     Returns:
     - policy_path: Path to the pre-trained policy
-    - task_description: Description of the demo task
+    - task_description: Description of the presentation task
     - fps, episode_time_s, reset_time_s, num_episodes: Timing settings
     - interactive: Whether interventions are enabled
     """
@@ -656,21 +656,21 @@ async def get_demo_config(operation_mode: str):
         if demo_config is None:
             return ApiResponse(
                 status="error",
-                message=f"No demo configuration found for operation mode: {operation_mode}",
+                message=f"No presentation configuration found for operation mode: {operation_mode}",
                 data={"available_modes": ["bimanual", "left", "right"]}
             )
         
         return ApiResponse(
             status="success",
-            message="Demo configuration retrieved",
+            message="Presentation configuration retrieved",
             data=demo_config
         )
         
     except Exception as e:
-        logger.error(f"Failed to get demo config: {e}")
+        logger.error(f"Failed to get presentation config: {e}")
         return ApiResponse(
             status="error",
-            message=f"Failed to get demo configuration: {str(e)}",
+            message=f"Failed to get presentation configuration: {str(e)}",
             data=None
         )
 
@@ -678,9 +678,9 @@ async def get_demo_config(operation_mode: str):
 @router.get("/demo-available", response_model=ApiResponse)
 async def get_available_demos():
     """
-    Get list of all available demo configurations.
+    Get list of all available presentation configurations.
     
-    Returns a list of operation modes that have demo configurations available.
+    Returns a list of operation modes that have presentation configurations available.
     """
     try:
         available_demos = {}
@@ -691,7 +691,7 @@ async def get_available_demos():
         
         return ApiResponse(
             status="success",
-            message=f"Found {len(available_demos)} demo configuration(s)",
+            message=f"Found {len(available_demos)} presentation configuration(s)",
             data={
                 "demos": available_demos,
                 "count": len(available_demos)
@@ -699,10 +699,10 @@ async def get_available_demos():
         )
         
     except Exception as e:
-        logger.error(f"Failed to get available demos: {e}")
+        logger.error(f"Failed to get available presentation configs: {e}")
         return ApiResponse(
             status="error",
-            message=f"Failed to get available demos: {str(e)}",
+            message=f"Failed to get available presentation configurations: {str(e)}",
             data=None
         )
 

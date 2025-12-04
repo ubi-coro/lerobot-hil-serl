@@ -13,10 +13,10 @@
           <div class="robot-type-picker" v-if="!isConnected">
             <label class="rt-label">Robot Type</label>
             <select v-model="selectedType" @change="onTypeChange">
-              <option value="aloha_bimanual_demo">ALOHA Bimanual Demonstration</option>
-              <option value="aloha_bimanual">ALOHA Bimanual</option>
-              <option value="aloha_right">ALOHA Single Right</option>
-              <option value="aloha_left">ALOHA Single Left</option>
+              <option value="aloha_bimanual_demo">T-IRMA Bimanual Presentation</option>
+              <option value="aloha_bimanual">T-IRMA Bimanual Lab Mode</option>
+              <option value="aloha_right">T-IRMA Single Right</option>
+              <option value="aloha_left">T-IRMA Single Left</option>
               <option value="koch" disabled>Koch</option>
               <option value="koch_bimanual" disabled>Koch Bimanual</option>
               <option value="so101" disabled>So101</option>
@@ -74,9 +74,10 @@ const error = ref('');
 const errorTips = ref([]);
 
 const ROBOT_LABELS = {
-  aloha_bimanual: 'ALOHA Bimanual',
-  aloha_left: 'ALOHA Single Left',
-  aloha_right: 'ALOHA Single Right'
+  aloha_bimanual_demo: 'T-IRMA Bimanual Presentation',
+  aloha_bimanual: 'T-IRMA Bimanual Lab Mode',
+  aloha_left: 'T-IRMA Single Left',
+  aloha_right: 'T-IRMA Single Right'
 };
 
 const selectedType = ref(robotStore.robotType || 'aloha_bimanual');

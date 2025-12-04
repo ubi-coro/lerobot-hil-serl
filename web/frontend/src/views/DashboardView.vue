@@ -3,7 +3,7 @@
     <!-- Hero Section -->
     <div class="hero-section">
       <h1 class="hero-title">Robot Control Center</h1>
-      <p class="hero-subtitle">Professional bimanual robot control and data collection</p>
+      <p class="hero-subtitle">Professional robot control and data collection</p>
     </div>
     
   <!-- Global Robot Connect Panel -->
@@ -27,10 +27,10 @@
         </div>
       </div>
       
-  <!-- Demo Mode moved to center column -->
+    <!-- Presentation moved to center column -->
   <div class="operation-card secondary demo-mode" v-if="isDemoRobotConnected" @click="startDemo" :class="{ disabled: !canOperate }">
         <div class="card-icon">🚀</div>
-        <h3>Demo Mode</h3>
+      <h3>Presentation</h3>
         <p>One-click policy demonstration</p>
         <div class="card-features">
           <span>• Pre-configured settings</span>
