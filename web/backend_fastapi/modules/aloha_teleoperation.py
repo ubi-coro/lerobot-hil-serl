@@ -435,8 +435,10 @@ def aloha_teleoperation_worker(config: AlohaConfig):
                             if w > 640:
                                 scale = 640 / w
                                 frame_data = cv2.resize(frame_data, (640, int(h * scale)))
+                            # Convert RGB to BGR for JPEG encoding (cameras use RGB, OpenCV expects BGR)
+                            frame_bgr = cv2.cvtColor(frame_data, cv2.COLOR_RGB2BGR)
                             # Encode as JPEG
-                            ok, buf = cv2.imencode('.jpg', frame_data, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                            ok, buf = cv2.imencode('.jpg', frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
                             if ok:
                                 b64 = 'data:image/jpeg;base64,' + base64.b64encode(buf).decode('utf-8')
                                 shared.emit_threadsafe('camera_frame', {

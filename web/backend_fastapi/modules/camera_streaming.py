@@ -47,7 +47,9 @@ def _encode_frame(frame: np.ndarray, resize: Optional[Tuple[int, int]]) -> Optio
         if resize:
             w, h = resize
             frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
-        ok, buf = cv2.imencode('.jpg', frame, _JPEG_PARAMS)
+        # Convert RGB to BGR for JPEG encoding (cameras use RGB, OpenCV expects BGR)
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        ok, buf = cv2.imencode('.jpg', frame_bgr, _JPEG_PARAMS)
         if not ok:
             return None
         return 'data:image/jpeg;base64,' + base64.b64encode(buf).decode('utf-8')
