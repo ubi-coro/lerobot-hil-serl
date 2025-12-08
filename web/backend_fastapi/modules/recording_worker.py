@@ -98,6 +98,7 @@ class RecordControlConfig:
     policyPath: Optional[str] = None  # Path to pretrained_model for replay mode
     operation_mode: str = "bimanual"
     interactive: bool = False
+    show_cameras: bool = False  # Stream cameras to frontend during recording/demo
     # Optional future fields we may ignore safely
     save_eval: bool = True
 
@@ -348,9 +349,10 @@ def start_recording_via_api(config: Dict[str, Any]):
         root=config.get("root"),
         play_sounds=play_sounds,
         mode=config.get("mode", "recording"),
-        policyPath=config.get("policyPath"),
+        policyPath=config.get("policyPath") or config.get("policy_path"),  # Accept both key names
         operation_mode=normalized_mode,
         interactive=bool(config.get("interactive", False)),
+        show_cameras=bool(config.get("show_cameras", False)),
     )
 
     cfg.num_episodes = cfg.num_episodes or 1
@@ -406,6 +408,7 @@ def start_recording_via_api(config: Dict[str, Any]):
         use_amp = False
         last_info: Dict[str, Any] = {}
         borrowed_cameras = None
+        stream_cameras_enabled = False  # Track if camera streaming was started
         
         try:
             # Borrow cameras from robot module if available
@@ -422,6 +425,22 @@ def start_recording_via_api(config: Dict[str, Any]):
             except Exception as e:
                 logger.debug(f"Could not borrow cameras from robot module: {e}")
                 borrowed_cameras = None
+            
+            # Start camera streaming for frontend display if enabled
+            stream_cameras_enabled = cfg.show_cameras and borrowed_cameras
+            if stream_cameras_enabled:
+                try:
+                    from . import camera_streaming
+                    camera_ids = list(borrowed_cameras.keys()) if borrowed_cameras else None
+                    # Use a fake "robot" with the borrowed cameras dict
+                    class _CameraHolder:
+                        def __init__(self, cams):
+                            self.cameras = cams
+                    camera_streaming.start_streams(_CameraHolder(borrowed_cameras), camera_ids=camera_ids, fps=12)
+                    logger.info(f"Started camera streaming for recording: {camera_ids}")
+                except Exception as e:
+                    logger.warning(f"Failed to start camera streaming: {e}")
+                    stream_cameras_enabled = False
             
             root_path = Path(cfg.root) if cfg.root else None
             if root_path and root_path.exists() and not cfg.resume:
@@ -791,6 +810,15 @@ def start_recording_via_api(config: Dict[str, Any]):
             
             # Return borrowed cameras to robot module
             if borrowed_cameras:
+                # Stop camera streaming first if it was enabled
+                if stream_cameras_enabled:
+                    try:
+                        from . import camera_streaming
+                        camera_streaming.stop_all_streams()
+                        logger.info("Stopped camera streaming from recording")
+                    except Exception as e:
+                        logger.warning(f"Failed to stop camera streaming: {e}")
+                
                 try:
                     from . import robot as robot_module
                     robot_module.return_cameras("recording_worker")

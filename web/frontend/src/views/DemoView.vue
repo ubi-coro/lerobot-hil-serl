@@ -31,6 +31,10 @@
           <input type="checkbox" v-model="allowInterventions" />
           <span>Allow Interventions (teleop override during policy)</span>
         </label>
+        <label class="option">
+          <input type="checkbox" v-model="showCamerasOnStart" />
+          <span>Show Camera Feeds when running</span>
+        </label>
       </div>
       
       <div class="demo-status" v-if="status.active">
@@ -74,6 +78,15 @@
         >
           ⬛ Stop Presentation
         </button>
+        
+        <!-- View Cameras button when running -->
+        <button 
+          v-if="status.active" 
+          class="btn-cameras"
+          @click="showCameraModal = true"
+        >
+          📹 View Cameras
+        </button>
       </div>
       
       <div class="demo-error" v-if="error">
@@ -84,12 +97,26 @@
         <p>💡 No data will be saved in presentation mode. The robot will execute the trained policy autonomously.</p>
       </div>
     </div>
+    
+    <!-- Demo Camera Modal with Progress -->
+    <DemoCameraModal
+      :open="showCameraModal"
+      :phase="status.phase"
+      :current-episode="status.episode_index + 1"
+      :total-episodes="numEpisodes"
+      :phase-elapsed="status.phase_elapsed_s"
+      :phase-total="status.phase_total_s"
+      @update:open="showCameraModal = $event"
+      @close="showCameraModal = false"
+      @stop="stopDemo"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, toRaw } from 'vue';
+import { ref, computed, onMounted, onUnmounted, toRaw, watch } from 'vue';
 import { useRobotStore } from '@/stores/robotStore';
+import DemoCameraModal from '@/components/DemoCameraModal.vue';
 
 const robotStore = useRobotStore();
 
@@ -122,6 +149,8 @@ const policyPathShort = computed(() => {
 
 // State
 const allowInterventions = ref(true);
+const showCamerasOnStart = ref(true);
+const showCameraModal = ref(false);
 const starting = ref(false);
 const movingToStart = ref(false);
 const error = ref('');
@@ -131,6 +160,15 @@ const status = ref({
   phase: 'idle',
   phase_elapsed_s: 0,
   phase_total_s: 0
+});
+
+// Auto-open camera modal when presentation starts (if option enabled)
+watch(() => status.value.active, (active) => {
+  if (active && showCamerasOnStart.value) {
+    showCameraModal.value = true;
+  } else if (!active) {
+    showCameraModal.value = false;
+  }
 });
 
 // Computed
@@ -264,7 +302,8 @@ function startDemo() {
     policy_path: policyPath.value,
     interactive: allowInterventions.value,
     operation_mode: operationMode,
-    resume: true
+    resume: true,
+    show_cameras: showCamerasOnStart.value,  // Enable camera streaming for frontend display
   };
   
   console.log('Emitting start_recording with payload:', payload);
@@ -487,6 +526,25 @@ async function moveToStartPosition() {
 
 .btn-stop:hover {
   background: #dc2626;
+}
+
+.btn-cameras {
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border: none;
+  border-radius: 0.75rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  color: white;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+  margin-left: 0.75rem;
+}
+
+.btn-cameras:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(59, 130, 246, 0.5);
 }
 
 .demo-error {

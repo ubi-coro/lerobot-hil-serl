@@ -127,7 +127,7 @@ bimanual = "aloha_bimanual_lemgo_v2_demo"
 # ------------------------------------------------------------------------
 
 [demo_defaults.aloha_bimanual_lemgo_v2_demo]
-policy_path = "/mnt/DATA/lerobot/aloha_model/hoodie_folding/20251128_hoodie_folding_lemgo_act/checkpoints/last/pretrained_model"
+policy_path = "/mnt/DATA/lerobot/aloha_model/hoodie_folding/20251122_hoodie_folding_lemgo_act/checkpoints/last/pretrained_model"
 task_description = "Hoodie Folding Lemgo Presentation"
 repo_id = "hoodie_folding/eval_20251117_hoodie_folding_lemgo_act"
 root = "/mnt/DATA/lerobot/aloha_data/hoodie_folding/eval_20251117_hoodie_folding_lemgo_act"
@@ -139,4 +139,4 @@ interactive = true
 
 # Legacy policy paths section (kept for backward compatibility)
 [gui_defaults.policy_paths]
-aloha_bimanual_lemgo_v2_demo = "/mnt/DATA/lerobot/aloha_model/hoodie_folding/20251128_hoodie_folding_lemgo_act/checkpoints/last/pretrained_model"
+aloha_bimanual_lemgo_v2_demo = "/mnt/DATA/lerobot/aloha_model/hoodie_folding/20251122_hoodie_folding_lemgo_act/checkpoints/last/pretrained_model"

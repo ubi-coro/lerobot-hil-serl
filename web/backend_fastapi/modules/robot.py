@@ -146,7 +146,7 @@ HOME_LEADER = {
         "gripper.pos": 0.5985,
         "shoulder.pos": -1.7791,
         "waist.pos": -0.0176,
-        "wrist_angle.pos": 0.2279,
+        "wrist_angle.pos": 0.0,
         "wrist_rotate.pos": -0.1496,
     },
     "right": {
@@ -155,7 +155,7 @@ HOME_LEADER = {
         "gripper.pos": 0.7675,
         "shoulder.pos": -1.8896,
         "waist.pos": -0.0100,
-        "wrist_angle.pos": 0.3030,
+        "wrist_angle.pos": 0.0,
         "wrist_rotate.pos": 0.0176,
     },
 }
@@ -190,7 +190,7 @@ START_LEADER = {
         "gripper.pos": 0.5985,
         "shoulder.pos": -1.3096,
         "waist.pos": 0.0575,
-        "wrist_angle.pos": 0.4826,
+        "wrist_angle.pos": 0.0,
         "wrist_rotate.pos": -0.0361,
     },
     "right": {
@@ -199,7 +199,7 @@ START_LEADER = {
         "gripper.pos": 0.7580,
         "shoulder.pos": -1.2743,
         "waist.pos": -0.0269,
-        "wrist_angle.pos": 0.3583,
+        "wrist_angle.pos": 0.0,
         "wrist_rotate.pos": 0.0453,
     },
 }
@@ -283,6 +283,59 @@ def resolved_configs() -> Dict[str, Any]:
         "teleop_cfg": _robot_state.get("teleop_cfg"),
         "runtime": _robot_state.get("runtime"),
     }
+
+
+def _interpolate_wrist_first(
+    start: Dict[str, float],
+    target: Dict[str, float],
+    steps: int,
+    send_fn,
+) -> None:
+    """Two-stage interpolation that clears wrist_angle before moving other joints."""
+    import time
+
+    if steps < 1:
+        steps = 1
+
+    wrist_keys = [k for k in target if "wrist_angle" in k]
+    if not wrist_keys:
+        for i in range(steps):
+            alpha = (i + 1) / steps
+            payload = {
+                k: start.get(k, target[k]) + (target[k] - start.get(k, target[k])) * alpha
+                for k in target
+            }
+            send_fn(payload)
+            time.sleep(1.0 / 30.0)
+        send_fn(target)
+        return
+
+    stage1_steps = max(1, steps // 2)
+    stage2_steps = max(1, steps - stage1_steps)
+    baseline = {k: start.get(k, target[k]) for k in target}
+
+    for i in range(stage1_steps):
+        alpha = (i + 1) / stage1_steps
+        payload = dict(baseline)
+        for k in wrist_keys:
+            start_val = baseline[k]
+            payload[k] = start_val + (target[k] - start_val) * alpha
+        send_fn(payload)
+        time.sleep(1.0 / 30.0)
+
+    for i in range(stage2_steps):
+        alpha = (i + 1) / stage2_steps
+        payload = {}
+        for k in target:
+            if k in wrist_keys:
+                payload[k] = target[k]
+            else:
+                start_val = baseline[k]
+                payload[k] = start_val + (target[k] - start_val) * alpha
+        send_fn(payload)
+        time.sleep(1.0 / 30.0)
+
+    send_fn(target)
 
 
 @router.post("/connect", response_model=ApiResponse)
@@ -564,14 +617,7 @@ async def move_robot_home(request: HomeRequest):
                     except Exception:
                         start = {}
                     start = {k: start.get(k, target.get(k, 0.0)) for k in target}
-
-                    for i in range(steps):
-                        alpha = (i + 1) / steps
-                        payload = {k: start[k] + (target[k] - start[k]) * alpha for k in target}
-                        teleop.send_feedback(payload)
-                        time.sleep(1.0 / 30.0)
-                    # Final latch
-                    teleop.send_feedback(target)
+                    _interpolate_wrist_first(start, target, steps, teleop.send_feedback)
 
                 logger.info("Leader homing via reused teleops complete.")
             except Exception as e:
@@ -627,19 +673,12 @@ async def move_robot_home(request: HomeRequest):
                     leader_start_pos_local = {k: leader_current_pos_local.get(k, 0.0) for k in leader_target_pos_local.keys()}
 
                     logger.info(f"Moving leader to Home position over {request.duration_seconds}s (fresh teleop)...")
-                    for i in range(steps):
-                        alpha = (i + 1) / steps
-                        interp_action = {}
-                        for k in leader_target_pos_local.keys():
-                            start_val = leader_start_pos_local.get(k, 0.0)
-                            target_val = leader_target_pos_local[k]
-                            interp_action[k] = start_val + (target_val - start_val) * alpha
-                        leader_local.send_feedback(interp_action)
-                        time.sleep(1.0 / 30.0)
-                    try:
-                        leader_local.send_feedback(leader_target_pos_local)
-                    except Exception:
-                        logger.debug("Final leader target send failed (already at target?)", exc_info=True)
+                    _interpolate_wrist_first(
+                        leader_start_pos_local,
+                        leader_target_pos_local,
+                        steps,
+                        leader_local.send_feedback,
+                    )
 
                     logger.info("Leader homing complete. Disconnecting leader (fresh teleop).")
                     leader_local.disconnect()
@@ -807,12 +846,7 @@ async def move_robot_to_start(request: StartPositionRequest):
                     cur = {}
                 start = {k: cur.get(k, target.get(k, 0.0)) for k in target}
                 logger.info("Moving %s to Start over %d steps...", teleop_name, steps)
-                for i in range(steps):
-                    alpha = (i + 1) / steps
-                    payload = {k: start[k] + (target[k] - start[k]) * alpha for k in target}
-                    teleop_obj.send_feedback(payload)
-                    time.sleep(1.0 / 30.0)
-                teleop_obj.send_feedback(target)
+                _interpolate_wrist_first(start, target, steps, teleop_obj.send_feedback)
                 logger.info("Leader %s moved to Start position.", teleop_name)
 
             if reused:
