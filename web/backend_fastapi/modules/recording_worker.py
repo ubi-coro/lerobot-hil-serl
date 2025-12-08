@@ -97,7 +97,6 @@ class RecordControlConfig:
     mode: str = "recording"  # "recording" or "replay"
     policyPath: Optional[str] = None  # Path to pretrained_model for replay mode
     operation_mode: str = "bimanual"
-    interactive: bool = False
     show_cameras: bool = False  # Stream cameras to frontend during recording/demo
     # Optional future fields we may ignore safely
     save_eval: bool = True
@@ -351,7 +350,6 @@ def start_recording_via_api(config: Dict[str, Any]):
         mode=config.get("mode", "recording"),
         policyPath=config.get("policyPath") or config.get("policy_path"),  # Accept both key names
         operation_mode=normalized_mode,
-        interactive=bool(config.get("interactive", False)),
         show_cameras=bool(config.get("show_cameras", False)),
     )
 
@@ -721,7 +719,7 @@ def start_recording_via_api(config: Dict[str, Any]):
                         display_data=cfg.display_data,
                         device=str(policy_device),
                         use_amp=use_amp,
-                        interactive=cfg.interactive,
+                        interactive=demo_mode,
                     )
 
                     if last_info.get(TeleopEvents.RERECORD_EPISODE, False):

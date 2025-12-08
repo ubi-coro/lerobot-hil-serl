@@ -28,10 +28,6 @@
       
       <div class="demo-options">
         <label class="option">
-          <input type="checkbox" v-model="allowInterventions" />
-          <span>Allow Interventions (teleop override during policy)</span>
-        </label>
-        <label class="option">
           <input type="checkbox" v-model="showCamerasOnStart" />
           <span>Show Camera Feeds when running</span>
         </label>
@@ -79,9 +75,9 @@
           ⬛ Stop Presentation
         </button>
         
-        <!-- View Cameras button when running -->
+        <!-- View Cameras button when running (only if camera streaming is enabled) -->
         <button 
-          v-if="status.active" 
+          v-if="status.active && showCamerasOnStart" 
           class="btn-cameras"
           @click="showCameraModal = true"
         >
@@ -148,7 +144,6 @@ const policyPathShort = computed(() => {
 });
 
 // State
-const allowInterventions = ref(true);
 const showCamerasOnStart = ref(true);
 const showCameraModal = ref(false);
 const starting = ref(false);
@@ -207,7 +202,6 @@ async function loadDemoConfig() {
       const data = await response.json();
       if (data.status === 'success' && data.data) {
         demoConfig.value = { ...demoConfig.value, ...data.data };
-        allowInterventions.value = data.data.interactive ?? true;
       }
     }
   } catch (e) {
@@ -300,7 +294,6 @@ function startDemo() {
     video: false,
     push_to_hub: false,
     policy_path: policyPath.value,
-    interactive: allowInterventions.value,
     operation_mode: operationMode,
     resume: true,
     show_cameras: showCamerasOnStart.value,  // Enable camera streaming for frontend display

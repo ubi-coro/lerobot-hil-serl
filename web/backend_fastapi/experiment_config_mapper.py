@@ -286,5 +286,4 @@ class ExperimentConfigMapper:
 			"episode_time_s": defaults.get("episode_time_s", 60),
 			"reset_time_s": defaults.get("reset_time_s", 10),
 			"num_episodes": defaults.get("num_episodes", 50),
-			"interactive": defaults.get("interactive", True),
 		}
