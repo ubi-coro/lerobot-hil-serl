@@ -47,7 +47,6 @@ https://github.com/michel-aractingi/lerobot-hilserl-guide
 import logging
 import os
 import shutil
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy
@@ -75,8 +74,8 @@ from lerobot.rl.process import ProcessSignalHandler
 from lerobot.rl.wandb_utils import WandBLogger
 from lerobot.robots import so100_follower  # noqa: F401
 from lerobot.share.configs import TrainRLServerPipelineConfig
-from lerobot.share.disk_buffer import OnDiskReplayBuffer
-from lerobot.share.utils import make_processors_from_stats
+from lerobot.share.dirty.disk_buffer import OnDiskReplayBuffer
+from lerobot.share.utils.utils import make_processors_from_stats
 from lerobot.teleoperators import gamepad, so101_leader  # noqa: F401
 from lerobot.teleoperators.utils import TeleopEvents
 from lerobot.transport import services_pb2_grpc
@@ -91,8 +90,7 @@ from lerobot.utils.constants import (
     CHECKPOINTS_DIR,
     LAST_CHECKPOINT_LINK,
     PRETRAINED_MODEL_DIR,
-    TRAINING_STATE_DIR, REWARD,
-)
+    TRAINING_STATE_DIR, )
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.train_utils import (
     get_step_checkpoint_dir,
@@ -1323,6 +1321,5 @@ def apply_preprocessor(batch, preprocessor):
 
 
 if __name__ == "__main__":
-    import experiments
     train_cli()
     logging.info("[LEARNER] main finished")

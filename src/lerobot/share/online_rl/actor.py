@@ -61,7 +61,6 @@ from lerobot.cameras import opencv  # noqa: F401
 from lerobot.configs import parser
 from lerobot.envs.configs import ResetConfig
 from lerobot.envs.utils import env_to_dataset_features
-from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.sac.modeling_sac import SACPolicy
 from lerobot.processor import TransitionKey, create_transition, EnvTransition
 from lerobot.rl.gym_manipulator import step_env_and_process_transition
@@ -71,7 +70,7 @@ from lerobot.robots import so100_follower  # noqa: F401
 from lerobot.share.configs import TrainRLServerPipelineConfig
 from lerobot.share.learner import initialize_offline_replay_buffer
 from lerobot.share.record import record_loop
-from lerobot.share.utils import get_pipeline_dataset_features, make_rl_policy, make_processors_from_stats
+from lerobot.share.utils.utils import make_rl_policy, make_processors_from_stats
 from lerobot.teleoperators import gamepad, so101_leader  # noqa: F401
 from lerobot.teleoperators.utils import TeleopEvents
 from lerobot.transport import services_pb2, services_pb2_grpc
@@ -835,5 +834,4 @@ def reset_environment(cfg, env, env_processor, action_processor) -> EnvTransitio
 
 
 if __name__ == "__main__":
-    import experiments
     actor_cli()
