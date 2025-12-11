@@ -20,9 +20,12 @@ import importlib
 import gymnasium as gym
 from gymnasium.envs.registration import registry as gym_registry
 
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.envs.configs import AlohaEnv, EnvConfig, LiberoEnv, PushtEnv
 from lerobot.cameras import Camera
 from lerobot.envs.configs import AlohaEnv, EnvConfig, LiberoEnv, PushtEnv, HILSerlProcessorConfig
 from lerobot.envs.utils import _call_make_env, _download_hub_file, _import_hub_module, _normalize_hub_result
+from lerobot.policies.xvla.configuration_xvla import XVLAConfig
 from lerobot.robots import Robot
 from lerobot.processor import ProcessorStep
 from lerobot.processor.env_processor import LiberoProcessorStep
@@ -42,6 +45,7 @@ def make_env_config(env_type: str, **kwargs) -> EnvConfig:
 
 def make_env_pre_post_processors(
     env_cfg: EnvConfig,
+    policy_cfg: PreTrainedConfig,
 ) -> tuple[
     PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
     PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
@@ -64,6 +68,10 @@ def make_env_pre_post_processors(
     # Preprocessor and Postprocessor steps are Identity for most environments
     preprocessor_steps: list[ProcessorStep] = []
     postprocessor_steps: list[ProcessorStep] = []
+    if isinstance(policy_cfg, XVLAConfig):
+        from lerobot.policies.xvla.processor_xvla import make_xvla_libero_pre_post_processors
+
+        return make_xvla_libero_pre_post_processors()
 
     # For LIBERO environments, add the LiberoProcessorStep to preprocessor
     if isinstance(env_cfg, LiberoEnv) or "libero" in env_cfg.type:
@@ -139,6 +147,8 @@ def make_env(
             init_states=cfg.init_states,
             gym_kwargs=cfg.gym_kwargs,
             env_cls=env_cls,
+            control_mode=cfg.control_mode,
+            episode_length=cfg.episode_length,
         )
     elif "metaworld" in cfg.type:
         from lerobot.envs.metaworld import create_metaworld_envs
