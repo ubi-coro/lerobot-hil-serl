@@ -14,7 +14,6 @@ from lerobot.processor import (
     AddTeleopActionAsComplimentaryDataStep,
     AddTeleopEventsAsInfoStep,
     DataProcessorPipeline,
-    ForwardKinematicsJointsToEEObservation,
     GripperPenaltyProcessorStep,
     ImageCropResizeProcessorStep,
     InterventionActionProcessorStep,
@@ -27,10 +26,15 @@ from lerobot.processor import (
     TimeLimitProcessorStep,
     VanillaObservationProcessorStep,
 )
+from lerobot.robots.so_follower.robot_kinematic_processor import (
+    EEBoundsAndSafety,
+    EEReferenceAndDelta,
+    ForwardKinematicsJointsToEEObservation,
+    GripperVelocityToJoint,
+    InverseKinematicsRLStep,
+)
 from lerobot.processor.converters import identity_transition
 from lerobot.processor.hil_processor import AddFootswitchEventsAsInfoStep, AddKeyboardEventsAsInfoStep
-from lerobot.processor.robot_kinematic_processor import EEReferenceAndDelta, EEBoundsAndSafety, GripperVelocityToJoint, \
-    InverseKinematicsRLStep
 from lerobot.robots import RobotConfig, make_robot_from_config
 from lerobot.teleoperators import make_teleoperator_from_config
 from lerobot.teleoperators.config import TeleoperatorConfig

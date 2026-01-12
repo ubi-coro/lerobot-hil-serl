@@ -26,6 +26,7 @@ import torch
 from lerobot.cameras import opencv  # noqa: F401
 from lerobot.configs import parser
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.envs.configs import HILSerlRobotEnvConfig
 from lerobot.processor import (
     DataProcessorPipeline,
     EnvTransition,
@@ -488,7 +489,6 @@ def make_processors(
 
 def step_env_and_process_transition(
     env: gym.Env,
-    transition: EnvTransition,
     action: torch.Tensor,
     env_processor: DataProcessorPipeline[EnvTransition, EnvTransition],
     action_processor: DataProcessorPipeline[EnvTransition, EnvTransition],
