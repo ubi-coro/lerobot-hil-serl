@@ -65,9 +65,9 @@ from lerobot.policies.factory import make_policy
 from lerobot.policies.sac.modeling_sac import SACPolicy
 from lerobot.processor import TransitionKey
 from lerobot.rl.process import ProcessSignalHandler
-from lerobot.rl.queue_utils import get_last_item_from_queue
-from lerobot.robots import so100_follower  # noqa: F401
-from lerobot.teleoperators import gamepad, so101_leader  # noqa: F401
+from lerobot.rl.queue import get_last_item_from_queue
+from lerobot.robots import so_follower  # noqa: F401
+from lerobot.teleoperators import gamepad, so_leader  # noqa: F401
 from lerobot.teleoperators.utils import TeleopEvents
 from lerobot.transport import services_pb2, services_pb2_grpc
 from lerobot.transport.utils import (
@@ -299,7 +299,7 @@ def act_with_policy(
         log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
 
         # Use the new step function
-        new_transition, exit_early = step_env_and_process_transition(
+        new_transition = step_env_and_process_transition(
             env=online_env,
             transition=transition,
             action=action,
@@ -402,7 +402,7 @@ def act_with_policy(
 
         if cfg.env.fps is not None:
             dt_time = time.perf_counter() - start_time
-            precise_sleep(1 / cfg.env.fps - dt_time)
+            precise_sleep(max(1 / cfg.env.fps - dt_time, 0.0))
 
 
 #  Communication Functions - Group all gRPC/messaging functions

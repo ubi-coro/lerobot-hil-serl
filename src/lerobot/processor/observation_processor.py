@@ -230,10 +230,13 @@ class VanillaObservationProcessorStep(ObservationProcessorStep):
         if self._img_float is None or self._img_float.shape != img_tensor.shape:
             self._img_float = torch.empty_like(img_tensor, dtype=torch.float32)
 
-        self._img_float.copy_(img_tensor)
-        self._img_float.mul_(1.0 / 255.0)
+        img_tensor = img_tensor.to(dtype=torch.float32)
+        img_tensor = img_tensor / 255.0
 
-        return self._img_float
+        #self._img_float.copy_(img_tensor)
+        #self._img_float.mul_(1.0 / 255.0)
+
+        return img_tensor
 
     def _process_observation(self, observation):
         """

@@ -25,10 +25,8 @@ import draccus
 from huggingface_hub import hf_hub_download
 from huggingface_hub.constants import CONFIG_NAME
 from huggingface_hub.errors import HfHubHTTPError
-from torch.utils.data import Dataset
 
 from lerobot.configs.types import FeatureType, PolicyFeature
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.optim.optimizers import OptimizerConfig
 from lerobot.optim.schedulers import LRSchedulerConfig
 from lerobot.utils.constants import ACTION, OBS_STATE
@@ -57,13 +55,17 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
 
     n_obs_steps: int = 1
 
-    input_features: dict[str, PolicyFeature] = field(default_factory=dict)
-    output_features: dict[str, PolicyFeature] = field(default_factory=dict)
+    # `input_features` can be set to None/null in order to infer those values from the dataset.
+    input_features: dict[str, PolicyFeature] | None = field(default_factory=dict)
+    output_features: dict[str, PolicyFeature] | None = field(default_factory=dict)
 
     device: str | None = None  # e.g. "cuda", "cuda:0", "cpu", or "mps"
     # `use_amp` determines whether to use Automatic Mixed Precision (AMP) for training and evaluation. With AMP,
     # automatic gradient scaling is used.
     use_amp: bool = False
+
+    # Whether the policy employed PEFT for training.
+    use_peft: bool = False
 
     push_to_hub: bool = False  # type: ignore[assignment] # TODO: use a different name to avoid override
     repo_id: str | None = None
@@ -90,9 +92,6 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
                 f"Automatic Mixed Precision (amp) is not available on device '{self.device}'. Deactivating AMP."
             )
             self.use_amp = False
-
-    def wrap_dataset(self, dataset: LeRobotDataset) -> Dataset:
-        return dataset
 
     @property
     def type(self) -> str:
@@ -130,6 +129,8 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
 
     @property
     def robot_state_feature(self) -> PolicyFeature | None:
+        if not self.input_features:
+            return None
         for ft_name, ft in self.input_features.items():
             if ft.type is FeatureType.STATE and ft_name == OBS_STATE:
                 return ft
@@ -137,6 +138,8 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
 
     @property
     def env_state_feature(self) -> PolicyFeature | None:
+        if not self.input_features:
+            return None
         for _, ft in self.input_features.items():
             if ft.type is FeatureType.ENV:
                 return ft
@@ -144,10 +147,14 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
 
     @property
     def image_features(self) -> dict[str, PolicyFeature]:
+        if not self.input_features:
+            return {}
         return {key: ft for key, ft in self.input_features.items() if ft.type is FeatureType.VISUAL}
 
     @property
     def action_feature(self) -> PolicyFeature | None:
+        if not self.output_features:
+            return None
         for ft_name, ft in self.output_features.items():
             if ft.type is FeatureType.ACTION and ft_name == ACTION:
                 return ft

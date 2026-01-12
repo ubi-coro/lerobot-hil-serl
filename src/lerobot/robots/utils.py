@@ -14,10 +14,12 @@
 
 import logging
 from pprint import pformat
-from typing import Type
+from typing import cast, Type
 
 from lerobot.robots import RobotConfig
+from lerobot.utils.import_utils import make_device_from_device_class
 
+from .config import RobotConfig
 from .robot import Robot
 
 
@@ -30,26 +32,22 @@ def get_robot_cls_from_config(config: RobotConfig) -> Type[Robot]:
         from .koch_follower import KochFollower
 
         return KochFollower
+    elif config.type == "omx_follower":
+        from .omx_follower import OmxFollower
+
+        return OmxFollower
     elif config.type == "so100_follower":
-        from .so100_follower import SO100Follower
+        from .so_follower import SO100Follower
 
         return SO100Follower
     elif config.type == "so101_follower":
-        from .so101_follower import SO101Follower
+        from .so_follower import SO101Follower
 
         return SO101Follower
     elif config.type == "lekiwi":
         from .lekiwi import LeKiwi
 
         return LeKiwi
-    elif config.type == "stretch3":
-        from .stretch3 import Stretch3Robot
-
-        return Stretch3Robot
-    elif config.type == "viperx":
-        from .viperx import ViperX
-
-        return ViperX
     elif config.type == "hope_jr_hand":
         from .hope_jr import HopeJrHand
 
@@ -66,14 +64,18 @@ def get_robot_cls_from_config(config: RobotConfig) -> Type[Robot]:
         from .reachy2 import Reachy2Robot
 
         return Reachy2Robot
-    elif config.type == "mock_robot":
-        from tests.mocks.mock_robot import MockRobot
+    elif config.type == "viperx":
+        from .viperx import ViperX
 
-        return MockRobot
+        return ViperX
     elif config.type == "ur":
         from .ur import TF_UR
 
         return TF_UR
+    elif config.type == "mock_robot":
+        from tests.mocks.mock_robot import MockRobot
+
+        return MockRobot
     else:
         try:
             return cast(Robot, make_device_from_device_class(config))

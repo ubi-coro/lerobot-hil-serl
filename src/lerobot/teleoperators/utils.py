@@ -45,12 +45,16 @@ def make_teleoperator_from_config(config: TeleoperatorConfig) -> Teleoperator:
         from .koch_leader import KochLeader
 
         return KochLeader(config)
+    elif config.type == "omx_leader":
+        from .omx_leader import OmxLeader
+
+        return OmxLeader(config)
     elif config.type == "so100_leader":
-        from .so100_leader import SO100Leader
+        from .so_leader import SO100Leader
 
         return SO100Leader(config)
     elif config.type == "so101_leader":
-        from .so101_leader import SO101Leader
+        from .so_leader import SO101Leader
 
         return SO101Leader(config)
     elif config.type == "mock_teleop":

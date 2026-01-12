@@ -1,6 +1,6 @@
 from pathlib import Path
 
-base_folder = "/media/nvme1/jstranghoener/lerobot/data/jannick-st/hoodie_folding"
+base_folder = "/media/nvme1/jstranghoener/lerobot/data/jannick-st/hoodie_unfolding_v3/"
 
 out_str = "["
 for sub in sorted(Path(base_folder).iterdir()):

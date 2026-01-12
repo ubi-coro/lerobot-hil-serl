@@ -119,6 +119,7 @@ def make_dataset(cfg: 'TrainPipelineConfig') -> LeRobotDataset | MultiLeRobotDat
                 image_transforms=image_transforms,
                 revision=cfg.dataset.revision,
                 video_backend=cfg.dataset.video_backend,
+                tolerance_s=cfg.tolerance_s,
             )
         else:
             dataset = StreamingLeRobotDataset(
@@ -129,6 +130,7 @@ def make_dataset(cfg: 'TrainPipelineConfig') -> LeRobotDataset | MultiLeRobotDat
                 image_transforms=image_transforms,
                 revision=cfg.dataset.revision,
                 max_num_shards=cfg.num_workers,
+                tolerance_s=cfg.tolerance_s,
             )
 
     if cfg.dataset.use_imagenet_stats:

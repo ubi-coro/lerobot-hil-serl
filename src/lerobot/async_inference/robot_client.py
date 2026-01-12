@@ -54,8 +54,8 @@ from lerobot.robots import (  # noqa: F401
     bi_so100_follower,
     koch_follower,
     make_robot_from_config,
-    so100_follower,
-    so101_follower,
+    omx_follower,
+    so_follower,
 )
 from lerobot.transport import (
     services_pb2,  # type: ignore
