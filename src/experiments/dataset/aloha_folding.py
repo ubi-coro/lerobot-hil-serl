@@ -6,14 +6,11 @@ from lerobot.share.configs import DatasetRecordConfig
 @dataclass
 @DatasetRecordConfig.register_subclass("aloha_folding")
 class AlohaFoldingDatasetConfig(DatasetRecordConfig):
-    repo_id: str = "hoodie_folding_v3/test2"
+    repo_id: str = "hoodie_folding_v3/hoodie_folding_eval"
     single_task: str = "Fold the hoodie"
-    root: str = "/media/nvme1/jstranghoener/lerobot/data/jannick-st/hoodie_folding_v3/test2"
-    num_episodes: int = 30
-    episode_time_s: int = 80.0
-    reset_time_s: int = 10.0
+    root: str = "/media/nvme1/jstranghoener/lerobot/data/jannick-st/hoodie_folding_v3/hoodie_folding_eval"
+    num_episodes: int = 50
+    episode_time_s: int = 90.0
+    reset_time_s: int = 15.0
     push_to_hub: bool = False
-    video_encoding_batch_size: int = 0  # write to disk every 30 episodes
-    num_image_writer_processes: int = 1
-    num_image_writer_threads_per_camera: int = 4
 
