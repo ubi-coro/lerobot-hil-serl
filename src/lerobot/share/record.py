@@ -125,6 +125,7 @@ def record_loop(
         start_loop_t = time.perf_counter()
 
         # (1) Keep the PRE-STEP transition (this holds o_t) and reset info dict
+        obs = transition[TransitionKey.OBSERVATION]
         info = {}
 
         # (2) Handle intervention control flow
@@ -134,12 +135,9 @@ def record_loop(
 
         # (3) Decide and process action a_t
         if has_policy:
-            policy_observation = {
-                k: v for k, v in transition[TransitionKey.OBSERVATION].items() if k in policy.config.input_features
-            }
             # noinspection PyTypeChecker
             action = predict_action(
-                observation=policy_observation,
+                observation=obs,
                 policy=policy,
                 device=get_safe_torch_device(device),
                 preprocessor=preprocessor,
@@ -183,7 +181,7 @@ def record_loop(
             # observations are batched and may contain other keys
             dataset_observation = {
                 k: v.squeeze().cpu()
-                for k, v in transition[TransitionKey.OBSERVATION].items()
+                for k, v in obs.items()
                 if k in dataset.features
             }
 
@@ -279,7 +277,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         )
 
     # Load pretrained policy
-    policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
+    policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta, rename_map=cfg.dataset.rename_map)
     preprocessor = None
     postprocessor = None
     if cfg.policy is not None:

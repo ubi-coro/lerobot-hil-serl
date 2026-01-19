@@ -65,7 +65,8 @@ class AlohaBimanualEnvConfig(RobotEnvConfig):
             (TeleopEvents.IS_INTERVENTION,): {"device": 7, "toggle": True},
         }
         self.processor.events.key_mapping = {
-            TeleopEvents.RERECORD_EPISODE: keyboard.Key.left
+            TeleopEvents.RERECORD_EPISODE: keyboard.Key.left,
+            TeleopEvents.STOP_RECORDING: keyboard.Key.down
         }
 
         if self.benchmark:

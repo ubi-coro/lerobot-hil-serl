@@ -46,16 +46,16 @@ from lerobot.robots import (  # noqa: F401
     RobotConfig,
     koch_follower,
     make_robot_from_config,
-    so100_follower,
-    so101_follower,
+    omx_follower,
+    so_follower,
 )
 from lerobot.teleoperators import (  # noqa: F401
     TeleoperatorConfig,
     gamepad,
     koch_leader,
     make_teleoperator_from_config,
-    so100_leader,
-    so101_leader,
+    omx_leader,
+    so_leader,
 )
 from lerobot.utils.robot_utils import precise_sleep
 
