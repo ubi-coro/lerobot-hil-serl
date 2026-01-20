@@ -94,8 +94,8 @@ class AlohaBimanualSafeEnvConfig(AlohaBimanualEnvConfig):
 @dataclass
 @EnvConfig.register_subclass("aloha_single")
 class AlohaSingleEnvConfig(RobotEnvConfig):
-    teleop: TeleoperatorConfig = WidowXConfig(port="/dev/ttyDXL_leader_left", id="left")
-    robot: RobotConfig = ViperXConfig(port="/dev/ttyDXL_follower_left", id="left")
+    teleop: TeleoperatorConfig = field(default_factory= lambda : WidowXConfig(port="/dev/ttyDXL_leader_left", id="left"))
+    robot: RobotConfig = field(default_factory= lambda : ViperXConfig(port="/dev/ttyDXL_follower_left", id="left"))
     cameras: dict[str, CameraConfig] = field(
         default_factory=lambda: {
             "cam_low": OpenCVCameraConfig(

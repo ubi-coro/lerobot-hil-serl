@@ -55,7 +55,7 @@ class RobotEnvConfig(EnvConfig):
 
     robot: RobotConfig | dict[str, RobotConfig] | None = None
     teleop: TeleoperatorConfig | dict[str, TeleoperatorConfig] | None = None
-    processor: HILSerlProcessorConfig = HILSerlProcessorConfig()
+    processor: HILSerlProcessorConfig = field(default_factory=HILSerlProcessorConfig)
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     stats: dict[str, dict] = field(default_factory=dict)
 

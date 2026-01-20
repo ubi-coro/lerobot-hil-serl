@@ -462,14 +462,14 @@ class HILSerlProcessorConfig:
 
     image_preprocessing: ImagePreprocessingConfig | None = None
     reward_classifier: RewardClassifierConfig | None = None
-    events: EventConfig = EventConfig()
-    hooks: HookConfig = HookConfig()
+    events: EventConfig = field(default_factory=EventConfig)
+    hooks: HookConfig = field(default_factory=HookConfig)
 
-    observation: ObservationConfig = ObservationConfig()
-    gripper: GripperConfig = GripperConfig()
-    reset: ResetConfig = ResetConfig()
-    inverse_kinematics: InverseKinematicsConfig = InverseKinematicsConfig()
-    task_frame: TaskFrameConfig = TaskFrameConfig()
+    observation: ObservationConfig = field(default_factory=ObservationConfig)
+    gripper: GripperConfig = field(default_factory=GripperConfig)
+    reset: ResetConfig = field(default_factory=ResetConfig)
+    inverse_kinematics: InverseKinematicsConfig = field(default_factory=InverseKinematicsConfig)
+    task_frame: TaskFrameConfig = field(default_factory=TaskFrameConfig)
 
 
 @EnvConfig.register_subclass(name="gym_manipulator")
