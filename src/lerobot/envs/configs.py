@@ -89,7 +89,7 @@ class HubEnvConfig(EnvConfig):
 @EnvConfig.register_subclass("aloha")
 @dataclass
 class AlohaEnv(EnvConfig):
-    task: str | None = "AlohaInsertion-v0"
+    task: str | None = "AlohaInsertion-v1"
     fps: int = 50
     episode_length: int = 400
     obs_type: str = "pixels_agent_pos"

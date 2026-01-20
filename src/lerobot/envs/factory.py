@@ -31,7 +31,7 @@ from lerobot.processor.pipeline import PolicyProcessorPipeline
 
 
 def make_env_config(env_type: str, **kwargs) -> EnvConfig:
-    if env_type == "aloha":
+    if env_type == "aloha" or env_type == "sim_aloha":
         return AlohaEnv(**kwargs)
     elif env_type == "pusht":
         return PushtEnv(**kwargs)
