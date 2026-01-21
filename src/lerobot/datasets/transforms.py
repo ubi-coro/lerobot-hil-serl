@@ -194,7 +194,7 @@ class ImageTransformsConfig:
             "saturation": ImageTransformConfig(
                 weight=1.0,
                 type="ColorJitter",
-                kwargs={"saturation": (0.5, 1.5)},
+                kwargs={"saturation": (0.8, 1.2)},
             ),
             "hue": ImageTransformConfig(
                 weight=1.0,
@@ -204,12 +204,12 @@ class ImageTransformsConfig:
             "sharpness": ImageTransformConfig(
                 weight=1.0,
                 type="SharpnessJitter",
-                kwargs={"sharpness": (0.5, 1.5)},
+                kwargs={"sharpness": (0.8, 1.2)},
             ),
             "affine": ImageTransformConfig(
                 weight=1.0,
                 type="RandomAffine",
-                kwargs={"degrees": (-5.0, 5.0), "translate": (0.05, 0.05)},
+                kwargs={"degrees": (-1.0, 1.0), "translate": (0.02, 0.02)},
             ),
         }
     )

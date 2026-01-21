@@ -26,6 +26,7 @@ import torch
 from lerobot.cameras import opencv  # noqa: F401
 from lerobot.configs import parser
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.envs.configs import HILSerlRobotEnvConfig
 from lerobot.processor import (
     DataProcessorPipeline,
     EnvTransition,
@@ -36,9 +37,22 @@ from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
 from lerobot.robots import (  # noqa: F401
     RobotConfig,
     make_robot_from_config,
-    so100_follower,
+    so_follower,
 )
 from lerobot.robots.robot import Robot
+from lerobot.robots.so_follower.robot_kinematic_processor import (
+    EEBoundsAndSafety,
+    EEReferenceAndDelta,
+    ForwardKinematicsJointsToEEObservation,
+    GripperVelocityToJoint,
+    InverseKinematicsRLStep,
+)
+from lerobot.teleoperators import (
+    gamepad,  # noqa: F401
+    keyboard,  # noqa: F401
+    make_teleoperator_from_config,
+    so_leader,  # noqa: F401
+)
 from lerobot.teleoperators.teleoperator import Teleoperator
 from lerobot.teleoperators.utils import TeleopEvents
 from lerobot.utils.constants import ACTION, DONE, OBS_IMAGES, OBS_STATE, REWARD
@@ -58,11 +72,6 @@ class DatasetConfig:
     num_episodes_to_record: int = 5
     replay_episode: int | None = None
     push_to_hub: bool = False
-
-
-@dataclass
-class HILSerlRobotEnvConfig:
-    pass
 
 
 @dataclass
@@ -211,7 +220,7 @@ class RobotEnv(gym.Env):
             reset_follower_position(self.robot, np.array(self.reset_pose))
             log_say("Reset the environment done.", play_sounds=True)
 
-        precise_sleep(self.reset_time_s - (time.perf_counter() - start_time))
+        precise_sleep(max(self.reset_time_s - (time.perf_counter() - start_time), 0.0))
 
         super().reset(seed=seed, options=options)
 
@@ -298,6 +307,184 @@ def make_robot_env(cfg: HILSerlRobotEnvConfig) -> tuple[gym.Env, Any]:
         )
 
         return env, None
+
+    # Real robot environment
+    assert cfg.robot is not None, "Robot config must be provided for real robot environment"
+    assert cfg.teleop is not None, "Teleop config must be provided for real robot environment"
+
+    robot = make_robot_from_config(cfg.robot)
+    teleop_device = make_teleoperator_from_config(cfg.teleop)
+    teleop_device.connect()
+
+    # Create base environment with safe defaults
+    use_gripper = cfg.processor.gripper.use_gripper if cfg.processor.gripper is not None else True
+    display_cameras = (
+        cfg.processor.observation.display_cameras if cfg.processor.observation is not None else False
+    )
+    reset_pose = cfg.processor.reset.fixed_reset_joint_positions if cfg.processor.reset is not None else None
+
+    env = RobotEnv(
+        robot=robot,
+        use_gripper=use_gripper,
+        display_cameras=display_cameras,
+        reset_pose=reset_pose,
+    )
+
+    return env, teleop_device
+
+
+def make_processors(
+    env: gym.Env, teleop_device: Teleoperator | None, cfg: HILSerlRobotEnvConfig, device: str = "cpu"
+) -> tuple[
+    DataProcessorPipeline[EnvTransition, EnvTransition], DataProcessorPipeline[EnvTransition, EnvTransition]
+]:
+    """Create environment and action processors.
+
+    Args:
+        env: Robot environment instance.
+        teleop_device: Teleoperator device for intervention.
+        cfg: Processor configuration.
+        device: Target device for computations.
+
+    Returns:
+        Tuple of (environment processor, action processor).
+    """
+    terminate_on_success = (
+        cfg.processor.reset.terminate_on_success if cfg.processor.reset is not None else True
+    )
+
+    if cfg.name == "gym_hil":
+        action_pipeline_steps = [
+            InterventionActionProcessorStep(terminate_on_success=terminate_on_success),
+            Torch2NumpyActionProcessorStep(),
+        ]
+
+        env_pipeline_steps = [
+            Numpy2TorchActionProcessorStep(),
+            VanillaObservationProcessorStep(),
+            AddBatchDimensionProcessorStep(),
+            DeviceProcessorStep(device=device),
+        ]
+
+        return DataProcessorPipeline(
+            steps=env_pipeline_steps, to_transition=identity_transition, to_output=identity_transition
+        ), DataProcessorPipeline(
+            steps=action_pipeline_steps, to_transition=identity_transition, to_output=identity_transition
+        )
+
+    # Full processor pipeline for real robot environment
+    # Get robot and motor information for kinematics
+    motor_names = list(env.robot.bus.motors.keys())
+
+    # Set up kinematics solver if inverse kinematics is configured
+    kinematics_solver = None
+    if cfg.processor.inverse_kinematics is not None:
+        kinematics_solver = RobotKinematics(
+            urdf_path=cfg.processor.inverse_kinematics.urdf_path,
+            target_frame_name=cfg.processor.inverse_kinematics.target_frame_name,
+            joint_names=motor_names,
+        )
+
+    env_pipeline_steps = [VanillaObservationProcessorStep()]
+
+    if cfg.processor.observation is not None:
+        if cfg.processor.observation.add_joint_velocity_to_observation:
+            env_pipeline_steps.append(JointVelocityProcessorStep(dt=1.0 / cfg.fps))
+        if cfg.processor.observation.add_current_to_observation:
+            env_pipeline_steps.append(MotorCurrentProcessorStep(robot=env.robot))
+
+    if kinematics_solver is not None:
+        env_pipeline_steps.append(
+            ForwardKinematicsJointsToEEObservation(
+                kinematics=kinematics_solver,
+                motor_names=motor_names,
+            )
+        )
+
+    if cfg.processor.image_preprocessing is not None:
+        env_pipeline_steps.append(
+            ImageCropResizeProcessorStep(
+                crop_params_dict=cfg.processor.image_preprocessing.crop_params_dict,
+                resize_size=cfg.processor.image_preprocessing.resize_size,
+            )
+        )
+
+    # Add time limit processor if reset config exists
+    if cfg.processor.reset is not None:
+        env_pipeline_steps.append(
+            TimeLimitProcessorStep(max_episode_steps=int(cfg.processor.reset.control_time_s * cfg.fps))
+        )
+
+    # Add gripper penalty processor if gripper config exists and enabled
+    if cfg.processor.gripper is not None and cfg.processor.gripper.use_gripper:
+        env_pipeline_steps.append(
+            GripperPenaltyProcessorStep(
+                penalty=cfg.processor.gripper.gripper_penalty,
+                max_gripper_pos=cfg.processor.max_gripper_pos,
+            )
+        )
+
+    if (
+        cfg.processor.reward_classifier is not None
+        and cfg.processor.reward_classifier.pretrained_path is not None
+    ):
+        env_pipeline_steps.append(
+            RewardClassifierProcessorStep(
+                pretrained_path=cfg.processor.reward_classifier.pretrained_path,
+                device=device,
+                success_threshold=cfg.processor.reward_classifier.success_threshold,
+                success_reward=cfg.processor.reward_classifier.success_reward,
+                terminate_on_success=terminate_on_success,
+            )
+        )
+
+    env_pipeline_steps.append(AddBatchDimensionProcessorStep())
+    env_pipeline_steps.append(DeviceProcessorStep(device=device))
+
+    action_pipeline_steps = [
+        AddTeleopActionAsComplimentaryDataStep(teleop_device=teleop_device),
+        AddTeleopEventsAsInfoStep(teleop_device=teleop_device),
+        InterventionActionProcessorStep(
+            use_gripper=cfg.processor.gripper.use_gripper if cfg.processor.gripper is not None else False,
+            terminate_on_success=terminate_on_success,
+        ),
+    ]
+
+    # Replace InverseKinematicsProcessor with new kinematic processors
+    if cfg.processor.inverse_kinematics is not None and kinematics_solver is not None:
+        # Add EE bounds and safety processor
+        inverse_kinematics_steps = [
+            MapTensorToDeltaActionDictStep(
+                use_gripper=cfg.processor.gripper.use_gripper if cfg.processor.gripper is not None else False
+            ),
+            MapDeltaActionToRobotActionStep(),
+            EEReferenceAndDelta(
+                kinematics=kinematics_solver,
+                end_effector_step_sizes=cfg.processor.inverse_kinematics.end_effector_step_sizes,
+                motor_names=motor_names,
+                use_latched_reference=False,
+                use_ik_solution=True,
+            ),
+            EEBoundsAndSafety(
+                end_effector_bounds=cfg.processor.inverse_kinematics.end_effector_bounds,
+            ),
+            GripperVelocityToJoint(
+                clip_max=cfg.processor.max_gripper_pos,
+                speed_factor=1.0,
+                discrete_gripper=True,
+            ),
+            InverseKinematicsRLStep(
+                kinematics=kinematics_solver, motor_names=motor_names, initial_guess_current_joints=False
+            ),
+        ]
+        action_pipeline_steps.extend(inverse_kinematics_steps)
+        action_pipeline_steps.append(RobotActionToPolicyActionProcessorStep(motor_names=motor_names))
+
+    return DataProcessorPipeline(
+        steps=env_pipeline_steps, to_transition=identity_transition, to_output=identity_transition
+    ), DataProcessorPipeline(
+        steps=action_pipeline_steps, to_transition=identity_transition, to_output=identity_transition
+    )
 
 
 def step_env_and_process_transition(
@@ -513,7 +700,7 @@ def control_loop(
             transition = env_processor(transition)
 
         # Maintain fps timing
-        precise_sleep(dt - (time.perf_counter() - step_start_time))
+        precise_sleep(max(dt - (time.perf_counter() - step_start_time), 0.0))
 
     if dataset is not None and cfg.dataset.push_to_hub:
         logging.info("Pushing dataset to hub")
@@ -545,7 +732,7 @@ def replay_trajectory(
         )
         transition = action_processor(transition)
         env.step(transition[TransitionKey.ACTION])
-        precise_sleep(1 / cfg.env.fps - (time.perf_counter() - start_time))
+        precise_sleep(max(1 / cfg.env.fps - (time.perf_counter() - start_time), 0.0))
 
 
 @parser.wrap()

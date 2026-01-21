@@ -14,7 +14,6 @@ from pprint import pformat
 import numpy as np
 from tqdm import tqdm
 
-from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.lerobot_dataset import MultiLeRobotDataset, LeRobotDataset
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
@@ -34,12 +33,11 @@ def run_inference_on_episode(dataset: LeRobotDataset, policy: PreTrainedPolicy, 
     pred_actions = []
 
     for frame in tqdm(dataset):
-        obs = {k: torch.as_tensor(v).unsqueeze(0).to(device) for k, v in frame.items() if k in policy.config.input_features}
-        obs = preprocessor(obs)
+        obs = preprocessor(frame)
         out = policy.select_action(obs)
         out = postprocessor(out)
-        pred_actions.append(out.cpu().squeeze(0))
-        gt_actions.append(frame[ACTION].cpu().squeeze(0))
+        pred_actions.append(out.cpu().float().squeeze(0))
+        gt_actions.append(frame[ACTION].cpu().float().squeeze(0))
 
     return torch.stack(gt_actions), torch.stack(pred_actions)
 
