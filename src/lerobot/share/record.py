@@ -14,7 +14,7 @@ from lerobot.configs import parser
 from lerobot.datasets.image_writer import safe_stop_image_writer
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.video_utils import VideoEncodingManager
-from lerobot.envs.configs import ResetConfig
+from lerobot.envs.configs import ResetConfig, HILSerlProcessorConfig
 from lerobot.envs.robot_env import RobotEnv
 from lerobot.envs.utils import env_to_dataset_features
 from lerobot.policies.factory import make_policy, make_pre_post_processors
@@ -243,10 +243,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     env, env_processor, action_processor = cfg.env.make(device="cpu" if cfg.policy is None else cfg.policy.device)
 
     # handle timing
-    reset_cfg: ResetConfig = cfg.env.processor.reset
-    if cfg.dataset.reset_time_s is not None:
-        reset_cfg.teleop_on_reset = True
-        reset_cfg.reset_time_s = cfg.dataset.reset_time_s
+    processor_cfg: HILSerlProcessorConfig = cfg.env.processor
+    if processor_cfg.control_time_s is not None:
+        cfg.dataset.episode_time_s = processor_cfg.control_time_s
+    if processor_cfg.reset.reset_time_s is not None:
+        cfg.dataset.reset_time_s = processor_cfg.reset.reset_time_s
 
     # make dataset
     features = env_to_dataset_features(cfg.env.features)
@@ -299,13 +300,13 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         while recorded_episodes < cfg.dataset.num_episodes and not info.get(TeleopEvents.STOP_RECORDING, False):
 
             # Execute a few seconds without recording to give time to manually reset the environment
-            if reset_cfg.teleop_on_reset and not info.get(TeleopEvents.INTERVENTION_COMPLETED, False):
+            if processor_cfg.reset.teleop_on_reset and not info.get(TeleopEvents.INTERVENTION_COMPLETED, False):
                 log_say("Reset the environment", cfg.play_sounds, blocking=True)
 
                 info = record_loop(
                     env=env,
                     fps=cfg.env.fps,
-                    control_time_s=reset_cfg.reset_time_s,
+                    control_time_s=cfg.dataset.reset_time_s,
                     action_dim=features[ACTION]["shape"][0],
                     action_processor=action_processor,
                     env_processor=env_processor,
