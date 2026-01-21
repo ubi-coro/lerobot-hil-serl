@@ -119,7 +119,7 @@ intelrealsense = [
 ]
 phone = ["hebi-py>=2.8.0,<2.12.0", "teleop>=0.1.0,<0.2.0", "fastapi<1.0"]
 ur = ["ur_rtde==1.6.2"]
-spacemouse = ["easyhid==0.0.10"]
+spacemouse = ["easyhid==0.0.10", "atomics==1.0.3"]
 
 # Policies
 wallx = [
