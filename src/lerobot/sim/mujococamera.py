@@ -7,7 +7,7 @@ from numpy._typing import NDArray
 from lerobot.cameras import Camera, ColorMode
 
 logger = logging.getLogger(__name__)
-class SimCamera(Camera):
+class MujocoCamera(Camera):
     @property
     def is_connected(self) -> bool:
         return True

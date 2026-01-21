@@ -1,22 +1,26 @@
 import abc
-from abc import ABC
 from dataclasses import dataclass, field
-from pathlib import Path
+from functools import cached_property
 from typing import List, Tuple
+
+from pynput import keyboard
 
 import draccus
 import numpy as np
 
+from experiments import AlohaBimanualEnvConfigV2
 from lerobot.cameras import CameraConfig
-from lerobot.cameras.opencv import OpenCVCameraConfig
-from lerobot.cameras.realsense import RealSenseCameraConfig
+from lerobot.configs.types import PipelineFeatureType
 from lerobot.envs import EnvConfig, RobotEnvConfig
 from lerobot.envs.factory import RobotEnvInterface, make_env_config, make_env
 from lerobot.processor import DataProcessorPipeline
+from lerobot.processor.migrate_calibration_processor import MigrateCalibrationObsProcessorStep
 from lerobot.robots import RobotConfig
-from lerobot.robots.viperx import ViperXConfig
+from lerobot.sim.configuration_mujococamera import MujocoCameraConfig
 from lerobot.sim.mujoco_utils.mujoco_wrapper import init_with_existing_sim
-from lerobot.teleoperators.widowx import WidowXConfig
+from lerobot.sim.sim_viperx import SimViperXConfig
+from lerobot.teleoperators import TeleopEvents
+from lerobot.utils.constants import ACTION
 from tests.mocks.mock_teleop import MockTeleopConfig
 
 
@@ -64,33 +68,6 @@ class SimCameraConfig(CameraConfig):
 
 
 @dataclass
-class SimRobotConfig(RobotConfig):
-    pass
-
-@SimRobotConfig.register_subclass("sim_viperx")
-@dataclass
-class SimViperXConfig(SimRobotConfig):
-    port: str  # Port to connect to the arm
-
-    disable_torque_on_disconnect: bool = False
-
-    # /!\ FOR SAFETY, READ THIS /!\
-    # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
-    # Set this to a positive scalar to have the same value for all motors, or a dictionary that maps motor
-    # names to the max_relative_target value for that motor.
-    # For Aloha, for every goal position request, motor rotations are capped at 5 degrees by default.
-    # When you feel more confident with teleoperation or running the policy, you can extend
-    # this safety limit and even removing it by setting it to `null`.
-    max_relative_target: float | None = 5.0
-
-    # The duration of the velocity-based time profile
-    # Higher values lead to smoother motions, but increase lag.
-    moving_time: float = 0.1
-
-    # cameras
-    cameras: dict[str, SimCameraConfig] = field(default_factory=dict)
-
-@dataclass
 class SimConfig(draccus.ChoiceRegistry, abc.ABC):
     env: str
     task_name: str
@@ -127,11 +104,12 @@ class AlohaSimConfig(SimConfig):
 @dataclass
 class SimRobotEnvConfig(RobotEnvConfig):
     sim: SimConfig | None = None # TODO(jzilke)
-    robot: SimRobotConfig | dict[str, SimRobotConfig] | None = None
+    robot: RobotConfig | dict[str, RobotConfig] | None = None
 
     def make(self, device: str = "cpu") -> Tuple[RobotEnvInterface, DataProcessorPipeline, DataProcessorPipeline]:
         gym_env = self._make_sim()
         env, env_processor, action_processor = super().make(device)
+        # gym_env.envs[0].unwrapped._env._task.get_observation(gym_env.envs[0].unwrapped._env.physics)
         return env, env_processor, action_processor
 
     def _make_sim(self):
@@ -153,8 +131,9 @@ class SimRobotEnvConfig(RobotEnvConfig):
 
 @dataclass
 @EnvConfig.register_subclass("sim_aloha")
-class SimAlohaEnvConfig(SimRobotEnvConfig):
+class SimAlohaEnvConfig(AlohaBimanualEnvConfigV2):
     def __post_init__(self):
+        self.kinematics_solver = None
         self.robot = {
             "left": SimViperXConfig(port="/dev/ttyDXL_follower_left", id="left"),
             "right": SimViperXConfig(port="/dev/ttyDXL_follower_right", id="right")
@@ -163,13 +142,22 @@ class SimAlohaEnvConfig(SimRobotEnvConfig):
             "left": MockTeleopConfig(n_motors=6),
             "right": MockTeleopConfig(n_motors=6)       }
         self.cameras = {
-            "cam_left_wrist": SimCameraConfig(
+            "cam_left_wrist": MujocoCameraConfig(
             )
         }
 
-    def make_env_processor(self, device, env: RobotEnvInterface | None = None) -> DataProcessorPipeline:
-        return DataProcessorPipeline()
-
-    def make_action_processor(self, teleoperators, device) -> DataProcessorPipeline:
-        action_pipeline_steps = []
-        return DataProcessorPipeline(steps=action_pipeline_steps)
+        self.processor.hooks.time_action_processor = False
+        self.processor.hooks.time_env_processor = False
+        self.processor.hooks.log_every = 1
+        self.processor.gripper.use_gripper = True
+        self.processor.reset.terminate_on_success = True
+        self.processor.reset.teleop_on_reset = True
+        self.processor.reset.reset_time_s = 10.0
+        #self.processor.control_time_s = 10.0
+        self.processor.events.foot_switch_mapping = {
+            # (TeleopEvents.SUCCESS,): {"device": 3, "toggle": False},
+            # (TeleopEvents.IS_INTERVENTION,): {"device": 6, "toggle": True},
+        }
+        self.processor.events.key_mapping = {
+            TeleopEvents.RERECORD_EPISODE: keyboard.Key.left
+        }

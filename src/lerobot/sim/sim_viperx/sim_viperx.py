@@ -1,4 +1,3 @@
-
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,16 +15,21 @@
 import logging
 import math
 import time
+from collections import OrderedDict
 from functools import cached_property
 from typing import Any
 
 from lerobot.cameras.utils import make_cameras_from_configs
-
+from lerobot.motors import Motor, MotorCalibration, MotorNormMode
+from lerobot.motors.dynamixel import (
+    DynamixelMotorsBus,
+    OperatingMode,
+)
 from lerobot.robots import Robot
 from lerobot.robots.utils import ensure_safe_goal_position
-from lerobot.sim.configs import SimViperXConfig
-from lerobot.sim.simrobot import SimRobot
-from lerobot.utils.errors import DeviceNotConnectedError
+from lerobot.robots.viperx import ViperXConfig
+from lerobot.sim.sim_viperx import SimViperXConfig
+from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +52,13 @@ def linear_to_gripper(linear_position):
     return result
 
 
-class SimViperX(SimRobot):
+class SimViperX(Robot):
     """
     [ViperX](https://www.trossenrobotics.com/viperx-300) developed by Trossen Robotics
     """
 
     config_class = SimViperXConfig
-    name = "simviperx"
+    name = "sim_viperx"
 
     def __init__(
         self,
@@ -68,6 +72,8 @@ class SimViperX(SimRobot):
     @property
     def _motors_ft(self) -> dict[str, type]:
         motors = {}
+        #motors["finger.pos"] = float  # Special case for gripper position
+        #motors.pop("gripper.pos", None)  # Remove gripper position, as it is not used directly
         return motors
 
     @property
@@ -86,16 +92,16 @@ class SimViperX(SimRobot):
 
     @property
     def is_connected(self) -> bool:
-        return all(cam.is_connected for cam in self.cameras.values())
+        return True
 
     def connect(self, calibrate: bool = True) -> None:
         """
         We assume that at connection time, arm is in a rest position,
         and torque can be safely disabled to run calibration.
         """
+        # if self.is_connected:
+        #     raise DeviceAlreadyConnectedError(f"{self} already connected")
 
-        if not self.is_calibrated and calibrate:
-            self.calibrate()
 
         for cam in self.cameras.values():
             cam.connect()
@@ -109,17 +115,14 @@ class SimViperX(SimRobot):
         return True
 
     def calibrate(self) -> None:
-        return
-
+        pass
 
     def configure(self) -> None:
         """
         Read current motor registers (with torque ON). If all match our desired
         configuration, skip the torque-off writes. Otherwise, torque-off and apply.
         """
-
-        logger.info(f"{self}: applying motor configuration (requires torque-off).")
-
+        pass
 
     def get_observation(self) -> dict[str, Any]:
         """The returned observations do not have a batch dimension."""
@@ -128,8 +131,7 @@ class SimViperX(SimRobot):
 
         # Read arm position
         start = time.perf_counter()
-        obs_dict = {}
-        obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items() if not motor.endswith("_shadow")}
+        obs_dict = {} # TODO(jzilke)
         #obs_dict["finger.pos"] = gripper_to_linear(obs_dict.pop("gripper.pos"))
         dt_ms = (time.perf_counter() - start) * 1e3
         self._last_motor_obs = dict(obs_dict)
@@ -177,7 +179,7 @@ class SimViperX(SimRobot):
         goal_pos = {key.removesuffix(".pos"): value for key, value in goal_pos.items()}
 
         # Send goal position to the arm
-        #TODO(jzilke) send action to sim
+        # self.bus.sync_write("Goal_Position", goal_pos) TODO(jzilke)
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
 
     def disconnect(self):
@@ -190,12 +192,101 @@ class SimViperX(SimRobot):
 
         logger.info(f"{self} disconnected.")
 
+    def _read_current_motor_settings(self) -> dict[str, dict[str, int]]:
+        """
+        Snapshot current settings while torque is ON.
+        Returns a dict: {setting_name: {motor_name: value}} for fast comparisons.
+        """
+        snap: dict[str, dict[str, int]] = {}
 
+        # # Common per-motor regs
+        # for reg in ("Return_Delay_Time", "Drive_Mode", "Operating_Mode", "Profile_Velocity"):
+        #     snap[reg] = self.bus.sync_read(reg)
+        #
+        # # Only relevant motors for Secondary_ID
+        # sec = {}
+        # if "shoulder_shadow" in self.bus.motors:
+        #     sec["shoulder_shadow"] = self.bus.read("Secondary_ID", "shoulder_shadow")
+        # if "elbow_shadow" in self.bus.motors:
+        #     sec["elbow_shadow"] = self.bus.read("Secondary_ID", "elbow_shadow")
+        # snap["Secondary_ID"] = sec
+
+        return snap
+
+    def _desired_motor_settings(self) -> dict[str, dict[str, int]]:
+        """
+        Compute desired settings exactly as configure() would apply.
+        NOTE: For Drive_Mode, we only *require* that bit2 (time-based profiles) is set.
+        We don't force other bits here; comparison will be bitwise.
+        """
+        desired: dict[str, dict[str, int]] = {}
+
+        # # Return delay time set by bus.configure_motors(return_delay_time=0)
+        # desired["Return_Delay_Time"] = {m: 0 for m in self.bus.motors}
+        #
+        # # Drive mode: ensure bit 2 set (time-based profile)
+        # # We'll compare with a mask rather than exact equality.
+        # desired["Drive_Mode"] = {}  # placeholder; comparison uses bit mask only
+        #
+        # # Operating mode
+        # desired["Operating_Mode"] = {}
+        # for m in self.bus.motors:
+        #     if m == "gripper":
+        #         desired["Operating_Mode"][m] = OperatingMode.CURRENT_POSITION.value
+        #     else:
+        #         desired["Operating_Mode"][m] = OperatingMode.EXTENDED_POSITION.value
+        #
+        # # Profile velocity from moving_time (seconds) -> ms
+        # pv = int(self.config.moving_time * 1000)
+        # desired["Profile_Velocity"] = {m: pv for m in self.bus.motors}
+        #
+        # # Secondary IDs
+        # desired["Secondary_ID"] = {}
+        # if "shoulder_shadow" in self.bus.motors:
+        #     desired["Secondary_ID"]["shoulder_shadow"] = 2
+        # if "elbow_shadow" in self.bus.motors:
+        #     desired["Secondary_ID"]["elbow_shadow"] = 4
+
+        return desired
 
     def _settings_match(self, current: dict[str, dict[str, int]], desired: dict[str, dict[str, int]]) -> bool:
         """
         Compare current vs desired. For Drive_Mode, require bit2 set (mask check).
         For others, require exact equality.
         """
+        # 1) Return_Delay_Time exact
+        # for m, want in desired["Return_Delay_Time"].items():
+        #     have = current["Return_Delay_Time"].get(m)
+        #     if have != want:
+        #         logger.debug(f"Mismatch Return_Delay_Time[{m}]: have={have}, want={want}")
+        #         return False
+        #
+        # # 2) Secondary_ID where applicable
+        # for m, want in desired["Secondary_ID"].items():
+        #     have = current["Secondary_ID"].get(m)
+        #     if have != want:
+        #         logger.debug(f"Mismatch Secondary_ID[{m}]: have={have}, want={want}")
+        #         return False
+        #
+        # # 3) Drive_Mode: bit2 (time-profile) must be set
+        # mask = 1 << 2
+        # for m, have in current["Drive_Mode"].items():
+        #     if (have & mask) == 0:
+        #         logger.debug(f"Mismatch Drive_Mode[{m}]: bit2 not set (have=0b{have:b})")
+        #         return False
+        #
+        # # 4) Operating_Mode exact
+        # for m, want in desired["Operating_Mode"].items():
+        #     have = current["Operating_Mode"].get(m)
+        #     if have != want:
+        #         logger.debug(f"Mismatch Operating_Mode[{m}]: have={have}, want={want}")
+        #         return False
+        #
+        # # 5) Profile_Velocity exact
+        # for m, want in desired["Profile_Velocity"].items():
+        #     have = current["Profile_Velocity"].get(m)
+        #     if have != want:
+        #         logger.debug(f"Mismatch Profile_Velocity[{m}]: have={have}, want={want}")
+        #         return False
 
         return True

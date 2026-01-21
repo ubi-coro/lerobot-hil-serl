@@ -74,6 +74,7 @@ class AlohaBimanualEnvConfigV2(RobotEnvConfig):
         self.processor.events.key_mapping = {
             TeleopEvents.RERECORD_EPISODE: keyboard.Key.left
         }
+        super().__post_init__()
 
     @cached_property
     def initial_features(self):
@@ -98,7 +99,7 @@ class AlohaBimanualEnvConfigV2(RobotEnvConfig):
         return action_processor
 
     def make_env_processor(self, device, env: RobotEnvInterface | None = None) -> DataProcessorPipeline:
-        env_processor = super().make_action_processor(device)
+        env_processor = super().make_action_processor(self.teleop, device)
 
         # append converter
         env_processor.steps.append(MigrateCalibrationObsProcessorStep(num_robots=len(self.robot)))

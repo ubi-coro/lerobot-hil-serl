@@ -6,11 +6,9 @@ from typing import Any
 
 import numpy as np
 import torch
-from gymnasium.vector import VectorEnv
 from torch.autograd.profiler import record_function, profile, ProfilerActivity
 
 from experiments import AlohaBimanualEnvConfig
-from lerobot.envs.factory import make_env_config, make_env
 from lerobot.sim.configs import SimAlohaEnvConfig
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
@@ -49,9 +47,6 @@ from lerobot.utils.utils import (
     log_say,
 )
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
-
-import os
-os.environ['MUJOCO_GL'] = 'egl'
 
 """ --------------- record_loop() data flow --------------------------
        [ Robot ]
@@ -242,17 +237,12 @@ def record_loop(
 def record(cfg: RecordConfig) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
-
-
     if cfg.display_data:
         init_rerun(session_name="recording")
 
     # make env
     env, env_processor, action_processor = cfg.env.make(device="cpu" if cfg.policy is None else cfg.policy.device)
 
-
-    if True:
-        return
     # handle timing
     reset_cfg: ResetConfig = cfg.env.processor.reset
     if cfg.dataset.reset_time_s is not None:
