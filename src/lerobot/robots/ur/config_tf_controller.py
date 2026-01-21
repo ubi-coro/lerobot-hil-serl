@@ -46,6 +46,12 @@ class TaskFrameControllerConfig:
     wrench_limits: list[float] = field(default_factory = lambda: [30.0, 30.0, 30.0, 3.0, 3.0, 3.0])
     speed_limits: list[float] = field(default_factory = lambda: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])
 
+    # deadband
+    deadband_pos: float = 0.001  # [m/s]
+    deadband_rot: float = 0.01  # [rad/s]
+    leak_rate_pos: float = 5.0  # [1/s]
+    leak_rate_rot: float = 5.0  # [1/s]
+
     # contact-aware scaling of wrench limits
     enable_contact_aware_force_scaling: list[bool] = field(default_factory = lambda: [False] * 6)
     contact_desired_wrench: list[float] = field(default_factory = lambda: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])  # desired max contact force at equilibrium (N)

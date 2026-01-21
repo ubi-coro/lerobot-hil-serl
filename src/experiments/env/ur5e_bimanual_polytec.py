@@ -345,6 +345,7 @@ class UR5eBimanualPolytecEnvConfig(TFRobotEnvConfig):
         return env_processor
 
 
+
 @dataclass
 @EnvConfig.register_subclass("ur5e_single_polytec")
 class UR5eSinglePolytecEnvConfig(TFRobotEnvConfig):
@@ -390,37 +391,39 @@ class UR5eSinglePolytecEnvConfig(TFRobotEnvConfig):
     def __post_init__(self):
         self.processor.control_time_s = 45.0
 
-        self.processor.observation.add_ee_velocity_to_observation = True
-        self.processor.observation.add_ee_wrench_to_observation = True
-        self.processor.observation.ee_pos_mask = [1, 1, 1, 0, 0, 1]
-
-        # (top, left, height, width) crop
-        #self.processor.image_preprocessing = ImagePreprocessingConfig(
-        #    crop_params_dict={'observation.images.left_wrist': (220, 257, 170, 312)},
-        #    resize_size=(128, 256)
-        #)
-        self.processor.image_preprocessing = None
-
-        self.processor.gripper.use_gripper = True
-        self.processor.gripper.max_pos = 1.0
-        self.processor.gripper.min_pos = 0.8
-
-        self.processor.reset.terminate_on_success = True
-        self.processor.reset.teleop_on_reset = True
-        self.processor.reset.reset_time_s = 10.0
-
-        self.processor.events.key_mapping = {
-            TeleopEvents.SUCCESS: keyboard.Key.right,
-            TeleopEvents.RERECORD_EPISODE: keyboard.Key.left,
-            TeleopEvents.STOP_RECORDING: keyboard.Key.down,
-            TeleopEvents.IS_INTERVENTION: keyboard.Key.up
+        # device configs
+        self.robot = {
+            "left": URConfig(
+                model="ur5e",
+                robot_ip="192.168.1.10",
+                use_gripper=True,
+                gripper_soft_real_time=True,
+                gripper_rt_core=5,
+                gripper_vel=self.v_gripper,
+                soft_real_time=True,
+                rt_core=3,
+                verbose=True,
+                wrench_limits=[300.0, 300.0, 300.0, 20.0, 20.0, 20.0]
+            )
+        }
+        self.teleop = {
+            "left": SpacemouseConfig(
+                path="/dev/hidraw0",
+                action_scale=3 * [self.v_ee] + 3 * [self.omega_ee],
+                gripper_close_button_idx=0,
+                gripper_open_button_idx=1
+            ),
+        }
+        self.cameras = {
+            "left_wrist": RealSenseCameraConfig(
+                serial_number_or_name="218622271373",
+                fps=30,
+                width=640,
+                height=480
+            )
         }
 
-        self.processor.hooks.time_action_processor = False
-        self.processor.hooks.time_env_processor = False
-        self.processor.hooks.log_every = 1
-
-        # calculate fixed target orientations for both arms
+        # calculate fixed target orientation
         left_rot = R.from_rotvec([np.pi / np.sqrt(2), np.pi / np.sqrt(2), 0.0], degrees=False)
 
         # calculate bounds
@@ -442,6 +445,89 @@ class UR5eSinglePolytecEnvConfig(TFRobotEnvConfig):
             float("inf"),
             deg2rad(self.max_c_rot_deg) + left_rot.as_euler("xyz", degrees=False)[2]
         ]
+
+        # task frame configuration
+        self.processor.task_frame.command = {
+            "left": TaskFrameCommand(
+                T_WF=[0.0] * 6,
+                target=3 * [0.0] + left_rot.as_rotvec().tolist(),
+                mode=3 * [AxisMode.PURE_VEL] + 2 * [AxisMode.POS] + [AxisMode.PURE_VEL],
+                kp=[5000, 5000, 5000, 100, 100, 100],
+                kd=[480, 480, 480, 6, 6, 6],
+                max_pose_rpy=max_pose_rpy_left,
+                min_pose_rpy=min_pose_rpy_left
+            )
+        }
+        # 1 if mode[i] != POS
+        self.processor.task_frame.control_mask = [1, 1, 1, 0, 0, 1]
+        self.processor.task_frame.action_scale = 3 * [self.v_ee] + [self.omega_ee] + [1.0]
+
+        # observation
+        self.processor.observation.add_ee_velocity_to_observation = True
+        self.processor.observation.add_ee_wrench_to_observation = True
+        self.processor.observation.ee_pos_mask = [1, 1, 1, 0, 0, 1]
+
+        # gripper
+        self.processor.gripper.use_gripper = True
+        self.processor.gripper.max_pos = 1.0
+        self.processor.gripper.min_pos = 0.8
+
+        # reset
+        self.processor.reset.terminate_on_success = True
+        self.processor.reset.teleop_on_reset = True
+        self.processor.reset.reset_time_s = 10.0
+
+        # events
+        self.processor.events.key_mapping = {
+            TeleopEvents.SUCCESS: keyboard.Key.right,
+            TeleopEvents.RERECORD_EPISODE: keyboard.Key.left,
+            TeleopEvents.STOP_RECORDING: keyboard.Key.down,
+            TeleopEvents.TERMINATE_EPISODE: keyboard.Key.up
+        }
+        #self.processor.events.foot_switch_mapping = {
+        #    (TeleopEvents.IS_INTERVENTION,): {"device": 21, "toggle": True},
+        #}
+
+        # hooks
+        self.processor.hooks.time_action_processor = False
+        self.processor.hooks.time_env_processor = False
+        self.processor.hooks.log_every = 1
+
+        # Hard-code stats for online learning without offline datasets
+        self.stats = {
+            ACTION: {
+                "min": [-1] * 5,
+                "max": [1] * 5
+            }
+        }
+
+        super().__post_init__()
+
+
+
+@dataclass
+@EnvConfig.register_subclass("ur5e_single_polytec_teleop")
+class UR5eSinglePolytecTeleopEnvConfig(TFRobotEnvConfig):
+    fps: int = 20
+    lock_ab_rotation: bool = False
+
+    # workspace
+    left_min_x_pos: float = 0.3
+    left_max_x_pos: float = 0.73
+    left_min_y_pos: float = -0.3
+    left_max_y_pos: float = 0.1
+    left_min_z_pos: float = 0.2240
+    left_max_z_pos: float = 0.4
+    max_c_rot_deg: float = 88.0
+    min_c_rot_deg: float = -88.0
+
+    # action scaling
+    v_ee = 0.15
+    omega_ee = 1.5
+    v_gripper = 0.3
+
+    def __post_init__(self):
+        self.processor.control_time_s = 3600.0
 
         # device configs
         self.robot = {
@@ -474,26 +560,84 @@ class UR5eSinglePolytecEnvConfig(TFRobotEnvConfig):
                 height=480
             )
         }
-        self.processor.events.foot_switch_mapping = {
-            (TeleopEvents.IS_INTERVENTION,): {"device": 21, "toggle": True},
-        }
 
+        # calculate fixed target orientation
+        left_rot = R.from_rotvec([np.pi / np.sqrt(2), np.pi / np.sqrt(2), 0.0], degrees=False)
+
+        # calculate bounds
+        deg2rad = lambda deg: deg / 180.0 * np.pi
+        min_pose_rpy_left = [
+            self.left_min_x_pos,
+            self.left_min_y_pos,
+            self.left_min_z_pos,
+            -float("inf"),
+            -float("inf"),
+            deg2rad(self.min_c_rot_deg) + left_rot.as_euler("xyz", degrees=False)[2]
+        ]
+
+        max_pose_rpy_left = [
+            self.left_max_x_pos,
+            self.left_max_y_pos,
+            self.left_max_z_pos,
+            float("inf"),
+            float("inf"),
+            deg2rad(self.max_c_rot_deg) + left_rot.as_euler("xyz", degrees=False)[2]
+        ]
 
         # task frame configuration
+        if self.lock_ab_rotation:
+            mode = 3 * [AxisMode.PURE_VEL] + 2 * [AxisMode.POS] + [AxisMode.PURE_VEL]
+            target = 3 * [0.0] + left_rot.as_rotvec().tolist()
+
+            # 1 if mode[i] != POS
+            self.processor.task_frame.control_mask = [1, 1, 1, 0, 0, 1]
+            self.processor.observation.ee_pos_mask = [1, 1, 1, 0, 0, 1]
+        else:
+            mode = 6 * [AxisMode.PURE_VEL]
+            target = 6 * [0.0]
+
+            self.processor.task_frame.control_mask = [1] * 6
+            self.processor.observation.ee_pos_mask = [1] * 6
+
         self.processor.task_frame.command = {
             "left": TaskFrameCommand(
                 T_WF=[0.0] * 6,
-                target=3 * [0.0] + left_rot.as_rotvec().tolist(),
-                mode=3 * [AxisMode.PURE_VEL] + 2 * [AxisMode.POS] + [AxisMode.PURE_VEL],
+                target=target,
+                mode=mode,
                 kp=[5000, 5000, 5000, 100, 100, 100],
                 kd=[480, 480, 480, 6, 6, 6],
                 max_pose_rpy=max_pose_rpy_left,
                 min_pose_rpy=min_pose_rpy_left
             )
         }
-        # 1 if mode[i] != POS
-        self.processor.task_frame.control_mask = [1, 1, 1, 0, 0, 1]
-        self.processor.task_frame.action_scale = 3 * [self.v_ee] + [self.omega_ee] + [1.0]
+
+
+        # observation
+        self.processor.observation.add_ee_velocity_to_observation = True
+        self.processor.observation.add_ee_wrench_to_observation = True
+
+        # gripper
+        self.processor.gripper.use_gripper = True
+        self.processor.gripper.max_pos = 1.0
+        self.processor.gripper.min_pos = 0.8
+
+        # reset
+        self.processor.reset.terminate_on_success = True
+        self.processor.reset.teleop_on_reset = True
+        self.processor.reset.reset_time_s = 3600.0
+
+        # events
+        self.processor.events.key_mapping = {
+            TeleopEvents.SUCCESS: keyboard.Key.right,
+            TeleopEvents.RERECORD_EPISODE: keyboard.Key.left,
+            TeleopEvents.STOP_RECORDING: keyboard.Key.down,
+            TeleopEvents.IS_INTERVENTION: keyboard.Key.up
+        }
+
+        # hooks
+        self.processor.hooks.time_action_processor = False
+        self.processor.hooks.time_env_processor = False
+        self.processor.hooks.log_every = 1
 
         # Hard-code stats for online learning without offline datasets
         self.stats = {

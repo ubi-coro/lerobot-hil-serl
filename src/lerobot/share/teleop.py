@@ -27,6 +27,7 @@ from lerobot.envs import EnvConfig
 from lerobot.envs.robot_env import RobotEnv
 from lerobot.processor import create_transition
 from lerobot.rl.gym_manipulator import step_env_and_process_transition
+from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 from lerobot.utils.utils import init_logging
@@ -49,15 +50,9 @@ def teleop(cfg: TeleopConfig):
     # Initialize environment (robot + teleop pipelines)
     env, env_processor, action_processor = cfg.make()
 
-    # Optional visualization
-    #init_rerun(session_name="teleoperation")
-
-    obs, info = env.reset()
+    env.reset()
     env_processor.reset()
     action_processor.reset()
-
-    transition = create_transition(observation=obs, info=info)
-    transition = env_processor(data=transition)
 
     fps = 30
     logging.info("Running teleoperation loop...")
@@ -66,15 +61,12 @@ def teleop(cfg: TeleopConfig):
         while True:
             start_t = time.perf_counter()
 
-            # Get teleop actions (processed)
-            transition["action"] = torch.tensor([0.0] * 7, dtype=torch.float32)
-
-            transition = step_env_and_process_transition(
+            step_env_and_process_transition(
                 env=env,
-                transition=transition,
                 action=torch.tensor([0.0] * 7, dtype=torch.float32),
                 env_processor=env_processor,
                 action_processor=action_processor,
+                info={TeleopEvents.IS_INTERVENTION: True}
             )
 
             # Maintain loop rate
