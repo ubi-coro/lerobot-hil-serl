@@ -1,3 +1,4 @@
+import copy
 from collections import deque
 from typing import Any, Optional
 
@@ -6,9 +7,10 @@ from torch import Tensor, nn
 
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import populate_queues
-from lerobot.policies.xvla.modeling_xvla import XVLAPolicy
+from lerobot.policies.xvla.modeling_xvla import XVLAPolicy, XVLAModel
 from lerobot.utils.constants import ACTION, OBS_LANGUAGE_TOKENS
 from .configuration_xpvla import XPVLAConfig
+from .critics.backbone import CriticBackboneBundle, CriticBackboneConfig, CriticBackbone
 
 
 # -----------------------------
@@ -240,7 +242,7 @@ class XPVLA(PreTrainedPolicy):
                 action_with_noise=x_t_m,
                 proprio=proprio_m,
                 t=t,
-                **enc_u,
+                **enc_u
             )
 
             # Conditional vector field
@@ -249,7 +251,7 @@ class XPVLA(PreTrainedPolicy):
                 action_with_noise=x_t_m,
                 proprio=proprio_m,
                 t=t,
-                **enc_c,
+                **enc_c
             )
 
             # Classifier-free guidance
@@ -257,3 +259,29 @@ class XPVLA(PreTrainedPolicy):
             action = v
 
         return model.action_space.postprocess(action)
+
+    def build_critic_backbone(self) -> CriticBackbone:
+        if self.xvla is None:
+            raise RuntimeError("XVLA backbone must be initialized before building critic backbone.")
+
+        xvla_model: XVLAModel = self.xvla.model
+
+        # Deepcopy to prevent critic training from mutating the policy’s XVLA.
+        xvla_model_c = copy.deepcopy(xvla_model)
+
+        tr = xvla_model_c.transformer
+
+        # Copy selected transformer blocks (prefix) for concat_transformer fusion.
+        n = int(self.config.critic_backbone.n_reused_transformer_blocks)
+        reused = nn.ModuleList([copy.deepcopy(b) for b in list(tr.blocks)[:n]])
+
+        bundle = CriticBackboneBundle(
+            xvla_model=xvla_model_c,
+            vlm_proj=copy.deepcopy(tr.vlm_proj),
+            aux_visual_proj=copy.deepcopy(tr.aux_visual_proj),
+            action_encoder=copy.deepcopy(tr.action_encoder),
+            pos_emb=copy.deepcopy(tr.pos_emb) if hasattr(tr, "pos_emb") else None,
+            reused_blocks=reused,
+        )
+
+        return CriticBackbone(cfg=self.config.critic_backbone, bundle=bundle)

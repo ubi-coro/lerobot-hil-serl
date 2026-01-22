@@ -12,7 +12,7 @@ from lerobot.processor import PolicyProcessorPipeline, PolicyAction, RenameObser
 from lerobot.processor.converters import policy_action_to_transition, transition_to_policy_action
 from lerobot.utils.constants import (
     OBS_LANGUAGE_TOKENS,
-    OBS_LANGUAGE_ATTENTION_MASK, POLICY_PREPROCESSOR_DEFAULT_NAME, POLICY_POSTPROCESSOR_DEFAULT_NAME,
+    OBS_LANGUAGE_ATTENTION_MASK, POLICY_PREPROCESSOR_DEFAULT_NAME, POLICY_POSTPROCESSOR_DEFAULT_NAME, ACTION, OBS_STATE, OBS_IMAGES,
 )
 
 try:
@@ -174,6 +174,8 @@ class DualTokenizerWithAdvantageProcessorStep(ObservationProcessorStep):
     # --------------------
 
     def get_task_texts(self, observation: dict[str, Any], transition: EnvTransition) -> list[str]:
+        B = self._infer_batch_size(observation)
+
         comp = transition.get(TransitionKey.COMPLEMENTARY_DATA)
         if comp is None or self.task_key not in comp:
             raise ValueError(f"Missing complementary_data['{self.task_key}'] for task tokenization.")
@@ -181,28 +183,21 @@ class DualTokenizerWithAdvantageProcessorStep(ObservationProcessorStep):
         if task is None:
             raise ValueError("Task is None.")
 
-        B = self._infer_batch_size(observation)
-
         # Normalize to list[str] length B
         if isinstance(task, str):
-            return [task] * B
+            task = [task] * B
 
-        if isinstance(task, list) and all(isinstance(t, str) for t in task):
-            if len(task) == B:
-                return task
-            if len(task) == 1 and B > 1:
-                return task * B
-            raise ValueError(f"Task list length {len(task)} does not match batch size {B}.")
-        raise ValueError(f"Task must be str or list[str], got: {type(task)}")
+        assert len(task) == B
+        return task
 
     # --------------------
     # Advantage extraction (batched)
     # --------------------
 
-    def get_adv_labels(self, observation: dict[str, Any], transition: EnvTransition) -> Optional[list[bool]]:
+    def get_adv_labels(self, observation: dict[str, Any], transition: EnvTransition) -> list[bool]:
         B = self._infer_batch_size(observation)
+        v = [True] * B
 
-        v = None
         if self.advantage_key in observation:
             v = observation[self.advantage_key]
         else:
@@ -210,45 +205,15 @@ class DualTokenizerWithAdvantageProcessorStep(ObservationProcessorStep):
             if comp is not None and self.advantage_key in comp:
                 v = comp[self.advantage_key]
 
-        if v is None:
-            return None
-
         # Convert to list[bool] length B
-        if isinstance(v, bool):
-            return [v] * B
-        if isinstance(v, (int, float)):
-            return [bool(v)] * B
-
-        if isinstance(v, list):
-            if not all(isinstance(x, (bool, int, float)) for x in v):
-                raise ValueError("Advantage label list must contain bool/int/float values only.")
-            if len(v) == B:
-                return [bool(x) for x in v]
-            if len(v) == 1 and B > 1:
-                return [bool(v[0])] * B
-            raise ValueError(f"Advantage label list length {len(v)} does not match batch size {B}.")
+        if isinstance(v, (int, float, bool)):
+            v = [bool(v)] * B
 
         if isinstance(v, torch.Tensor):
-            # Accept shapes: (B,), (B,1), (B,...) -> squeeze to (B,)
-            if v.ndim == 0:
-                return [bool(v.item())] * B
+            v = v.squeeze().tolist()
 
-            v_flat = v
-            # If it's (B,1) or (B,1,1,...) squeeze trailing dims
-            if v_flat.shape[0] != B:
-                # Some pipelines store (1,) even if B inferred differently; attempt broadcast if scalar-ish
-                if v_flat.numel() == 1:
-                    return [bool(v_flat.item())] * B
-                raise ValueError(f"Advantage tensor batch dim {v_flat.shape[0]} does not match inferred B={B}.")
-
-            v_flat = v_flat.view(B, -1)
-            if v_flat.shape[1] != 1:
-                raise ValueError(
-                    f"Advantage tensor must be scalar per sample; got shape {tuple(v.shape)}."
-                )
-            return [bool(x) for x in v_flat[:, 0].tolist()]
-
-        raise ValueError(f"Cannot convert advantage labels of type {type(v)}.")
+        assert len(v) == B
+        return v
 
     # --------------------
     # Main step
@@ -322,3 +287,108 @@ class DualTokenizerWithAdvantageProcessorStep(ObservationProcessorStep):
             )
 
         return features
+
+
+@dataclass
+@ProcessorStepRegistry.register(name="chunked_sarsa_processor")
+class ChunkedSARSAProcessorStep(ObservationProcessorStep):
+    """
+    Restructure a flat batch into a nested SARSA-style batch.
+
+    Input (training-style):
+      {
+        OBS_STATE:              [B, 2, D]         or [B, 2, ...]
+        f"{OBS_IMAGES}_camX":   [B, 2, C, H, W]   (for each cam key present)
+        ACTION:                [B, 2*H, ...]      (sequence axis is dim=1)
+        ... (tokens, reward, done, etc)
+      }
+
+    Output:
+      {
+        "state": {
+            OBS_STATE:            [B, D]          (t=0)
+            f"{OBS_IMAGES}_camX": [B, C, H, W]    (t=0)
+            ...
+        },
+        "next_state": {
+            OBS_STATE:            [B, D]          (t=H)
+            f"{OBS_IMAGES}_camX": [B, C, H, W]    (t=H)
+            ...
+        },
+        ACTION:                 [B, H, ...]
+        f"next_{ACTION}":       [B, H, ...]
+        ... (all other keys passed through unchanged)
+      }
+
+    Inference-style (single observation, no time axis, no actions):
+      - If OBS_STATE / images have no time axis (dim=1 != 2), they are placed into "state"
+      - "next_state" and "next_ACTION" are omitted
+      - All other fields are left untouched / absent (no errors)
+    """
+
+    state_key: str = "state"
+    next_state_key: str = "next_state"
+    next_action_key: str = f"next_{ACTION}"
+
+    def observation(self, observation: dict[str, Any]) -> dict[str, Any]:
+        # If already structured, do nothing.
+        if self.state_key in observation:
+            return observation
+
+        batch = dict(observation)
+
+        # Collect observation keys to move into state/next_state
+        obs_keys: list[str] = []
+        if OBS_STATE in batch:
+            obs_keys.append(OBS_STATE)
+
+        for k in list(batch.keys()):
+            if isinstance(k, str) and k.startswith(f"{OBS_IMAGES}_"):
+                obs_keys.append(k)
+
+        state: dict[str, Any] = {}
+        next_state: dict[str, Any] = {}
+        has_next = False
+
+        for k in obs_keys:
+            v = batch.get(k, None)
+            if not isinstance(v, torch.Tensor):
+                # If it's not a tensor, just treat it as "state" metadata.
+                if v is not None:
+                    state[k] = v
+                batch.pop(k, None)
+                continue
+
+            # Training-style two-timestep axis: [B, 2, ...]
+            if v.ndim >= 2 and v.shape[1] == 2:
+                state[k] = v[:, 0]
+                next_state[k] = v[:, 1]
+                has_next = True
+                batch.pop(k, None)
+                continue
+
+            # Occasionally you might see [B, 1, ...] (e.g., value/inference with a history dim)
+            if v.ndim >= 2 and v.shape[1] == 1:
+                state[k] = v[:, 0]
+                batch.pop(k, None)
+                continue
+
+            # Inference-style: no explicit time axis; put it into state as-is.
+            state[k] = v
+            batch.pop(k, None)
+
+        if len(state) > 0:
+            batch[self.state_key] = state
+        if has_next and len(next_state) > 0:
+            batch[self.next_state_key] = next_state
+
+        # Split ACTION into (action, next_action) if present and shaped like a 2H sequence.
+        if ACTION in batch and isinstance(batch[ACTION], torch.Tensor):
+            a: torch.Tensor = batch[ACTION]
+            T = int(a.shape[1])
+
+            H = T // 2
+            batch[ACTION] = a[:, :H]
+            batch[self.next_action_key] = a[:, H:]
+
+        return batch
