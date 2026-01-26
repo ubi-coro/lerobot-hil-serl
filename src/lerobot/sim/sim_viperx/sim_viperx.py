@@ -28,6 +28,7 @@ from lerobot.motors.dynamixel import (
 from lerobot.robots import Robot
 from lerobot.robots.utils import ensure_safe_goal_position
 from lerobot.robots.viperx import ViperXConfig
+from lerobot.sim.mujoco_utils.sim_singleton import get_sim, SimSingleton
 from lerobot.sim.sim_viperx import SimViperXConfig
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
@@ -53,10 +54,6 @@ def linear_to_gripper(linear_position):
 
 
 class SimViperX(Robot):
-    """
-    [ViperX](https://www.trossenrobotics.com/viperx-300) developed by Trossen Robotics
-    """
-
     config_class = SimViperXConfig
     name = "sim_viperx"
 
@@ -68,12 +65,13 @@ class SimViperX(Robot):
         self.config = config
         self.cameras = make_cameras_from_configs(config.cameras)
         self._last_motor_obs = None
+        self.sim = get_sim()
+
+        self.joint_names = ["waist","shoulder","elbow","forearm_roll","wrist_angle","wrist_rotate","gripper"]
 
     @property
     def _motors_ft(self) -> dict[str, type]:
-        motors = {}
-        #motors["finger.pos"] = float  # Special case for gripper position
-        #motors.pop("gripper.pos", None)  # Remove gripper position, as it is not used directly
+        motors = {f"{joint}.pos": float for joint in self.joint_names}
         return motors
 
     @property
@@ -107,7 +105,7 @@ class SimViperX(Robot):
             cam.connect()
 
         self.configure()
-        self.get_observation()
+        # self.get_observation()
         logger.info(f"{self} connected.")
 
     @property
@@ -126,12 +124,13 @@ class SimViperX(Robot):
 
     def get_observation(self) -> dict[str, Any]:
         """The returned observations do not have a batch dimension."""
+
+        obs_dict = self.sim.get_observation(self.id)
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
         # Read arm position
         start = time.perf_counter()
-        obs_dict = {} # TODO(jzilke)
         #obs_dict["finger.pos"] = gripper_to_linear(obs_dict.pop("gripper.pos"))
         dt_ms = (time.perf_counter() - start) * 1e3
         self._last_motor_obs = dict(obs_dict)
@@ -162,11 +161,7 @@ class SimViperX(Robot):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        if "finger.pos" in action:
-            # Convert finger position to gripper position
-            action = action.copy()  # Avoid modifying the original action
-            action["gripper.pos"] = linear_to_gripper(action["finger.pos"])
-            del action["finger.pos"]
+        self.sim.add_action(self.name, [0,0,0,0,0,0,0])
 
         goal_pos = {key: action.get(key, self._last_motor_obs[key]) for key in self._last_motor_obs}
 

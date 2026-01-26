@@ -48,6 +48,9 @@ from lerobot.utils.utils import (
 )
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
+import os
+os.environ['MUJOCO_GL'] = 'egl'
+
 """ --------------- record_loop() data flow --------------------------
        [ Robot ]
            V
