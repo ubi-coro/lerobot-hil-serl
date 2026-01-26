@@ -47,11 +47,13 @@ class SimSingleton:
         self.viewer: AbstractViewer = viewer
         self.viewer.start()
 
-    def step(self):
-        temp_action = np.array([[*self.next_action, *self.next_action]]) # TODO(jzilke) remove with real action array
-        obs = self.env.step(temp_action)
-        self.observation = obs
+    def step(self, raw_action):
+        # action = np.array([[*self.next_action["left"], *self.next_action["right"]]])
+        action = np.array([[*raw_action]]) #TODO(jzilke): use self.next_action
+        obs = self.env.step(action)
+        # self.observation = obs
         self.viewer.sync(obs)  # TODO(jzilke) set framerate
+        return obs
 
     def get_observation(self, name: str):
         return self.observation.get(name)

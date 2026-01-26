@@ -424,7 +424,8 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
-    wrapped_dataset = cfg.policy.wrap_dataset(dataset)  # potentially different samples for different algos
+    # wrapped_dataset = cfg.policy.wrap_dataset(dataset)  # potentially different samples for different algos
+    wrapped_dataset = dataset # TODO(jzilke): there is no wrap_dataset function
     if hasattr(cfg.policy, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(

@@ -17,11 +17,13 @@ from lerobot.envs.factory import RobotEnvInterface, make_env_config, make_env
 from lerobot.processor import DataProcessorPipeline
 from lerobot.processor.migrate_calibration_processor import MigrateCalibrationObsProcessorStep
 from lerobot.robots import RobotConfig, Robot
+from lerobot.robots.viperx import ViperXConfig
 from lerobot.sim.configuration_mujococamera import MujocoCameraConfig
 from lerobot.sim.mujoco_utils.mujoco_wrapper import init_with_existing_sim
 from lerobot.sim.mujoco_utils.sim_singleton import init_sim, get_sim
 from lerobot.sim.sim_viperx import SimViperXConfig
 from lerobot.teleoperators import TeleopEvents
+from lerobot.teleoperators.widowx import WidowXConfig
 from lerobot.utils.constants import ACTION
 from tests.mocks.mock_teleop import MockTeleopConfig
 
@@ -97,8 +99,8 @@ class AlohaSimConfig(SimConfig):
         "overhead_cam",
     ])
     simulated_arms: List[str] = field(default_factory=lambda: [
-        "left_follower",
-        "right_follower"])
+        "left",
+        "right"])
     calibration_dir: str = ".cache/calibration/aloha_sim"
 
 
@@ -120,6 +122,11 @@ class SimRobotEnv(RobotEnv):
         obs, events = super().reset(seed=seed, options=options)
         return obs, events
 
+    def step(self, action):
+        obs, reward, terminated, truncated, events = super().step(action)
+        _obs = self.sim.step(action)
+        return obs, reward, terminated, truncated, events
+
 @dataclass
 @EnvConfig.register_subclass("sim_aloha")
 class SimAlohaEnvConfig(RobotEnvConfig):
@@ -131,12 +138,13 @@ class SimAlohaEnvConfig(RobotEnvConfig):
 
         self.kinematics_solver = None
         self.robot = {
-            "left": SimViperXConfig(port="/dev/ttyDXL_follower_left", id="left"),
-            "right": SimViperXConfig(port="/dev/ttyDXL_follower_right", id="right")
+            "left": SimViperXConfig(id="left", action_idx=(0,7)),
+            "right": SimViperXConfig(id="right", action_idx=(7,14))
         }
         self.teleop = {
-            "left": MockTeleopConfig(n_motors=7),
-            "right": MockTeleopConfig(n_motors=7)       }
+            "left": WidowXConfig(port="/dev/ttyDXL_leader_left", id="left"),
+            "right": WidowXConfig(port="/dev/ttyDXL_leader_right", id="right")
+        }
         self.cameras = {
             "cam_left_wrist": MujocoCameraConfig(
             )
@@ -145,8 +153,8 @@ class SimAlohaEnvConfig(RobotEnvConfig):
         self.processor.gripper.use_gripper = True
         self.processor.reset.terminate_on_success = True
         self.processor.events.foot_switch_mapping = {
-            # (TeleopEvents.SUCCESS,): {"device": 2, "toggle": False},
-            # (TeleopEvents.IS_INTERVENTION,): {"device": 7, "toggle": True},
+            (TeleopEvents.SUCCESS,): {"device": 2, "toggle": False},
+            (TeleopEvents.IS_INTERVENTION,): {"device": 7, "toggle": True},
         }
         self.processor.events.key_mapping = {
             TeleopEvents.RERECORD_EPISODE: keyboard.Key.left,

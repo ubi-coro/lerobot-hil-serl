@@ -161,8 +161,6 @@ class SimViperX(Robot):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        self.sim.add_action(self.name, [0,0,0,0,0,0,0])
-
         goal_pos = {key: action.get(key, self._last_motor_obs[key]) for key in self._last_motor_obs}
 
         # Cap goal position when too far away from present position.
@@ -174,7 +172,7 @@ class SimViperX(Robot):
         goal_pos = {key.removesuffix(".pos"): value for key, value in goal_pos.items()}
 
         # Send goal position to the arm
-        # self.bus.sync_write("Goal_Position", goal_pos) TODO(jzilke)
+        self.sim.add_action(self.id, goal_pos)
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
 
     def disconnect(self):
