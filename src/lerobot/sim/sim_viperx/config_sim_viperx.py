@@ -24,6 +24,21 @@ from lerobot.robots import RobotConfig
 class SimViperXConfig(RobotConfig):
     joints: List[str] = field(default_factory=lambda: ["waist", "shoulder", "elbow", "forearm_roll", "wrist_angle", "wrist_rotate", "gripper"])
 
+    disable_torque_on_disconnect: bool = False
+
+    # /!\ FOR SAFETY, READ THIS /!\
+    # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
+    # Set this to a positive scalar to have the same value for all motors, or a dictionary that maps motor
+    # names to the max_relative_target value for that motor.
+    # For Aloha, for every goal position request, motor rotations are capped at 5 degrees by default.
+    # When you feel more confident with teleoperation or running the policy, you can extend
+    # this safety limit and even removing it by setting it to `null`.
+    max_relative_target: float | None = 5.0
+
+    # The duration of the velocity-based time profile
+    # Higher values lead to smoother motions, but increase lag.
+    moving_time: float = 0.1
+
     # cameras
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     # Troubleshooting: If one of your IntelRealSense cameras freeze during

@@ -5,25 +5,33 @@ import numpy as np
 from numpy._typing import NDArray
 
 from lerobot.cameras import Camera, ColorMode
+from lerobot.sim.configuration_mujococamera import MujocoCameraConfig
+from lerobot.sim.mujoco_utils.sim_singleton import get_sim
 
 logger = logging.getLogger(__name__)
 class MujocoCamera(Camera):
+    def __init__(self, config: MujocoCameraConfig):
+        super().__init__(config)
+        self.name = config.name
+        self.sim = get_sim()
+
     @property
     def is_connected(self) -> bool:
         return True
 
     @staticmethod
     def find_cameras() -> list[dict[str, Any]]:
-        pass
+        pass #TODO(jzilke)
 
     def connect(self, warmup: bool = True) -> None:
-        pass
+        pass #TODO(jzilke): check if sim is running and if cam responds
 
     def read(self, color_mode: ColorMode | None = None) -> NDArray[Any]:
-        return self.async_read()
+        obs = self.sim.get_observation(self.name)
+        return obs.squeeze()
 
     def async_read(self, timeout_ms: float = ...) -> NDArray[Any]:
-        return np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        return self.read()
 
     def disconnect(self) -> None:
         logger.info(f"{self} disconnected.")

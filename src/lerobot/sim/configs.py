@@ -1,30 +1,22 @@
 import abc
 from dataclasses import dataclass, field
-from functools import cached_property
 from typing import List, Tuple, Type, Any
 
 from pynput import keyboard
 
 import draccus
-import numpy as np
 
-from experiments import AlohaBimanualEnvConfigV2, AlohaBimanualEnvConfig
 from lerobot.cameras import CameraConfig, Camera
-from lerobot.configs.types import PipelineFeatureType
 from lerobot.envs import EnvConfig, RobotEnvConfig, RobotEnv
 from lerobot.envs.configs import HILSerlProcessorConfig
-from lerobot.envs.factory import RobotEnvInterface, make_env_config, make_env
+from lerobot.envs.factory import RobotEnvInterface
 from lerobot.processor import DataProcessorPipeline
-from lerobot.processor.migrate_calibration_processor import MigrateCalibrationObsProcessorStep
-from lerobot.robots import RobotConfig, Robot
+from lerobot.robots import Robot
 from lerobot.robots.viperx import ViperXConfig
 from lerobot.sim.configuration_mujococamera import MujocoCameraConfig
-from lerobot.sim.mujoco_utils.mujoco_wrapper import init_with_existing_sim
 from lerobot.sim.mujoco_utils.sim_singleton import init_sim, get_sim
 from lerobot.sim.sim_viperx import SimViperXConfig
 from lerobot.teleoperators import TeleopEvents
-from lerobot.teleoperators.widowx import WidowXConfig
-from lerobot.utils.constants import ACTION
 from tests.mocks.mock_teleop import MockTeleopConfig
 
 
@@ -102,6 +94,7 @@ class AlohaSimConfig(SimConfig):
         "left",
         "right"])
     calibration_dir: str = ".cache/calibration/aloha_sim"
+    action_order: List[str] = field(default_factory=lambda: [])
 
 
 
@@ -112,8 +105,8 @@ class SimRobotEnv(RobotEnv):
             cameras: dict[str, Camera] | None = None,
             processor: HILSerlProcessorConfig | None = None
     ) -> None:
-        super().__init__(robot_dict, cameras, processor)
         self.sim = get_sim()
+        super().__init__(robot_dict, cameras, processor)
 
     def reset(
             self, *, seed: int | None = None, options: dict[str, Any] | None = None
@@ -124,8 +117,13 @@ class SimRobotEnv(RobotEnv):
 
     def step(self, action):
         obs, reward, terminated, truncated, events = super().step(action)
-        _obs = self.sim.step(action)
+        obs, _, _ ,_,_  = self.sim.step()
         return obs, reward, terminated, truncated, events
+
+    def _setup_spaces(self) -> None:
+        self.sim.action_order = self._joint_names_list
+        self.sim.reset()
+        super()._setup_spaces()
 
 @dataclass
 @EnvConfig.register_subclass("sim_aloha")
@@ -134,27 +132,46 @@ class SimAlohaEnvConfig(RobotEnvConfig):
     sim: SimConfig = field(default_factory=AlohaSimConfig)  # TODO(jzilke)
 
     def __post_init__(self):
-        self._init_sim()
-
         self.kinematics_solver = None
         self.robot = {
-            "left": SimViperXConfig(id="left", action_idx=(0,7)),
-            "right": SimViperXConfig(id="right", action_idx=(7,14))
+            "left": SimViperXConfig(id="left"),
+            "right": SimViperXConfig(id="right")
         }
         self.teleop = {
-            "left": WidowXConfig(port="/dev/ttyDXL_leader_left", id="left"),
-            "right": WidowXConfig(port="/dev/ttyDXL_leader_right", id="right")
+            "left": MockTeleopConfig(id="left", n_motors=7),
+            "right": MockTeleopConfig(id="right", n_motors=7)
         }
         self.cameras = {
+            "cam_low": MujocoCameraConfig(
+                name="worms_eye_cam",
+                fps=30,
+                width=640,
+                height=480,
+            ),
+            "cam_top": MujocoCameraConfig(
+                name="overhead_cam",
+                fps=30,
+                width=640,
+                height=480,
+            ),
+            "cam_right_wrist": MujocoCameraConfig(
+                name="wrist_cam_right",
+                fps=30,
+                width=640,
+                height=480,
+            ),
             "cam_left_wrist": MujocoCameraConfig(
+                name="wrist_cam_left",
+                fps=30,
+                width=640,
+                height=480,
             )
         }
-
         self.processor.gripper.use_gripper = True
         self.processor.reset.terminate_on_success = True
         self.processor.events.foot_switch_mapping = {
-            (TeleopEvents.SUCCESS,): {"device": 2, "toggle": False},
-            (TeleopEvents.IS_INTERVENTION,): {"device": 7, "toggle": True},
+            # (TeleopEvents.SUCCESS,): {"device": 2, "toggle": False},
+            # (TeleopEvents.IS_INTERVENTION,): {"device": 7, "toggle": True},
         }
         self.processor.events.key_mapping = {
             TeleopEvents.RERECORD_EPISODE: keyboard.Key.left,
@@ -171,8 +188,8 @@ class SimAlohaEnvConfig(RobotEnvConfig):
     def env_cls(self) -> Type[RobotEnvInterface]:
         return SimRobotEnv
 
-    def _init_sim(self):
-        env_cfg = make_env_config(self.sim.type)
-        gym_env = make_env(env_cfg)
-        gym_env = gym_env.get(self.sim.type).get(0)
-        init_sim(gym_env)
+    def make(self, device: str = "cpu") -> Tuple[RobotEnvInterface, DataProcessorPipeline, DataProcessorPipeline]:
+        init_sim(self.sim)
+        env, env_processor, action_processor = super().make(device=device)
+        return env, env_processor, action_processor
+

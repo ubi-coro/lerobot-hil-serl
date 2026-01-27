@@ -169,11 +169,8 @@ class SimViperX(Robot):
             goal_present_pos = {key: (g_pos, self._last_motor_obs[key]) for key, g_pos in goal_pos.items()}
             goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
 
-        goal_pos = {key.removesuffix(".pos"): value for key, value in goal_pos.items()}
-
-        # Send goal position to the arm
         self.sim.add_action(self.id, goal_pos)
-        return {f"{motor}.pos": val for motor, val in goal_pos.items()}
+        return goal_pos
 
     def disconnect(self):
         if not self.is_connected:

@@ -1,78 +1,85 @@
 import gymnasium as gym
 import numpy as np
 
-from lerobot.sim.mujoco_utils.viewer import Viewer, PassiveViewer, create_viewer, AbstractViewer
+from lerobot.envs.factory import make_env, make_env_config
+from lerobot.sim.mujoco_utils.viewer import create_viewer, AbstractViewer
 
 
 class SimSingleton:
-    def __init__(self, env: gym.Env, viewer: AbstractViewer = None):
-        self.env: gym.Env = env
+    def __init__(self, sim_config):
+        env_cfg = make_env_config(sim_config.type)
+        gym_env = make_env(env_cfg)
+        self.env: gym.Env = gym_env.get(sim_config.type).get(0)
+
         self.next_action: dict = {}
         self.observation: dict = {
-            'left': {
-                'waist.pos': 0.0,
-                "shoulder.pos": 0.0,
-                "elbow.pos": 0.0,
-                "forearm_roll.pos":0.0,
-                "wrist_angle.pos": 0.0,
-                "wrist_rotate.pos": 0.0,
-                "gripper.pos": 0.0
-            },
-            'right': {
-                'waist.pos': 0.0,
-                "shoulder.pos": 0.0,
-                "elbow.pos": 0.0,
-                "forearm_roll.pos": 0.0,
-                "wrist_angle.pos": 0.0,
-                "wrist_rotate.pos": 0.0,
-                "gripper.pos": 0.0
-            }
         }
 
-        self.env.reset()
+        self.action_order = []
+        self.reset()
 
         physics = self.env.envs[0].unwrapped._env.physics
         model = physics.model.ptr
         data = physics.data.ptr
 
-        if viewer is None:
-            viewer_kwargs = {
-                "key": "mujoco",
-                "model": model,
-                "data": data,
-                "image_keys": []
-            }
-            viewer = create_viewer(**viewer_kwargs)
+        viewer_kwargs = {
+            "key": sim_config.viewer,
+            "model": model,
+            "data": data,
+            "image_keys": []
+        }
+        viewer = create_viewer(**viewer_kwargs)
 
         self.viewer: AbstractViewer = viewer
         self.viewer.start()
 
-    def step(self, raw_action):
-        # action = np.array([[*self.next_action["left"], *self.next_action["right"]]])
-        action = np.array([[*raw_action]]) #TODO(jzilke): use self.next_action
-        obs = self.env.step(action)
-        # self.observation = obs
+
+    def step(self):
+        action = self._format_next_action()
+        obs, reward, terminated, truncated, events = self.env.step(action)
+        self._format_observation(obs)
         self.viewer.sync(obs)  # TODO(jzilke) set framerate
-        return obs
+        return self.observation, reward, terminated, truncated, events
+
+
+    def _format_next_action(self):
+        """Format next action to sim"""
+        return np.array([[self.next_action[joint] for joint in self.action_order]])
+
+
+    def _format_observation(self, obs):
+        """Format observation from sim to real data format"""
+        self.observation |= obs['pixels']
+        pos = obs['agent_pos'][0]
+        self.observation |= {
+            self.action_order[i]: pos[i] for i in range(len(self.action_order))
+        }
+
 
     def get_observation(self, name: str):
         return self.observation.get(name)
 
-    def add_action(self, name: str, action: list):
-        self.next_action[name] = action
+
+    def add_action(self, name, action):
+        _action = {f"{name}.{key}": value for key, value in action.items()}
+        self.next_action |= _action
+
 
     def reset(self, seed=None, options=None):
-        return self.env.reset(seed=seed, options=options)
+        obs, events = self.env.reset(seed=seed, options=options)
+        self._format_observation(obs)
+        return obs, events
 
 
 __sim: SimSingleton | None = None
 
 
-def init_sim(env: gym.Env, viewer: AbstractViewer = None):
+def init_sim(sim_cfg):
     global __sim
     if __sim is not None:
         raise Exception("Simulation is already initialized")
-    __sim = SimSingleton(env, viewer)
+    __sim = SimSingleton(sim_cfg)
+    return __sim
 
 
 def get_sim():

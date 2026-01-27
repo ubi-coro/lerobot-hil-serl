@@ -225,13 +225,14 @@ def record_loop(
 
         # (10) Handle frequency
         dt_load = time.perf_counter() - start_loop_t
+        sleep_time = 1 / fps - dt_load
         precise_sleep(1 / fps - dt_load)
         dt_loop = time.perf_counter() - start_loop_t
         logging.info(
             f"dt_loop: {dt_loop * 1000:5.2f}ms ({1 / dt_loop:3.1f}hz), "
-            f"dt_load: {dt_load * 1000:5.2f}ms ({1 / dt_load:3.1f}hz)"
+            f"dt_load: {dt_load * 1000:5.2f}ms ({1 / dt_load:3.1f}hz), "
+            f"sleep_time: {sleep_time * 1000:5.2f}ms, "
         )
-
     else:
         env.stop()
         return info
