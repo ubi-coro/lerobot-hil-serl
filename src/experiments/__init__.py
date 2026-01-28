@@ -10,3 +10,4 @@ from .dataset.aloha_unfolding import AlohaUnfoldingDatasetConfig
 from .dataset.aloha_cable import AlohaCableDatasetConfig
 from .dataset.aloha_bimanual_lemgo_v2 import AlohaBimanualDatasetConfigLemgoV2
 from .dataset.polytec import PolytecDatasetConfig
+from .dataset.aloha_stacking_cubes import AlohaStackingCubesDatasetConfig
