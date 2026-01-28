@@ -513,28 +513,61 @@ class RTDETFFController(mp.Process):
                 for i in range(3):
                     mode_i = AxisMode(self.mode[i])
                     if mode_i == AxisMode.POS:
+                        # direct position target
                         x_cmd[i] = self.target[i]
                     elif mode_i == AxisMode.IMPEDANCE_VEL:
-                        x_cmd[i] += float(self.target[i]) * dt
+                        # integrate velocity, or leak back when input velocity is in deadband
+                        v_cmd = float(self.target[i])
+                        if abs(v_cmd) > self.config.deadband_pos:
+                            x_cmd[i] += v_cmd * dt
+                        else:
+                            # leak virtual target back to actual pose
+                            x_cmd[i] += -self.config.leak_rate_pos * (x_cmd[i] - pose_F[i]) * dt
                     elif mode_i == AxisMode.PURE_VEL or mode_i == AxisMode.FORCE:
-                        pass  # we do not track a virtual position in these modes
+                        # no virtual position tracking in these modes
+                        pass
 
                 # --- rotation ---
+                # POS sets the target directly; IMPEDANCE_VEL is handled via SO(3) integration + leak
                 for i in range(3, 6):
                     mode_i = AxisMode(self.mode[i])
                     if mode_i == AxisMode.POS:
                         x_cmd[i] = self.target[i]
                     elif mode_i == AxisMode.IMPEDANCE_VEL:
-                        pass  # we integrate omega afterwards
+                        # integration + leak handled below (on full SO(3))
+                        pass
                     elif mode_i == AxisMode.PURE_VEL or mode_i == AxisMode.FORCE:
-                        pass  # we do not track a virtual position in these modes
+                        pass
 
-                # SO(3) integration for velocity
-                mask_vel = np.array([1 if AxisMode(self.mode[i]) == AxisMode.IMPEDANCE_VEL else 0 for i in range(3, 6)])
-                if np.any(mask_vel):
+                # SO(3) integration for angular velocity with deadband + leak
+                omega = np.array(self.target[3:6], dtype=float)
+                mask_imp = np.array(
+                    [1 if AxisMode(self.mode[i]) == AxisMode.IMPEDANCE_VEL else 0 for i in range(3, 6)], dtype=float,
+                )
+
+                if np.any(mask_imp):
+                    # decide per-axis whether we "move" (above deadband) or "leak" (below)
+                    move_mask = (np.abs(omega) > self.config.deadband_rot).astype(float) * mask_imp
+
+                    # start from current virtual orientation
                     R_cmd = R.from_rotvec(x_cmd[3:6])
-                    dR = R.from_rotvec(self.target[3:6] * mask_vel * dt)
-                    R_cmd = dR * R_cmd
+
+                    # integrate commanded angular velocity where above deadband
+                    if np.any(move_mask):
+                        dR_move = R.from_rotvec(omega * move_mask * dt)
+                        R_cmd = dR_move * R_cmd
+
+                    else:
+                        # leak orientation back towards actual when below deadband
+                        R_act = R.from_rotvec(pose_F[3:6])
+                        R_err = R_act * R_cmd.inv()
+                        rot_err_vec = R_err.as_rotvec()
+                        # leak factor in [0, 1]; small step along error
+                        alpha = np.clip(self.config.leak_rate_rot * dt, 0.0, 1.0)
+                        dR_leak = R.from_rotvec(alpha * rot_err_vec)
+                        R_cmd = dR_leak * R_cmd
+
+                    # write back virtual orientation as rotvec
                     x_cmd[3:6] = R_cmd.as_rotvec()
 
                 # --- clamp virtual target pos ---
@@ -556,8 +589,7 @@ class RTDETFFController(mp.Process):
                     if mode_i == AxisMode.POS:
                         wrench_W[i] = self.kp[i] * pos_err_vec[i] + self.kd[i] * -v_F[i]
                     elif mode_i == AxisMode.IMPEDANCE_VEL:
-                        vel_err = self.target[i] - v_F[i]
-                        wrench_W[i] = self.kp[i] * pos_err_vec[i] + self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
+                        wrench_W[i] = self.kp[i] * pos_err_vec[i] + self.kd[i] * -v_F[i]
                     elif mode_i == AxisMode.PURE_VEL:
                         vel_err = self.target[i] - v_F[i]
                         wrench_W[i] = self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
@@ -797,13 +829,13 @@ class RTDETFFController(mp.Process):
                 desired_wrench[i] += +self.kp[i] * penetration
 
         # ----- rotation axes (convert to Euler first) -----
-        #    Operate in Euler to measure penetration; torques are Nm.
+        # Operate in Euler to measure penetration; torques are Nm.
         rpy = self._rotvec_to_rpy(pose[3:6]).astype(np.float64)
 
         # Optional: wrap angles & bounds to [-pi, pi] if you use bounded RPY ranges
         rpy = self.wrap_to_pi(rpy)
-        min_rpy = self.wrap_to_pi(np.array(self.min_pose_rpy[3:6], dtype=np.float64))
-        max_rpy = self.wrap_to_pi(np.array(self.max_pose_rpy[3:6], dtype=np.float64))
+        min_rpy = np.array(self.min_pose_rpy[3:6], dtype=np.float64)
+        max_rpy = np.array(self.max_pose_rpy[3:6], dtype=np.float64)
 
         for j, i in enumerate(range(3, 6)):
             desired_wrench[i] = np.clip(desired_wrench[i], -scaled_wrench_limits[i], scaled_wrench_limits[i])
