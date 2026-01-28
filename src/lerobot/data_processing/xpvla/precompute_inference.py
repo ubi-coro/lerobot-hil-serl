@@ -16,8 +16,6 @@ Notes:
 - It creates a full copy of the dataset directory and adds new arrays/groups inside the Zarr store.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 import os
@@ -29,14 +27,13 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import torch
 
-# --- LeRobot imports (your repo) ---
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets.factory import make_dataset
 from lerobot.policies.factory import make_policy, make_pre_post_processors
-from lerobot.utils.constants import OBS_IMAGES, OBS_LANGUAGE_TOKENS, OBS_PREFIX, OBS_STATE
+from lerobot.utils.constants import OBS_IMAGES, OBS_LANGUAGE_TOKENS, OBS_PREFIX
 from lerobot.utils.import_utils import register_third_party_plugins
-from lerobot.utils.logging_utils import init_logging
+from lerobot.utils.utils import init_logging
 
 try:
     import zarr

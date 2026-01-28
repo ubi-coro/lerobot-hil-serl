@@ -5,7 +5,7 @@ import torch
 from torch import Tensor, nn
 
 from lerobot.policies.pretrained import PreTrainedPolicy
-from lerobot.policies.xpvla_critic.configuration_xpvla_critic import XPVLACriticConfig, XPVLACriticBackboneConfig
+from lerobot.policies.xpvla_critic.configuration_xpvla_critic import XPVLACriticConfig
 from lerobot.policies.xpvla_critic.heads.factory import make_critic_head
 from lerobot.policies.xpvla_critic.heads.value_flows import ValueFlowsTwinQHead
 from lerobot.policies.xpvla_critic.nets import CrossAttentionBlock, FiLM
@@ -14,20 +14,19 @@ from lerobot.policies.xvla.soft_transformer import timestep_embedding, DomainAwa
 from lerobot.utils.constants import ACTION, REWARD, DONE, OBS_LANGUAGE_TOKENS, OBS_STATE, OBS_IMAGES
 
 
-@PreTrainedPolicy.register_subclass("xpvla_critic")
 class XPVLACritic(PreTrainedPolicy):
 
     config_class = XPVLACriticConfig
     name = "xpvla_critic"
 
-    def __init__(self, config: XPVLACriticConfig):
+    def __init__(self, config: XPVLACriticConfig, **kwargs):
         super().__init__(config)
 
         self.gamma = float(config.gamma)
         self.H = int(config.chunk_size)
         self.tau = float(config.tau)
 
-        self.backbone = CriticBackbone(config.backbone)
+        self.backbone = CriticBackbone(config)
         self.head = make_critic_head(feat_dim=self.backbone.out_dim, config=config.head)
 
         self.target_backbone = copy.deepcopy(self.backbone).eval()
@@ -249,9 +248,6 @@ class XPVLACritic(PreTrainedPolicy):
         pass
 
 
-
-
-
 class CriticBackbone(nn.Module):
     """
     Critic backbone operating on:
@@ -263,15 +259,12 @@ class CriticBackbone(nn.Module):
       (3) concat_transformer: concat tokens -> optional reused XVLA blocks -> pool(action segment)
     """
 
-    def __init__(self, config: XPVLACriticBackboneConfig) -> None:
+    def __init__(self, config: XPVLACriticConfig) -> None:
         super().__init__()
         self.config = config
 
         # load xvla checkpoint
-        if config.xvla.pretrained_path is None:
-            self.xvla = XVLAPolicy(config.xvla)
-        else:
-            self.xvla = XVLAPolicy.from_pretrained(config.xvla.pretrained_path, config=config.xvla)
+        self.xvla = XVLAPolicy.from_pretrained(config.backbone.pretrained_path, config=config.backbone)
 
         # clone modules
         self.vlm_proj = copy.deepcopy(self.xvla.model.transformer.vlm_proj)

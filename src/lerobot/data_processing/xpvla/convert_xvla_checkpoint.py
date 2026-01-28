@@ -16,9 +16,6 @@ Config:
 - Uses draccus via lerobot.configs.parser.wrap() pattern (same style as your cache script),
   and subclasses TrainPipelineConfig to reuse dataset/policy args consistently.
 """
-
-from __future__ import annotations
-
 import json
 import logging
 import shutil
@@ -35,7 +32,7 @@ from lerobot.datasets.utils import dataset_to_policy_features
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.utils.import_utils import register_third_party_plugins
-from lerobot.utils.logging_utils import init_logging
+from lerobot.utils.utils import init_logging
 
 logger = logging.getLogger("convert_xvla_checkpoint")
 
@@ -60,9 +57,8 @@ class ConvertXVLAConfig(TrainPipelineConfig):
         fused_camera_key=observation.rgb.cam_global \
         overwrite=true
     """
-    pretrained_id: str = ""
     out_dir: str = ""
-    overwrite: bool = False
+    overwrite: bool = True
     verbose: bool = False
 
     # Optional overrides
@@ -71,6 +67,24 @@ class ConvertXVLAConfig(TrainPipelineConfig):
     # Camera that should be view-0 / fused with language.
     # Must match the dataset/policy image key exactly (the key used in batch dicts).
     fused_camera_key: str = ""
+
+    def validate(self) -> None:
+        if not self.out_dir:
+            raise ValueError("cfg.out_dir is required.")
+        if not self.fused_camera_key:
+            logger.warning(
+                "cfg.fused_camera_key is empty. No camera will be forced to view-0. "
+                "If you rely on 'view-0 fused with language', set fused_camera_key explicitly."
+            )
+
+        out_dir = Path(self.out_dir)
+        if out_dir.exists():
+            if not self.overwrite:
+                raise FileExistsError(f"{out_dir} exists. Set overwrite=true to replace it.")
+            _safe_rmtree(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        super().validate()
 
 
 # -------------------------
@@ -159,13 +173,6 @@ def _overwrite_xvla_config_from_dataset(
     # Make sure the fused camera is also first in input_features insertion order (if present)
     cfg.input_features = _reorder_input_features_for_fused_camera(cfg.input_features, image_keys)
 
-    if hasattr(cfg, "image_features"):
-        # XVLA typically expects an ordered iterable of keys.
-        try:
-            cfg.image_features = image_keys
-        except Exception:
-            cfg.image_features = {k: cfg.input_features[k] for k in image_keys if k in cfg.input_features}
-
     if hasattr(cfg, "num_image_views"):
         if force_num_views is not None:
             cfg.num_image_views = int(force_num_views)
@@ -212,23 +219,7 @@ def main(cfg: ConvertXVLAConfig) -> None:
     init_logging()
     if cfg.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
-
-    if not cfg.pretrained_id:
-        raise ValueError("cfg.pretrained_id is required.")
-    if not cfg.out_dir:
-        raise ValueError("cfg.out_dir is required.")
-    if not cfg.fused_camera_key:
-        logger.warning(
-            "cfg.fused_camera_key is empty. No camera will be forced to view-0. "
-            "If you rely on 'view-0 fused with language', set fused_camera_key explicitly."
-        )
-
-    out_dir = Path(cfg.out_dir)
-    if out_dir.exists():
-        if not cfg.overwrite:
-            raise FileExistsError(f"{out_dir} exists. Set overwrite=true to replace it.")
-        _safe_rmtree(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    cfg.validate()
 
     # ------------------------------------------------------------
     # Load dataset (meta + stats)
@@ -247,22 +238,14 @@ def main(cfg: ConvertXVLAConfig) -> None:
     # ------------------------------------------------------------
     # Load pretrained XVLA config and overwrite from dataset
     # ------------------------------------------------------------
-    logger.info("Loading pretrained config from: %s", cfg.pretrained_id)
-    base_cfg = PreTrainedConfig.from_pretrained(cfg.pretrained_id)
-
-    # Prefer device from TrainPipelineConfig policy if present
-    if hasattr(cfg, "policy") and hasattr(cfg.policy, "device") and cfg.policy.device is not None:
-        base_cfg.device = cfg.policy.device
+    logger.info("Loading pretrained config from: %s", cfg.policy.pretrained_path)
 
     base_cfg = _overwrite_xvla_config_from_dataset(
-        base_cfg,
+        cfg.policy,
         ds_meta,
         force_num_views=cfg.force_num_views,
         fused_camera_key=cfg.fused_camera_key,
     )
-
-    # Important: instantiate from weights
-    base_cfg.pretrained_path = cfg.pretrained_id
 
     # ------------------------------------------------------------
     # Instantiate XVLA policy (with overwritten feature spec)
@@ -291,34 +274,13 @@ def main(cfg: ConvertXVLAConfig) -> None:
         raise ImportError("Could not import XPVLAPolicyConfig. Fix the import path to your XPVLA policy config.") from e
 
     # Serialize config
-    if hasattr(base_cfg, "model_dump"):
-        cfg_dict = base_cfg.model_dump()
-    elif hasattr(base_cfg, "to_dict"):
-        cfg_dict = base_cfg.to_dict()
-    else:
-        cfg_path = Path(cfg.pretrained_id) / "config.json"
-        if cfg_path.exists():
-            cfg_dict = json.loads(cfg_path.read_text())
-        else:
-            raise RuntimeError("Cannot serialize base_cfg. Implement a serializer for your config class.")
-
-    cfg_dict["type"] = "xpvla_policy"
-    cfg_dict["pretrained_path"] = None
-    cfg_dict["device"] = getattr(base_cfg, "device", None)
-
-    # Construct XPVLA config (filter unknown keys if needed)
-    try:
-        xpvla_cfg = XPVLAPolicyConfig(**cfg_dict)
-    except TypeError:
-        allowed = set(getattr(XPVLAPolicyConfig, "__annotations__", {}).keys())
-        filtered = {k: v for k, v in cfg_dict.items() if k in allowed}
-        xpvla_cfg = XPVLAPolicyConfig(**filtered)
+    cfg_dict = base_cfg.__dict__
+    del cfg_dict["_florence_config_obj"]
+    xpvla_cfg = XPVLAPolicyConfig(**cfg_dict)
 
     # Ensure dataset-derived feature spec and image ordering are carried over
     xpvla_cfg.input_features = base_cfg.input_features
     xpvla_cfg.output_features = base_cfg.output_features
-    if hasattr(base_cfg, "image_features") and hasattr(xpvla_cfg, "image_features"):
-        xpvla_cfg.image_features = getattr(base_cfg, "image_features")
     if hasattr(base_cfg, "num_image_views") and hasattr(xpvla_cfg, "num_image_views"):
         xpvla_cfg.num_image_views = getattr(base_cfg, "num_image_views")
 
@@ -329,15 +291,15 @@ def main(cfg: ConvertXVLAConfig) -> None:
     # ------------------------------------------------------------
     # Save checkpoint folder
     # ------------------------------------------------------------
-    logger.info("Saving converted policy to: %s", str(out_dir))
-    xpvla_policy.save_pretrained(out_dir)
+    logger.info("Saving converted policy to: %s", str(cfg.out_dir))
+    xpvla_policy.save_pretrained(cfg.out_dir)
 
-    logger.info("Saving rebuilt processors to: %s", str(out_dir))
-    preproc.save_pretrained(out_dir, config_filename="preprocessor.json")
-    postproc.save_pretrained(out_dir, config_filename="postprocessor.json")
+    logger.info("Saving rebuilt processors to: %s", str(cfg.out_dir))
+    preproc.save_pretrained(cfg.out_dir, config_filename="preprocessor.json")
+    postproc.save_pretrained(cfg.out_dir, config_filename="postprocessor.json")
 
     manifest = {
-        "source_pretrained_id": cfg.pretrained_id,
+        "source_pretrained_id": str(cfg.policy.pretrained_path),
         "dataset_repo_id": getattr(getattr(cfg, "dataset", None), "repo_id", None),
         "dataset_root": getattr(getattr(cfg, "dataset", None), "root", None),
         "force_num_views": cfg.force_num_views,
@@ -348,7 +310,7 @@ def main(cfg: ConvertXVLAConfig) -> None:
             "reordered image keys so fused_camera_key is view-0, rebuilt processors with dataset stats."
         ),
     }
-    (out_dir / "conversion_manifest.json").write_text(json.dumps(manifest, indent=2))
+    (Path(cfg.out_dir) / "conversion_manifest.json").write_text(json.dumps(manifest, indent=2))
 
     logger.info("Done.")
 

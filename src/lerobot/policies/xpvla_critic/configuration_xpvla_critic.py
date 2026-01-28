@@ -1,5 +1,7 @@
 import abc
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional, Any
 
 import draccus
 
@@ -10,50 +12,6 @@ from lerobot.optim.optimizers import AdamWConfig
 from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
 from lerobot.policies import XVLAConfig
 from lerobot.utils.constants import OBS_PREFIX
-
-
-@dataclass
-class XPVLACriticBackboneConfig:
-    xvla: XVLAConfig = field(default_factory=lambda: XVLAConfig(repo_id="xvla/base"))
-
-    # How CriticBackbone fuses (state_tokens, action_tokens)
-    fusion: str = "concat_transformer"  # {"film","cross_attn","concat_transformer"}
-
-    # Concat-transformer specific: reuse N transformer blocks from XVLA (copied into critic)
-    num_reused_xvla_blocks: int = 1
-
-    # Cross-attention specific: number of small cross-attn blocks to add
-    num_cross_attn_blocks: int = 2
-
-    # Pooling
-    pool: str = "mean"  # {"mean","first","last"}
-
-    # Common MLP settings after pooling
-    hidden_dim: int = 1024
-    dropout: float = 0.0
-
-    # Parameters for fusion == "cross_attn"
-    n_heads: int = 8
-    mlp_ratio: float = 4.0
-
-    # Action encoder settings
-    fixed_domain_id: int = 0
-
-    # t≈0 in the XVLA timestep embedding (noise-free actions)
-    action_encoder_timestep: float = 0.0
-
-    use_pos_emb: bool = True
-    use_aux_visual_inputs: bool = True
-
-    # Caching keys
-    vlm_cache_key: str = f"{OBS_PREFIX}.vlm_cache"
-    policy_actions_key: str = f"{OBS_PREFIX}.policy_actions"              # [B,K,H,A]
-
-    freeze_vlm: bool = True
-    freeze_vlm_proj: bool = False
-    freeze_aux_visual_proj: bool = False
-    freeze_action_encoder: bool = False
-    freeze_transformer_blocks: bool = False
 
 
 @dataclass
@@ -133,22 +91,56 @@ class ValueFlowsHeadConfig(CriticHeadConfig):
 @PreTrainedConfig.register_subclass("xpvla_critic")
 @dataclass
 class XPVLACriticConfig(PreTrainedConfig):
-    # TD settings
+
+    # Backbone parameters
+    backbone_pretrained_path: str = "lerobot/xvla-base"
+    backbone: Any = None  # used to hold the backbone policy config
+    num_reused_xvla_blocks: int = 1  # reuse N transformer blocks from XVLA (copied into critic)
+    fusion: str = "concat_transformer"  # how to fuse action and vlm tokens, must be in {"film","cross_attn","concat_transformer"}
+    pool: str = "mean"  # must be in {"mean","first","last"}
+    hidden_dim: int = 1024  # mlp hidden dim after pooling
+    dropout: float = 0.0
+    num_cross_attn_blocks: int = 2  # number of small cross-attn for fusion == "cross_attn"
+    n_heads: int = 8  # number of attention heads for fusion == "cross_attn"
+    mlp_ratio: float = 4.0  # mlp ratio for fusion == "cross_attn"
+    fixed_domain_id: int = 0  # domain id that is fed into xvla's action encoder
+    action_encoder_timestep: float = 0.0  # t for the timestep embedding that is fed into xvla's action encoder
+    use_pos_emb: bool = True
+    use_aux_visual_inputs: bool = True
+
+    # Head parameters
+    head: CriticHeadConfig = field(default_factory=lambda: ScalarHeadConfig())
+
+    # TD parameters
     gamma: float = 0.99
     tau: float = 0.005
 
-    # Backbone + head configs (NO kwargs)
-    backbone: XPVLACriticBackboneConfig = field(default_factory=lambda: XPVLACriticBackboneConfig())
-    head: CriticHeadConfig = field(default_factory=lambda: ScalarHeadConfig())
+    # Caching keys
+    vlm_cache_key: str = f"{OBS_PREFIX}.vlm_cache"
+    policy_actions_key: str = f"{OBS_PREFIX}.policy_actions"
 
-    # Training preset
+    # Freezing parameters
+    freeze_vlm: bool = True
+    freeze_vlm_proj: bool = False
+    freeze_aux_visual_proj: bool = False
+    freeze_action_encoder: bool = False
+    freeze_transformer_blocks: bool = False
+
+    # Training parameters
     optimizer_lr: float = 1e-5
     optimizer_weight_decay: float = 1e-4
     scheduler_warmup_steps: int = 1_000
 
+    def __post_init__(self):
+        self.backbone = PreTrainedConfig.from_pretrained(self.backbone_pretrained_path)
+        self.backbone.pretrained_path = Path(self.backbone_pretrained_path)
+
+        if not isinstance(self.backbone, XVLAConfig):
+            raise ValueError(f"Pretrained backbone config must be a XVLAConfig, not {type(self.backbone)}")
+
     @property
     def chunk_size(self) -> int:
-        return self.backbone.xvla.chunk_size
+        return self.backbone.chunk_size
 
     @property
     def observation_delta_indices(self) -> list | None:
@@ -171,13 +163,13 @@ class XPVLACriticConfig(PreTrainedConfig):
         return AdamWConfig(lr=self.optimizer_lr, weight_decay=self.optimizer_weight_decay)
 
     def get_scheduler_preset(self) -> LRSchedulerConfig | None:
-        return CosineDecayWithWarmupSchedulerConfig(warmup_steps=self.scheduler_warmup_steps)
+        return None
 
     def validate_features(self) -> None:
         # Enforce: if you rely on cached VLM features, VLM must be frozen.
         # (We also freeze defensively in the backbone once it sees cache keys.)
-        if self.backbone.vlm_cache_key:
-            if not self.backbone.freeze_vlm:
+        if self.vlm_cache_key:
+            if not self.freeze_vlm:
                 raise ValueError(
                     "XPVLACriticConfig.freeze_vlm must be True when vlm_cache_key caching is enabled."
                 )

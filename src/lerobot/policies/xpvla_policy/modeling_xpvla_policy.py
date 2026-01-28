@@ -1,18 +1,12 @@
 import torch
 from torch import Tensor, nn
 
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.policies.xpvla_policy.configuration_xpvla_policy import XPVLAPolicyConfig
 from lerobot.policies.xvla.modeling_xvla import XVLAPolicy
 from lerobot.utils.constants import OBS_LANGUAGE_TOKENS
-from .configuration_xpvla_policy import XPVLAPolicyConfig
-from ..pretrained import PreTrainedPolicy
-from ...configs.policies import PreTrainedConfig
 
 
-# -----------------------------
-# Top-level CFGRL-AC policy
-# -----------------------------
-
-@PreTrainedPolicy.register_subclass("xpvla_policy")
 class XPVLAPolicy(XVLAPolicy):
     """
     Wrapper policy around XVLAPolicy that implements:

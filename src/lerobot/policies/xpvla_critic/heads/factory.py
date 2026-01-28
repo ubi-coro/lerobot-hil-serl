@@ -6,9 +6,6 @@ import torch.nn as nn
 from torch import Tensor
 
 from lerobot.policies.xpvla_critic.configuration_xpvla_critic import CriticHeadConfig
-from lerobot.policies.xpvla_critic.heads.c51 import C51TwinQHead
-from lerobot.policies.xpvla_critic.heads.iqn import IQNTwinQHead
-from lerobot.policies.xpvla_critic.heads.scalar import ScalarTwinQHead
 
 
 @dataclass
@@ -54,13 +51,18 @@ class CriticHead(ABC, nn.Module):
         """Update this (target) head params from src (online) head."""
 
 
-def make_critic_head(feat_dim, config: CriticHeadConfig):
+def make_critic_head(feat_dim, config: CriticHeadConfig) -> CriticHead:
     if config.type == "scalar":
-        head = ScalarTwinQHead(feat_dim=feat_dim, config=config)
+        from lerobot.policies.xpvla_critic.heads.scalar import ScalarTwinQHead
+
+        return ScalarTwinQHead(feat_dim=feat_dim, config=config)
     elif config.type == "c51":
-        head = C51TwinQHead(feat_dim=feat_dim, config=config)
+        from lerobot.policies.xpvla_critic.heads.c51 import C51TwinQHead
+
+        return C51TwinQHead(feat_dim=feat_dim, config=config)
     elif config.type == "iqn":
-        head = IQNTwinQHead(feat_dim=feat_dim, config=config)
+        from lerobot.policies.xpvla_critic.heads.iqn import IQNTwinQHead
+
+        return IQNTwinQHead(feat_dim=feat_dim, config=config)
     else:
         raise ValueError(f"Unknown head_type={config.type}")
-    return head

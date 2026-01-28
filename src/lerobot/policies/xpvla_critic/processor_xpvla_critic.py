@@ -38,10 +38,10 @@ def make_xpvla_critic_pre_post_processors(
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
         TokenizerProcessorStep(
-            tokenizer_name=config.tokenizer_name,
-            max_length=config.tokenizer_max_length,
-            padding=config.pad_language_to,
-            padding_side=config.tokenizer_padding_side
+            tokenizer_name=config.backbone.tokenizer_name,
+            max_length=config.backbone.tokenizer_max_length,
+            padding=config.backbone.pad_language_to,
+            padding_side=config.backbone.tokenizer_padding_side
         ),
         XVLAImageToFloatProcessorStep(),
         XVLAImageNetNormalizeProcessorStep(),
