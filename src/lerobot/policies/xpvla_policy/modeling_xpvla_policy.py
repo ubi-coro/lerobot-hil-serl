@@ -25,20 +25,21 @@ class XPVLAPolicy(XVLAPolicy):
     name = "xpvla_policy"
 
     def forward(self, batch):
-        batch = dict(batch)
-        ids_u = batch[OBS_LANGUAGE_TOKENS]
-        ids_c = batch[self.config.cond_tokens_key]
+        if self.config.use_advantage_conditioning:
+            batch = dict(batch)
+            ids_u = batch[OBS_LANGUAGE_TOKENS]
+            ids_c = batch[self.config.cond_tokens_key]
 
-        # with prob p, train unconditional branch (use ids_u)
-        p = float(self.config.advantage_label_dropout_p)
-        if p > 0:
-            drop = (torch.rand(ids_u.shape[0], device=ids_u.device) < p).view(-1, 1)
-            input_ids = torch.where(drop, ids_u, ids_c)
-        else:
-            input_ids = ids_c
+            # with prob p, train unconditional branch (use ids_u)
+            p = float(self.config.advantage_label_dropout_p)
+            if p > 0:
+                drop = (torch.rand(ids_u.shape[0], device=ids_u.device) < p).view(-1, 1)
+                input_ids = torch.where(drop, ids_u, ids_c)
+            else:
+                input_ids = ids_c
 
-        # XVLA expects tokens under OBS_LANGUAGE_TOKENS, overwrite
-        batch[OBS_LANGUAGE_TOKENS] = input_ids
+            # XVLA expects tokens under OBS_LANGUAGE_TOKENS, overwrite
+            batch[OBS_LANGUAGE_TOKENS] = input_ids
 
         return super().forward(batch)
 
