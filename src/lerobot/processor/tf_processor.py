@@ -246,7 +246,6 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
             teleop_action_tensor = torch.tensor(action_list, dtype=action.dtype, device=action.device)
             new_transition[TransitionKey.ACTION] = teleop_action_tensor
 
-
         elif not self._intervention_occurred:  # dont write feedback on intervention end
             # send the current action as feedback to the robots
             idx = 0
@@ -294,6 +293,9 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
     def transform_features(
             self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+
+
+
         return features
 
     def reset(self) -> None:

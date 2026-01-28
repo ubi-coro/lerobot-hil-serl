@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 from lerobot.policies.xpvla_critic.configuration_xpvla_critic import IQNHeadConfig
 from lerobot.policies.xpvla_critic.heads.factory import CriticHead, TDTarget
+from lerobot.policies.xpvla_critic.nets import MLP
 
 Tensor = torch.Tensor
 
@@ -44,20 +45,22 @@ class IQNTwinQHead(CriticHead):
     def __init__(self, feat_dim: int, config: IQNHeadConfig):
         super().__init__()
         self.config = config
-        self.tau_emb = TauEmbedding(config.n_cos, feat_dim)
+        self.tau_embed = TauEmbedding(config.n_cos, config.tau_embed_dim)
+        self.tau_proj = torch.nn.Linear(config.tau_embed_dim, feat_dim)
 
         # Map (feat ⊙ tau_emb) -> scalar
-        self.q1 = MLP(feat_dim, config.hidden_dim, 1)
-        self.q2 = MLP(feat_dim, config.hidden_dim, 1)
+        self.q1 = MLP(feat_dim, config.hidden_dim, 1, num_layers=config.num_layers, dropout=config.dropout)
+        self.q2 = MLP(feat_dim, config.hidden_dim, 1, num_layers=config.num_layers, dropout=config.dropout)
 
     def forward(self, feat: Tensor) -> Dict[str, Tensor]:
         B = feat.shape[0]
         taus = self._sample_taus(B, self.config.n_tau, feat.device)  # [B,N]
-        emb = self.tau_emb(taus)                                  # [B,N,D]
-        f = feat.unsqueeze(1) * emb                               # [B,N,D]
-
-        q1 = self.q1(f).squeeze(-1)  # [B,N]
-        q2 = self.q2(f).squeeze(-1)
+        tau_e = self.tau_embed(taus)          # [B, N, tau_embed_dim]
+        tau_phi = self.tau_proj(tau_e)        # [B, N, feat_dim]
+        feat_exp = feat.unsqueeze(1)          # [B, 1, feat_dim]
+        f = feat_exp * tau_phi                # [B, N, feat_dim]
+        q1 = self.q1(f).squeeze(-1)           # [B, N]
+        q2 = self.q2(f).squeeze(-1)           # [B, N]
         return {"q1": q1, "q2": q2, "taus": taus}
 
     def expectation(self, out: Dict[str, Tensor]) -> Tensor:
@@ -118,5 +121,5 @@ class IQNTwinQHead(CriticHead):
             p.data.mul_(1.0 - tau).add_(sp.data, alpha=tau)
 
     @staticmethod
-    def _sample_taus(self, B: int, N: int, device: torch.device) -> Tensor:
+    def _sample_taus(B: int, N: int, device: torch.device) -> Tensor:
         return torch.rand((B, N), device=device)

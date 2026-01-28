@@ -58,8 +58,8 @@ class C51TwinQHead(CriticHead):
     def __init__(self, feat_dim: int, config: C51HeadConfig):
         super().__init__()
         self.config = config
-        self.logits1 = MLP(feat_dim, config.hidden_dim, config.n_atoms)
-        self.logits2 = MLP(feat_dim, config.hidden_dim, config.n_atoms)
+        self.logits1 = MLP(feat_dim, config.hidden_dim, config.n_atoms, num_layers=config.num_layers, dropout=config.dropout)
+        self.logits2 = MLP(feat_dim, config.hidden_dim, config.n_atoms, num_layers=config.num_layers, dropout=config.dropout)
 
         atoms = torch.linspace(config.vmin, config.vmax, config.n_atoms)
         self.register_buffer("atoms", atoms, persistent=True)
@@ -81,46 +81,24 @@ class C51TwinQHead(CriticHead):
         return torch.minimum(q1, q2)
 
     @torch.no_grad()
-    def reduce_over_action_samples(self, out: dict[str, Tensor], *, B: int, K: int) -> dict[str, Tensor]:
+    def reduce_over_action_samples(self, out: dict[str, torch.Tensor], dim: int = 1) -> dict[str, torch.Tensor]:
         """
-        Reduce target-head outputs computed for B*K policy action samples down to B.
-
-        Input:
-          out["logits1"], out["logits2"]: [B*K, N]
-
-        Output:
-          {"logits1": [B, N], "logits2": [B, N]}
-
-        Important:
-          Average in probability space, not logits space.
+        out["logits1"], out["logits2"]: [B, K, n_atoms]
+        Returns probs averaged over K: [B, n_atoms]
         """
         logits1 = out["logits1"]
         logits2 = out["logits2"]
 
-        if logits1.ndim != 2:
-            raise ValueError(f"C51 reduce expects logits1 [B*K,N], got {tuple(logits1.shape)}")
-        N = logits1.shape[1]
-        if logits1.shape[0] != B * K:
-            raise ValueError(f"Expected logits1 batch dim {B*K}, got {logits1.shape[0]}")
+        # average distribution over action samples in probability space
+        probs1 = torch.softmax(logits1, dim=-1).mean(dim=dim)
+        probs2 = torch.softmax(logits2, dim=-1).mean(dim=dim)
 
-        # reshape to [B, K, N]
-        l1 = logits1.view(B, K, N)
-        l2 = logits2.view(B, K, N)
-
-        # probs: [B, K, N]
-        p1 = F.softmax(l1, dim=-1)
-        p2 = F.softmax(l2, dim=-1)
-
-        # mean over K: [B, N]
-        p1m = p1.mean(dim=1)
-        p2m = p2.mean(dim=1)
-
-        # back to logits for downstream loss (cross-entropy against projected target)
+        # small clamp for numerical safety (optional)
         eps = 1e-8
-        return {
-            "logits1": torch.log(p1m.clamp_min(eps)),
-            "logits2": torch.log(p2m.clamp_min(eps)),
-        }
+        probs1 = probs1.clamp(min=eps)
+        probs2 = probs2.clamp(min=eps)
+
+        return {"probs1": probs1, "probs2": probs2}
 
     def build_target(self, *, reward_chunk: Tensor, done: Tensor, gamma_H: float, next_out: Dict[str, Tensor]) -> TDTarget:
         # next_out comes from reduce_over_action_samples, so we expect probs

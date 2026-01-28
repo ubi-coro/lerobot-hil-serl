@@ -2,30 +2,30 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import torch
-from lerobot.policies.xvla.processor_xvla import XVLAImageToFloatProcessorStep, XVLAImageNetNormalizeProcessorStep, XVLAAddDomainIdProcessorStep
 
 from lerobot.configs.types import FeatureType, PolicyFeature, PipelineFeatureType
-from lerobot.policies.xpvla.configuration_xpvla import XPVLAConfig
+from lerobot.policies.xpvla_policy.configuration_xpvla_policy import XPVLAPolicyConfig
+from lerobot.policies.xvla.processor_xvla import XVLAImageToFloatProcessorStep, XVLAImageNetNormalizeProcessorStep, XVLAAddDomainIdProcessorStep
 from lerobot.processor import PolicyProcessorPipeline, PolicyAction, RenameObservationsProcessorStep, AddBatchDimensionProcessorStep, \
     DeviceProcessorStep, NormalizerProcessorStep, UnnormalizerProcessorStep, ObservationProcessorStep, ProcessorStepRegistry, EnvTransition, \
     TransitionKey
 from lerobot.processor.converters import policy_action_to_transition, transition_to_policy_action
 from lerobot.utils.constants import (
     OBS_LANGUAGE_TOKENS,
-    OBS_LANGUAGE_ATTENTION_MASK, POLICY_PREPROCESSOR_DEFAULT_NAME, POLICY_POSTPROCESSOR_DEFAULT_NAME, ACTION, OBS_STATE, OBS_IMAGES,
-)
+    OBS_LANGUAGE_ATTENTION_MASK, POLICY_PREPROCESSOR_DEFAULT_NAME, POLICY_POSTPROCESSOR_DEFAULT_NAME, )
 
 try:
     from transformers import AutoTokenizer
+
     _transformers_available = True
 except Exception:
     AutoTokenizer = None
     _transformers_available = False
 
 
-def make_xpvla_pre_post_processors(
-    config: XPVLAConfig,
-    dataset_stats: dict[str, dict[str, torch.Tensor]] | None = None,
+def make_xpvla_policy_pre_post_processors(
+        config: XPVLAPolicyConfig,
+        dataset_stats: dict[str, dict[str, torch.Tensor]] | None = None,
 ) -> tuple[
     PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
     PolicyProcessorPipeline[PolicyAction, PolicyAction],
@@ -39,10 +39,10 @@ def make_xpvla_pre_post_processors(
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
         DualTokenizerWithAdvantageProcessorStep(
-            tokenizer_name=config.xvla.tokenizer_name,
-            max_length=config.xvla.tokenizer_max_length,
-            padding=config.xvla.pad_language_to,
-            padding_side=config.xvla.tokenizer_padding_side,
+            tokenizer_name=config.tokenizer_name,
+            max_length=config.tokenizer_max_length,
+            padding=config.pad_language_to,
+            padding_side=config.tokenizer_padding_side,
             advantage_key=config.advantage_key,
             pos_adv_text=config.pos_adv_text,
             neg_adv_text=config.neg_adv_text,
@@ -92,10 +92,6 @@ class DualTokenizerWithAdvantageProcessorStep(ObservationProcessorStep):
     Advantage label source:
       - observation[advantage_key] (preferred)
       - complementary_data[advantage_key] (fallback)
-
-    If the advantage label is missing:
-      - require_adv_label=False: skip conditional tokenization (value training path)
-      - require_adv_label=True: raise (policy improvement / rollout path)
     """
 
     tokenizer_name: str | None = None
@@ -104,7 +100,6 @@ class DualTokenizerWithAdvantageProcessorStep(ObservationProcessorStep):
     max_length: int = 128
     task_key: str = "task"
     advantage_key: str = "advantage_label"
-    require_adv_label: bool = False
     pos_adv_text: str = "Optimal: true"
     neg_adv_text: str = "Optimal: false"
     sep: str = " "
@@ -222,16 +217,6 @@ class DualTokenizerWithAdvantageProcessorStep(ObservationProcessorStep):
         task_texts = self.get_task_texts(observation, self.transition)
         adv_labels = self.get_adv_labels(observation, self.transition)
 
-        if adv_labels is None:
-            if self.require_adv_label:
-                raise ValueError(
-                    f"Missing advantage label '{self.advantage_key}' but require_adv_label=True."
-                )
-        else:
-            if len(adv_labels) != len(task_texts):
-                raise ValueError(
-                    f"Mismatch: {len(task_texts)} task texts vs {len(adv_labels)} advantage labels."
-                )
 
         # Unconditional tokenization (always)
         tok_u = self._tokenize(task_texts)
@@ -263,7 +248,7 @@ class DualTokenizerWithAdvantageProcessorStep(ObservationProcessorStep):
         return new_obs
 
     def transform_features(
-        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+            self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         # Unconditional keys
         if OBS_LANGUAGE_TOKENS not in features[PipelineFeatureType.OBSERVATION]:

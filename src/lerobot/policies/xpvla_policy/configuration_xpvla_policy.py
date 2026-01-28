@@ -6,7 +6,7 @@ from lerobot.utils.constants import OBS_LANGUAGE_TOKENS, OBS_LANGUAGE_ATTENTION_
 
 @PreTrainedConfig.register_subclass("xpvla_policy")
 @dataclass
-class XPVLAConfig(XVLAConfig):
+class XPVLAPolicyConfig(XVLAConfig):
     """
     Top-level config for CFGRL-AC:
       - contains an embedded XVLA actor loaded from a base checkpoint
@@ -14,6 +14,8 @@ class XPVLAConfig(XVLAConfig):
       - supports policy extraction training with advantage conditioning + label dropout
       - supports inference with CFG-style guidance strength controlled via config
     """
+    use_advantage_conditioning: bool = True
+
     # ---- Observation keys ----
     advantage_key: str = "advantage_label"
     pos_adv_text: str = "Optimal: true"
@@ -25,5 +27,6 @@ class XPVLAConfig(XVLAConfig):
     # --- classifier-free guidance parameters
     advantage_label_dropout_p: float = 0.2
     guidance_scale: float = 2.0
+
 
 

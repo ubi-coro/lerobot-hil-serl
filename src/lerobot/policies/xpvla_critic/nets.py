@@ -1,18 +1,42 @@
+import torch
 from torch import nn, Tensor
 
 
 class MLP(nn.Module):
-    def __init__(self, in_dim: int, hidden_dim: int, out_dim: int):
+    def __init__(
+        self,
+        in_dim: int,
+        hidden_dim: int,
+        out_dim: int,
+        num_layers: int = 2,
+        dropout: float = 0.0,
+        activation: nn.Module | None = None,
+    ):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, out_dim),
-        )
+        assert num_layers >= 1, "num_layers must be >= 1"
+        if activation is None:
+            activation = nn.ReLU()
 
-    def forward(self, x: Tensor) -> Tensor:
+        layers: list[nn.Module] = []
+        if num_layers == 1:
+            layers.append(nn.Linear(in_dim, out_dim))
+        else:
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            layers.append(activation)
+            if dropout and dropout > 0:
+                layers.append(nn.Dropout(dropout))
+
+            for _ in range(num_layers - 2):
+                layers.append(nn.Linear(hidden_dim, hidden_dim))
+                layers.append(activation)
+                if dropout and dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+
+            layers.append(nn.Linear(hidden_dim, out_dim))
+
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
 

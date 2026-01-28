@@ -95,7 +95,7 @@ class ValueFlowsTwinQHead(CriticHead):
 
         Required:
           - critic.backbone / critic.target_backbone
-          - critic._get_policy_actions(...) and cached next_state present
+          - critic._get_cached_policy_actions(...) and cached next_state present
         """
         cfg = self.cfg
         B = reward_chunk.shape[0]
@@ -105,7 +105,7 @@ class ValueFlowsTwinQHead(CriticHead):
         feat_sa = critic.encode_sa(batch, state_key="state", action_key="action", use_target=False)  # [B,D]
 
         # Next-state sampled actions a_j ~ pi_k(s')
-        next_actions = critic._get_policy_actions(batch, next_state=True)  # [B,K,H,A]
+        next_actions = critic._get_cached_policy_actions(batch, next_state=True)  # [B,K,H,A]
         K = next_actions.shape[1]
 
         # Build next features for each sampled action: [B*K, D] using TARGET backbone (like ref uses target critics)
@@ -370,7 +370,7 @@ class ValueFlowsTwinQHead(CriticHead):
         # and let backbone recompute for next_state in ValueFlows training; otherwise store
         # per-action-sample cache. Most setups cache per-state only, so recompute here is fine.
         #
-        # If your backbone already supports state[self.config.vlm_features_key] at [B,...],
+        # If your backbone already supports state[self.config.vlm_cache_key] at [B,...],
         # you can omit passing it and rely on recompute for this path.
         _ = vlm  # intentionally unused in this helper to avoid dict repetition semantics
 

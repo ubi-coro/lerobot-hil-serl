@@ -43,6 +43,8 @@ from lerobot.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.policies.utils import validate_visual_features_consistency
 from lerobot.policies.vqbet.configuration_vqbet import VQBeTConfig
 from lerobot.policies.wall_x.configuration_wall_x import WallXConfig
+from lerobot.policies.xpvla_critic.configuration_xpvla_critic import XPVLACriticConfig
+from lerobot.policies.xpvla_policy.configuration_xpvla_policy import XPVLAPolicyConfig
 from lerobot.policies.xvla.configuration_xvla import XVLAConfig
 from lerobot.processor import PolicyAction, PolicyProcessorPipeline
 from lerobot.processor.converters import (
@@ -127,6 +129,14 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from lerobot.policies.wall_x.modeling_wall_x import WallXPolicy
 
         return WallXPolicy
+    elif name == "xpvla_policy":
+        from lerobot.policies.wall_x.modeling_wall_x import XPVLAPolicyConfig
+
+        return XPVLAPolicyConfig
+    elif name == "xpvla_critic":
+        from lerobot.policies.wall_x.modeling_wall_x import XPVLACriticConfig
+
+        return XPVLACriticConfig
     else:
         try:
             return _get_policy_cls_from_policy_name(name=name)
@@ -177,6 +187,10 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return XVLAConfig(**kwargs)
     elif policy_type == "wall_x":
         return WallXConfig(**kwargs)
+    elif policy_type == "xpvla_policy":
+        return XPVLAPolicyConfig(**kwargs)
+    elif policy_type == "xpvla_critic":
+        return XPVLACriticConfig(**kwargs)
     else:
         try:
             config_cls = PreTrainedConfig.get_choice_class(policy_type)
@@ -383,6 +397,26 @@ def make_pre_post_processors(
         from lerobot.policies.wall_x.processor_wall_x import make_wall_x_pre_post_processors
 
         processors = make_wall_x_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, XPVLACriticConfig):
+        from lerobot.policies.xpvla_critic.processor_xpvla_critic import (
+            make_xpvla_critic_pre_post_processors,
+        )
+
+        processors = make_xpvla_critic_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, XPVLAPolicyConfig):
+        from lerobot.policies.xpvla_policy.processor_xpvla_policy import (
+            make_xpvla_policy_pre_post_processors,
+        )
+
+        processors = make_xpvla_policy_pre_post_processors(
             config=policy_cfg,
             dataset_stats=kwargs.get("dataset_stats"),
         )

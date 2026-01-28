@@ -3,7 +3,8 @@ from torch import Tensor, nn
 
 from lerobot.policies.xvla.modeling_xvla import XVLAPolicy
 from lerobot.utils.constants import OBS_LANGUAGE_TOKENS
-from .configuration_xpvla_policy import XPVLAConfig
+from .configuration_xpvla_policy import XPVLAPolicyConfig
+from ..pretrained import PreTrainedPolicy
 from ...configs.policies import PreTrainedConfig
 
 
@@ -11,6 +12,7 @@ from ...configs.policies import PreTrainedConfig
 # Top-level CFGRL-AC policy
 # -----------------------------
 
+@PreTrainedPolicy.register_subclass("xpvla_policy")
 class XPVLAPolicy(XVLAPolicy):
     """
     Wrapper policy around XVLAPolicy that implements:
@@ -19,8 +21,8 @@ class XPVLAPolicy(XVLAPolicy):
       - optional reuse of image encoding across the uncond/cond branches
     """
 
-    config_class = XPVLAConfig
-    name = "xpvla"
+    config_class = XPVLAPolicyConfig
+    name = "xpvla_policy"
 
     def forward(self, batch):
         batch = dict(batch)
@@ -44,17 +46,19 @@ class XPVLAPolicy(XVLAPolicy):
     def from_pretrained(cls, pretrained_name_or_path, *, config=None, **kwargs):
         if config is None:
             base = PreTrainedConfig.from_pretrained(pretrained_name_or_path, **kwargs)
-            if not isinstance(base, XPVLAConfig):
-                # upgrade: copy over XVLA fields into XPVLAConfig
-                config = XPVLAConfig(**base.__dict__)
+            if not isinstance(base, XPVLAPolicyConfig):
+                # upgrade: copy over XVLA fields into XPVLAPolicyConfig
+                config = XPVLAPolicyConfig(**base.__dict__)
             else:
                 config = base
         return super().from_pretrained(pretrained_name_or_path, config=config, **kwargs)
 
     def _get_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
-        inputs = self._build_conditional_model_inputs(batch)
-        actions = self._generate_actions_guided(**inputs, steps=self.config.num_denoising_steps)
-        return actions
+        if self.config.use_advantage_conditioning:
+            inputs = self._build_conditional_model_inputs(batch)
+            return self._generate_actions_guided(**inputs, steps=self.config.num_denoising_steps)
+        else:
+            return super()._get_action_chunk(batch)
 
     def _build_conditional_model_inputs(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         input_ids_u = batch[OBS_LANGUAGE_TOKENS]

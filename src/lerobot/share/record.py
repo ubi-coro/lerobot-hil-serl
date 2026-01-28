@@ -355,8 +355,6 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             else:
                 log_say("Dataset is empty, re-record episode", cfg.play_sounds, blocking=True)
 
-
-
     log_say("Stop recording", cfg.play_sounds, blocking=True)
 
     env.close()

@@ -13,8 +13,8 @@ Tensor = torch.Tensor
 class ScalarTwinQHead(CriticHead):
     def __init__(self, feat_dim: int, config: ScalarHeadConfig):
         super().__init__()
-        self.q1 = MLP(feat_dim, config.hidden_dim, 1)
-        self.q2 = MLP(feat_dim, config.hidden_dim, 1)
+        self.q1 = MLP(feat_dim, config.hidden_dim, 1, num_layers=config.num_layers, dropout=config.dropout)
+        self.q2 = MLP(feat_dim, config.hidden_dim, 1, num_layers=config.num_layers, dropout=config.dropout)
 
     def forward(self, feat: Tensor) -> Dict[str, Tensor]:
         return {

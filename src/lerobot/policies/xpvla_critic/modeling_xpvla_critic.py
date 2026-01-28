@@ -28,7 +28,7 @@ class XPVLACritic(PreTrainedPolicy):
         self.tau = float(config.tau)
 
         self.backbone = CriticBackbone(config.backbone)
-        self.head = make_critic_head(config.head)
+        self.head = make_critic_head(feat_dim=self.backbone.out_dim, config=config.head)
 
         self.target_backbone = copy.deepcopy(self.backbone).eval()
         self.target_head = copy.deepcopy(self.head).eval()
@@ -38,79 +38,36 @@ class XPVLACritic(PreTrainedPolicy):
         for p in self.target_head.parameters():
             p.requires_grad_(False)
 
-    @torch.no_grad()
-    def soft_update_target(self) -> None:
-        tau = self.tau
-        for p, tp in zip(self.backbone.parameters(), self.target_backbone.parameters()):
-            tp.data.mul_(1.0 - tau).add_(p.data, alpha=tau)
-        self.target_head.soft_update_from(self.head, tau=tau)
-
-    def _accumulate_chunk_reward(self, reward: Tensor) -> Tensor:
-        if reward.ndim == 1:
-            return reward
-        if reward.ndim != 2 or reward.shape[1] != self.H:
-            raise ValueError(f"Expected reward [B,{self.H}] or [B], got {tuple(reward.shape)}")
-        gammas = (self.gamma ** torch.arange(self.H, device=reward.device, dtype=reward.dtype)).view(1, self.H)
-        return (reward * gammas).sum(dim=1)
-
-    def _get_cached_vlm_features(self, batch: dict[str, Any], *, next_state: bool) -> Optional[Tensor]:
-        key = self.config.next_vlm_features_key if next_state else self.config.vlm_features_key
-        return batch.get(key, None)
-
-    def encode_sa(
-        self,
-        batch: dict[str, Any],
-        *,
-        state_key: str = "state",
-        action_key: str = ACTION,
-        use_target: bool = False,
-    ) -> Tensor:
-        bb = self.target_backbone if use_target else self.backbone
-        state = batch[state_key]
-        action = batch[action_key]
-        tokens = batch.get(OBS_LANGUAGE_TOKENS, None)
-
-        # caching hook
-        vlm_features = self._get_cached_vlm_features(batch, next_state=(state_key == "next_state"))
-
-        feat = bb(state=state, action=action, language_tokens=tokens, vlm_features=vlm_features)
-        return feat
-
-    def q_out(self, batch: dict[str, Any], *, use_target: bool = False) -> dict[str, Tensor]:
-        feat = self.encode_sa(batch, use_target=use_target)
-        hd = self.target_head if use_target else self.head
-        return hd(feat)
+    def forward(self, batch):
+        return self.td_loss(batch)
 
     def q(self, batch: dict[str, Any], *, use_target: bool = False) -> Tensor:
+        """Compute the expected scalar Q(s, a_chunk) from the head output.
+
+        For distributional heads, returns the expectation; for scalar heads, returns the scalar Q.
+        If use_target=True, uses the target backbone/head.
+        """
         out = self.q_out(batch, use_target=use_target)
         hd = self.target_head if use_target else self.head
         return hd.expectation(out)
 
-    def _get_policy_actions(self, batch: dict[str, Any], *, next_state: bool) -> Tensor:
-        key = self.config.next_policy_actions_key if next_state else self.config.policy_actions_key
-        a = batch[key]
-        if a.ndim != 4:
-            raise ValueError(f"Expected {key} [B,K,H,A], got {tuple(a.shape)}")
-        if a.shape[2] != self.H:
-            raise ValueError(f"Expected H={self.H}, got {a.shape[2]}")
-        return a
+    def q_out(self, batch: dict[str, Any], *, use_target: bool = False) -> dict[str, Tensor]:
+        """Compute raw, possibly distributional head outputs for Q(s, a_chunk).
 
-    def encode_sa(
-        self,
-        batch: dict[str, Any],
-        *,
-        state_key: str = "state",
-        action_key: str = ACTION,
-        use_target: bool = False,
-    ) -> Tensor:
-        bb = self.target_backbone if use_target else self.backbone
-        state = batch[state_key]                 # state already contains cached forward_vlm dict
-        action = batch[action_key]               # [B,H,A]
-        tokens = batch.get(OBS_LANGUAGE_TOKENS, None)
-        return bb(state=state, action=action, language_tokens=tokens)
+        Encodes (state, action_chunk, optional language) and runs the selected head.
+        If use_target=True, uses the target backbone/head.
+        """
+        feat = self.encode_sa(batch, use_target=use_target)
+        hd = self.target_head if use_target else self.head
+        return hd(feat)
 
     def v(self, batch: dict[str, Any], *, next_state: bool = False, use_target: bool = False) -> Tensor:
-        actions = self._get_policy_actions(batch, next_state=next_state)  # [B,K,H,A]
+        """Estimate V(s) (or V(s')) by averaging Q over cached policy action samples.
+
+        Uses cached policy action chunks [B,K,H,A], evaluates Q for each sample, and returns
+        mean_k Q(s, a_k) as [B]. Set next_state=True to evaluate V(s').
+        """
+        actions = self._get_cached_policy_actions(batch, next_state=next_state)  # [B,K,H,A]
         B, K, H, A = actions.shape
 
         skey = "next_state" if next_state else "state"
@@ -130,8 +87,44 @@ class XPVLACritic(PreTrainedPolicy):
         return q.view(B, K).mean(dim=1)
 
     @torch.no_grad()
+    def advantage(self, batch: dict[str, Any]) -> Tensor:
+        """Compute advantage labels for CFGRL-style extraction.
+
+        Returns (advantage, label) where advantage = Q(s,a_chunk) - V(s) and label is a boolean
+        thresholded by margin.
+        """
+        q_sa = self.q(batch, use_target=False)
+        v_s = self.v(batch, next_state=False, use_target=False)
+        adv = q_sa - v_s
+        return adv
+
+    def encode_sa(
+        self,
+        batch: dict[str, Any],
+        *,
+        state_key: str = "state",
+        action_key: str = ACTION,
+        use_target: bool = False,
+    ) -> Tensor:
+        """Encode a (state, action_chunk) pair into a fixed-size feature vector.
+
+        Expects batch[state_key] to be a nested dict (potentially containing cached VLM outputs)
+        and batch[action_key] to be an action chunk [B,H,A]. Optionally consumes language tokens.
+        """
+        bb = self.target_backbone if use_target else self.backbone
+        state = batch[state_key]                 # state already contains cached forward_vlm dict
+        action = batch[action_key]               # [B,H,A]
+        tokens = batch.get(OBS_LANGUAGE_TOKENS, None)
+        return bb(state=state, action=action, language_tokens=tokens)
+
+    @torch.no_grad()
     def _next_state_policy_out(self, batch: dict[str, Any]) -> dict[str, Tensor]:
-        actions = self._get_policy_actions(batch, next_state=True)  # [B,K,H,A]
+        """Compute target-head outputs on next states under cached policy action samples.
+
+        Evaluates the target critic on K sampled next-state action chunks and reduces them
+        (using the head’s reducer) into an aggregated representation suitable for TD targets.
+        """
+        actions = self._get_cached_policy_actions(batch, next_state=True)  # [B,K,H,A]
         B, K, H, A = actions.shape
 
         state = batch["next_state"]
@@ -146,8 +139,11 @@ class XPVLACritic(PreTrainedPolicy):
         return self.target_head.reduce_over_action_samples(out, B=B, K=K)
 
     def td_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, Tensor]]:
-        """
-        Delegates distribution-specific target + loss to the head.
+        """Compute a TD-style critic loss for chunked returns.
+
+        Accumulates the chunk reward R, forms the discount gamma^H, and delegates target-building
+        and loss computation to the head. For ValueFlows, calls the specialized loss routine.
+        Returns (loss, logging_dict).
         """
         reward = batch[REWARD]
         done = batch[DONE].float()
@@ -193,51 +189,46 @@ class XPVLACritic(PreTrainedPolicy):
         return loss, logs
 
     @torch.no_grad()
-    def _next_state_policy_out(self, batch: dict[str, Any]) -> dict[str, Tensor]:
+    def soft_update_target(self) -> None:
+        """Polyak-update the target critic parameters.
+
+        Performs an in-place exponential moving average update of the target backbone and delegates
+        the head update to target_head.soft_update_from(...).
         """
-        Compute target-network Q outputs on next_state for policy-sampled actions a_j ~ pi_k(s').
-        For distributional heads, we need a representation of the distribution under pi_k.
-        We provide "averaged head outputs" in a head-specific compatible form.
+        tau = self.tau
+        for p, tp in zip(self.backbone.parameters(), self.target_backbone.parameters()):
+            tp.data.mul_(1.0 - tau).add_(p.data, alpha=tau)
+        self.target_head.soft_update_from(self.head, tau=tau)
 
-        Convention:
-          - Scalar: return {'q1': [B], 'q2': [B]} as mean over samples.
-          - C51: return {'logits1': [B,N], 'logits2': [B,N]} as log-mean-exp over samples (or mean probs).
-          - IQN: return {'q1': [B,T], 'q2': [B,T]} mean over samples for each tau (head handles taus).
+    def get_optim_params(self) -> dict:
+        return {
+            "params": [p for p in self.parameters() if p.requires_grad]
+        }
+
+    def _get_cached_policy_actions(self, batch: dict[str, Any], *, next_state: bool = False) -> Tensor:
+        """Fetch cached policy action chunks from the nested state dict.
+
+        Reads config.backbone.policy_actions_key from state or next_state and validates
+        the shape is [B,K,H,A], where H is the configured chunk horizon.
         """
-        actions = self._get_policy_actions(batch, next_state=True)  # [B,K,H,A]
-        B, K, H, A = actions.shape
+        s = batch["next_state"] if next_state else batch["state"]
+        a_pi = s[self.config.backbone.policy_actions_key]
+        if a_pi.ndim != 4 or a_pi.shape[2] != self.H:
+            raise ValueError(f"Expected {self.config.backbone.policy_actions_key} to be [B,K,H={self.H},A], got {tuple(a_pi.shape)}")
+        return a_pi
 
-        state = batch["next_state"]
-        tokens = batch.get(OBS_LANGUAGE_TOKENS, None)
-        vlm = self._get_cached_vlm_features(batch, next_state=True)
-
-        rep_state: dict[str, Any] = {}
-        for k, v in state.items():
-            if torch.is_tensor(v):
-                rep_state[k] = v.repeat_interleave(K, dim=0)
-            else:
-                rep_state[k] = v
-
-        rep_tokens = tokens.repeat_interleave(K, dim=0) if torch.is_tensor(tokens) else tokens
-        rep_vlm = vlm.repeat_interleave(K, dim=0) if torch.is_tensor(vlm) else vlm
-        flat_actions = actions.reshape(B * K, H, A)
-
-        feat = self.target_backbone(state=rep_state, action=flat_actions, language_tokens=rep_tokens, vlm_features=rep_vlm)
-        out = self.target_head(feat)  # head-specific dict on [B*K,...]
-
-        # Let head reduce across K in a consistent way:
-        return self.target_head.reduce_over_action_samples(out, B=B, K=K)
-
-    @torch.no_grad()
-    def advantage(self, batch: dict[str, Any], *, margin: float = 0.0) -> tuple[Tensor, Tensor]:
-        q_sa = self.q(batch, use_target=False)
-        v_s = self.v(batch, next_state=False, use_target=False)
-        adv = q_sa - v_s
-        label = adv > margin
-        return adv, label
+    def _accumulate_chunk_reward(self, reward: Tensor) -> Tensor:
+        """Compute the discounted return over a chunk."""
+        if reward.ndim == 1:
+            return reward
+        if reward.ndim != 2 or reward.shape[1] != self.H:
+            raise ValueError(f"Expected reward [B,{self.H}] or [B], got {tuple(reward.shape)}")
+        gammas = (self.gamma ** torch.arange(self.H, device=reward.device, dtype=reward.dtype)).view(1, self.H)
+        return (reward * gammas).sum(dim=1)
 
     @staticmethod
     def _repeat_tree(x: Any, K: int) -> Any:
+        """Repeat a nested pytree along the batch dimension."""
         if torch.is_tensor(x):
             return x.repeat_interleave(K, dim=0)
         if isinstance(x, dict):
@@ -246,6 +237,19 @@ class XPVLACritic(PreTrainedPolicy):
             t = [XPVLACritic._repeat_tree(v, K) for v in x]
             return type(x)(t)
         return x
+
+    # --- API ---
+    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
+        return self._get_cached_policy_actions(batch)
+
+    def select_action(self, batch: dict[str, Tensor], **kwargs) -> Tensor:
+        return self.predict_action_chunk(batch)[:, 0]
+
+    def reset(self):
+        pass
+
+
+
 
 
 class CriticBackbone(nn.Module):
@@ -328,26 +332,6 @@ class CriticBackbone(nn.Module):
 
         self._apply_freezing()
 
-    def _apply_freezing(self) -> None:
-        def _freeze(m: nn.Module) -> None:
-            for p in m.parameters():
-                p.requires_grad = False
-
-        if self.config.freeze_vlm:
-            _freeze(self.xvla.model.vlm)
-
-        if self.config.freeze_vlm_proj:
-            _freeze(self.vlm_proj)
-
-        if self.config.freeze_aux_visual_proj:
-            _freeze(self.aux_visual_proj)
-
-        if self.config.freeze_action_encoder:
-            _freeze(self.action_encoder)
-
-        if self.config.freeze_transformer_blocks:
-            _freeze(self.blocks)
-
     @property
     def device(self) -> torch.device:
         return next(self.parameters()).device
@@ -356,38 +340,6 @@ class CriticBackbone(nn.Module):
     def out_dim(self) -> int:
         return self.config.hidden_dim
 
-    def _domain_id(self, batch_size: int, device: torch.device) -> Tensor:
-        return torch.full(
-            (batch_size,),
-            int(self.config.fixed_domain_id),
-            dtype=torch.long,
-            device=device,
-        )
-
-    def encode_action_tokens(
-        self,
-        action_chunk: Tensor,     # [B, H, A]
-        proprio: Tensor,          # [B, P]
-    ) -> Tensor:
-        """
-        Reuse XVLA action_encoder exactly, with t≈0 and domain_id=0.
-        Output: [B, H, hidden]
-        """
-        B, H, _ = action_chunk.shape
-        dev = action_chunk.device
-        did = self._domain_id(B, dev)
-
-        # Build time tokens like XVLA does
-        t = torch.full((B,), float(self.config.action_encoder_timestep), device=dev, dtype=proprio.dtype)
-        time_emb = timestep_embedding(t, self.xvla.model.transformer.dim_time)  # [B, dim_time]
-        time_tokens = time_emb.unsqueeze(1).expand(B, H, -1)
-
-        proprio_tokens = proprio.unsqueeze(1).expand(B, H, proprio.shape[-1])
-        action_tokens = torch.cat([action_chunk, proprio_tokens, time_tokens], dim=-1)
-
-        # DomainAwareLinear expects domain_id, so pass fixed 0
-        return self.action_encoder(action_tokens, did)  # type: ignore[misc]
-
     def forward(
         self,
         *,
@@ -395,20 +347,20 @@ class CriticBackbone(nn.Module):
         action: Tensor,  # [B,H,A]
         language_tokens: Optional[Tensor] = None,
     ) -> Tensor:
-        """
-        Intended batch structure:
+        """Encode (state, action_chunk) into a fused feature vector.
 
-          state: dict containing at least
-            - OBS_STATE: [B,P] proprio
-            - one or more image tensors under keys starting with OBS_IMAGES,
-              e.g. f"{OBS_IMAGES}_cam1", f"{OBS_IMAGES}_cam2", ...
-            - optionally: config.vlm_features_key storing raw forward_vlm(...) output dict
+        Inputs:
+        - state: nested dict containing at least proprio (OBS_STATE) and image tensors (OBS_IMAGES*),
+          and optionally a cached vlm_cache_key dict equal to XVLA.forward_vlm output.
+        - action: action chunk [B,H,A]
+        - language_tokens: optional token ids [B,L]
 
-          action: [B,H,A] action chunk
-          language_tokens: [B, L] token ids (unconditioned), usually batch[OBS_LANGUAGE_TOKENS]
+        Behavior:
 
-        Returns:
-          fused feature vector [B, hidden] for Q/V heads.
+        Uses cached VLM outputs if present; otherwise runs XVLA.forward_vlm.
+        Projects VLM (and optional auxiliary visual) tokens into hidden space.
+        Encodes action tokens via XVLA action encoder at near-zero timestep.
+        Fuses state/action tokens using the configured fusion strategy and pools to [B,hidden].
         """
         proprio: Tensor = state[OBS_STATE]
         action_chunk: Tensor = action
@@ -421,7 +373,7 @@ class CriticBackbone(nn.Module):
         # 1) Get raw VLM outputs (cached or freshly computed)
         # -------------------------
         # Cached object is EXACTLY what forward_vlm returns (a dict), per your spec.
-        enc = state.get(self.config.vlm_features_key, None)
+        enc = state.get(self.config.vlm_cache_key, None)
         if enc is None:
             # Build pixel_values from all camera keys in state
             pixel_values = {k: v for k, v in state.items() if isinstance(k, str) and k.startswith(OBS_IMAGES)}
@@ -501,7 +453,66 @@ class CriticBackbone(nn.Module):
         fused = self._pool(x[:, :H, :])  # pool only action segment
         return self.post(fused)
 
+    def encode_action_tokens(
+        self,
+        action_chunk: Tensor,     # [B, H, A]
+        proprio: Tensor,          # [B, P]
+    ) -> Tensor:
+        """Encode an action chunk into token embeddings using XVLA’s action encoder.
+
+        Builds per-step tokens by concatenating (action, proprio, time-embedding) and runs the
+        cloned action encoder with a fixed domain id. Returns [B,H,hidden].
+        """
+        B, H, _ = action_chunk.shape
+        dev = action_chunk.device
+        did = self._domain_id(B, dev)
+
+        # Build time tokens like XVLA does
+        t = torch.full((B,), float(self.config.action_encoder_timestep), device=dev, dtype=proprio.dtype)
+        time_emb = timestep_embedding(t, self.xvla.model.transformer.dim_time)  # [B, dim_time]
+        time_tokens = time_emb.unsqueeze(1).expand(B, H, -1)
+
+        proprio_tokens = proprio.unsqueeze(1).expand(B, H, proprio.shape[-1])
+        action_tokens = torch.cat([action_chunk, proprio_tokens, time_tokens], dim=-1)
+
+        # DomainAwareLinear expects domain_id, so pass fixed 0
+        return self.action_encoder(action_tokens, did)  # type: ignore[misc]
+
+    def _apply_freezing(self) -> None:
+        """Sets requires_grad=False for selected components."""
+        def _freeze(m: nn.Module) -> None:
+            for p in m.parameters():
+                p.requires_grad = False
+
+        if self.config.freeze_vlm:
+            _freeze(self.xvla.model.vlm)
+
+        if self.config.freeze_vlm_proj:
+            _freeze(self.vlm_proj)
+
+        if self.config.freeze_aux_visual_proj:
+            _freeze(self.aux_visual_proj)
+
+        if self.config.freeze_action_encoder:
+            _freeze(self.action_encoder)
+
+        if self.config.freeze_transformer_blocks:
+            _freeze(self.blocks)
+
+    def _domain_id(self, batch_size: int, device: torch.device) -> Tensor:
+        """Create a fixed domain-id tensor for domain-aware XVLA layers."""
+        return torch.full(
+            (batch_size,),
+            int(self.config.fixed_domain_id),
+            dtype=torch.long,
+            device=device,
+        )
+
     def _pool(self, tokens: Tensor) -> Tensor:
+        """Pool a token sequence to a single vector.
+
+        Supported modes: mean over sequence, first token, or last token.
+        """
         if self.config.pool == "mean":
             return tokens.mean(dim=1)
         elif self.config.pool == "first":
@@ -509,11 +520,3 @@ class CriticBackbone(nn.Module):
         elif self.config.pool == "last":
             return tokens[:, -1, ...]
         raise ValueError(f"Unknown pool='{self.config.pool}'")
-
-    @staticmethod
-    def _is_domain_aware(module: nn.Module) -> bool:
-        # DomainAwareLinear in soft_transformer has signature forward(x, domain_id).
-        # We detect it conservatively by checking for nn.Embedding attributes used there.
-        return hasattr(module, "fc") and hasattr(module, "bias") and isinstance(getattr(module, "fc"), nn.Embedding)
-
-

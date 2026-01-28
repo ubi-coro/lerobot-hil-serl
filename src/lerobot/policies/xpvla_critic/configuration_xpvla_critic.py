@@ -9,6 +9,7 @@ from lerobot.optim.schedulers import LRSchedulerConfig
 from lerobot.optim.optimizers import AdamWConfig
 from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
 from lerobot.policies import XVLAConfig
+from lerobot.utils.constants import OBS_PREFIX
 
 
 @dataclass
@@ -45,10 +46,8 @@ class XPVLACriticBackboneConfig:
     use_aux_visual_inputs: bool = True
 
     # Caching keys
-    vlm_features_key: str = "vlm_features"
-    next_vlm_features_key: str = "next_vlm_features"
-    policy_actions_key: str = "policy_actions"              # [B,K,H,A]
-    next_policy_actions_key: str = "next_policy_actions"    # [B,K,H,A]
+    vlm_cache_key: str = f"{OBS_PREFIX}.vlm_cache"
+    policy_actions_key: str = f"{OBS_PREFIX}.policy_actions"              # [B,K,H,A]
 
     freeze_vlm: bool = True
     freeze_vlm_proj: bool = False
@@ -70,10 +69,9 @@ class CriticHeadConfig(draccus.ChoiceRegistry, abc.ABC):
 @dataclass
 class ScalarHeadConfig(CriticHeadConfig):
     # Twin-Q head MLP
-    q_hidden_dim: int = 1024
-    q_num_layers: int = 2
-    q_dropout: float = 0.0
-    huber_delta: float = 1.0
+    hidden_dim: int = 1024
+    num_layers: int = 2
+    dropout: float = 0.0
 
 
 @CriticHeadConfig.register_subclass("c51")
@@ -84,9 +82,9 @@ class C51HeadConfig(CriticHeadConfig):
     v_min: float = -10.0
     v_max: float = 10.0
 
-    q_hidden_dim: int = 1024
-    q_num_layers: int = 2
-    q_dropout: float = 0.0
+    hidden_dim: int = 1024
+    num_layers: int = 2
+    dropout: float = 0.0
 
 
 @CriticHeadConfig.register_subclass("iqn")
@@ -96,10 +94,11 @@ class IQNHeadConfig(CriticHeadConfig):
     n_tau: int = 32                 # number of quantile samples per forward
     tau_embed_dim: int = 64         # cosine embedding size
     n_cos: int = 64                 # number of cosines for embedding
+    kappa: float = 1.0
 
-    q_hidden_dim: int = 1024
-    q_num_layers: int = 2
-    q_dropout: float = 0.0
+    hidden_dim: int = 1024
+    num_layers: int = 2
+    dropout: float = 0.0
 
 
 @CriticHeadConfig.register_subclass("value_flows")
@@ -136,7 +135,6 @@ class ValueFlowsHeadConfig(CriticHeadConfig):
 class XPVLACriticConfig(PreTrainedConfig):
     # TD settings
     gamma: float = 0.99
-    chunk_size: int = 50
     tau: float = 0.005
 
     # Backbone + head configs (NO kwargs)
@@ -149,17 +147,25 @@ class XPVLACriticConfig(PreTrainedConfig):
     scheduler_warmup_steps: int = 1_000
 
     @property
+    def chunk_size(self) -> int:
+        return self.backbone.xvla.chunk_size
+
+    @property
     def observation_delta_indices(self) -> list | None:
         # Not used for critic; keep for API compatibility.
-        return None
+        return [0, self.chunk_size]
 
     @property
     def action_delta_indices(self) -> list | None:
-        return None
+        return list(range(self.chunk_size))
 
     @property
     def reward_delta_indices(self) -> list | None:
-        return None
+        return list(range(self.chunk_size))
+
+    @property
+    def drop_n_last_frames(self) -> int:
+        return self.chunk_size
 
     def get_optimizer_preset(self) -> OptimizerConfig:
         return AdamWConfig(lr=self.optimizer_lr, weight_decay=self.optimizer_weight_decay)
@@ -170,8 +176,8 @@ class XPVLACriticConfig(PreTrainedConfig):
     def validate_features(self) -> None:
         # Enforce: if you rely on cached VLM features, VLM must be frozen.
         # (We also freeze defensively in the backbone once it sees cache keys.)
-        if self.vlm_features_key or self.next_vlm_features_key:
+        if self.backbone.vlm_cache_key:
             if not self.backbone.freeze_vlm:
                 raise ValueError(
-                    "XPVLACriticConfig.freeze_vlm must be True when vlm_features_key caching is enabled."
+                    "XPVLACriticConfig.freeze_vlm must be True when vlm_cache_key caching is enabled."
                 )
