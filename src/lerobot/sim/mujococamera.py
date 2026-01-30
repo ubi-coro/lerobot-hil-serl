@@ -6,14 +6,14 @@ from numpy._typing import NDArray
 
 from lerobot.cameras import Camera, ColorMode
 from lerobot.sim.configuration_mujococamera import MujocoCameraConfig
-from lerobot.sim.mujoco_utils.sim_singleton import get_sim
+from lerobot.sim.mujoco_utils.sim_singleton import SimManager
 
 logger = logging.getLogger(__name__)
 class MujocoCamera(Camera):
     def __init__(self, config: MujocoCameraConfig):
         super().__init__(config)
-        self.name = config.name
-        self.sim = get_sim()
+        self.name = config.mujoco_id
+        self.sim = SimManager.get()
 
     @property
     def is_connected(self) -> bool:

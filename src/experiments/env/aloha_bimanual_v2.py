@@ -99,7 +99,7 @@ class AlohaBimanualEnvConfigV2(RobotEnvConfig):
         return action_processor
 
     def make_env_processor(self, device, env: RobotEnvInterface | None = None) -> DataProcessorPipeline:
-        env_processor = super().make_action_processor(self.teleop, device)
+        env_processor = super().make_env_processor(device)
 
         # append converter
         env_processor.steps.append(MigrateCalibrationObsProcessorStep(num_robots=len(self.robot)))

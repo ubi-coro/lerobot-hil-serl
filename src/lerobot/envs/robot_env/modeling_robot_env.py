@@ -205,12 +205,7 @@ class RobotEnv(RobotEnvInterface):
     def step(self, action) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
         """Execute one environment step with given action."""
 
-        idx_start = 0
-        for name, robot in self.robot_dict.items():
-            target_joint_positions = {key: action[idx_start + i] for i, key in enumerate(self._joint_names_dict[name])}
-            robot.send_action(target_joint_positions)
-            idx_start += len(self._joint_names_dict[name])
-
+        self._send_actions(action)
         obs = self._get_observation()
 
         self._raw_joint_positions = {key: obs[key] for key in self._joint_names_list}
@@ -252,3 +247,11 @@ class RobotEnv(RobotEnvInterface):
     def get_raw_joint_positions(self) -> dict[str, float]:
         """Get raw joint positions."""
         return self._raw_joint_positions
+
+    def _send_actions(self, action):
+        """Send joint targets to robots."""
+        idx_start = 0
+        for name, robot in self.robot_dict.items():
+            target_joint_positions = {key: action[idx_start + i] for i, key in enumerate(self._joint_names_dict[name])}
+            robot.send_action(target_joint_positions)
+            idx_start += len(self._joint_names_dict[name])

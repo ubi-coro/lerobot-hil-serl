@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 @CameraConfig.register_subclass("mujoco_camera")
 @dataclass
 class MujocoCameraConfig(CameraConfig):
-    name: str | None = None
+    mujoco_id: str | None = None
     fps: int | None = 30
     width: int | None = 640
     height: int | None = 480

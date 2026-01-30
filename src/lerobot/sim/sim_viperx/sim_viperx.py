@@ -28,7 +28,7 @@ from lerobot.motors.dynamixel import (
 from lerobot.robots import Robot
 from lerobot.robots.utils import ensure_safe_goal_position
 from lerobot.robots.viperx import ViperXConfig
-from lerobot.sim.mujoco_utils.sim_singleton import get_sim, SimSingleton
+from lerobot.sim.mujoco_utils.sim_singleton import SimManager
 from lerobot.sim.sim_viperx import SimViperXConfig
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
@@ -65,7 +65,7 @@ class SimViperX(Robot):
         self.config = config
         self.cameras = make_cameras_from_configs(config.cameras)
         self._last_motor_obs = None
-        self.sim = get_sim()
+        self.sim = SimManager.get()
 
         self.joint_names = ["waist","shoulder","elbow","forearm_roll","wrist_angle","wrist_rotate","gripper"]
 
@@ -125,7 +125,7 @@ class SimViperX(Robot):
     def get_observation(self) -> dict[str, Any]:
         """The returned observations do not have a batch dimension."""
 
-        obs_dict = self.sim.get_observation(self.id)
+        obs_dict = { f"{joint_name}.pos": self.sim.get_observation(f"{self.id}.{joint_name}.pos") for joint_name in self.joint_names}
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 

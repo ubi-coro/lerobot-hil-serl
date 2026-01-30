@@ -119,6 +119,7 @@ class FootSwitchHandler:
 
     def _run(self):
         logging.info(f"Listening for foot switch events from {self.device.name} ({self.device.path})...")
+        self.device.grab()
         for event in self.device.read_loop():
             if not self.running:
                 break
@@ -142,6 +143,7 @@ class FootSwitchHandler:
                     logging.info(f"Foot switch released - {self.event_names} OFF")
                     for name in self.event_names:
                         self.events[name] = False
+        self.device.ungrab()
 
     def stop(self):
         self.running = False

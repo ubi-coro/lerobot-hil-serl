@@ -49,10 +49,13 @@ class AbstractViewer(ViewerRegistry, ABC):
 
 @AbstractViewer.register_subclass("mujoco")
 class MujocoViewer(AbstractViewer):
-    def __init__(self, model, data, **kwargs):
+    def __init__(self, model, data, hz=30 ,**kwargs):
         self.model = model
         self.data = data
         self.viewer = None
+        self.hz = hz
+        self._frame_dt = 1.0 / self.hz
+        self._last_render = 0.0
 
         if kwargs:
             logging.debug(f"Unused parameters in MujocoViewer: {kwargs}")
@@ -77,8 +80,12 @@ class MujocoViewer(AbstractViewer):
         return self.viewer.is_running() if self.viewer else False
 
     def sync(self, observation):
-        if self.viewer:
+        if not self.viewer:
+            raise RuntimeError(f"Viewer is not running")
+        now = time.perf_counter()
+        if now - self._last_render >= self._frame_dt:
             self.viewer.sync()
+            self._last_render = now
 
 
 @AbstractViewer.register_subclass("camera")
