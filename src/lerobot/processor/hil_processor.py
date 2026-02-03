@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-import logging
+
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -85,10 +85,10 @@ class HasTeleopEvents(Protocol):
 
 
 # Type variable constrained to Teleoperator subclasses that also implement events
-TeleopWithEvents = TypeVar("TeleopWithEvents", bound=Teleoperator)
+TeleopWithEvents = TypeVar("TeleopWithEvents", bound="Teleoperator")
 
 
-def _check_teleop_with_events(teleop: Teleoperator) -> None:
+def _check_teleop_with_events(teleop: "Teleoperator") -> None:
     """
     Runtime check that a teleoperator implements the `HasTeleopEvents` protocol.
 
@@ -573,6 +573,88 @@ class GripperPenaltyProcessorStep(ComplementaryDataProcessorStep):
 
 
 @dataclass
+@ProcessorStepRegistry.register("gripper_penalty_processor_new")
+class GripperPenaltyProcessorStepNew(ProcessorStep):
+    """
+    Applies a penalty for inefficient gripper usage.
+
+    This step penalizes actions that attempt to close an already closed gripper or
+    open an already open one, based on position thresholds.
+
+    Attributes:
+        penalty: The negative reward value to apply.
+        max_gripper_pos: The maximum position value for the gripper, used for normalization.
+    """
+
+    penalty: float = -0.01
+    max_gripper_pos: float = 30.0
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        """
+        Calculates the gripper penalty and adds it to the complementary data.
+
+        Args:
+            transition: The incoming environment transition.
+
+        Returns:
+            The modified transition with the penalty added to complementary data.
+        """
+        new_transition = transition.copy()
+        action = new_transition.get(TransitionKey.ACTION)
+        complementary_data = new_transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
+
+        raw_joint_positions = complementary_data.get("raw_joint_positions")
+        if raw_joint_positions is None:
+            return new_transition
+
+        current_gripper_pos = raw_joint_positions.get(GRIPPER_KEY, None)
+        if current_gripper_pos is None:
+            return new_transition
+
+        # Gripper action is a PolicyAction at this stage
+        gripper_action = action[-1].item()
+        gripper_action_normalized = gripper_action / self.max_gripper_pos
+
+        # Normalize gripper state and action
+        gripper_state_normalized = current_gripper_pos / self.max_gripper_pos
+
+        # Calculate penalty boolean as in original
+        gripper_penalty_bool = (gripper_state_normalized < 0.5 and gripper_action_normalized > 0.5) or (
+            gripper_state_normalized > 0.75 and gripper_action_normalized < 0.5
+        )
+
+        gripper_penalty = self.penalty * int(gripper_penalty_bool)
+
+        # Update complementary data with penalty info
+        new_complementary_data = dict(complementary_data)
+        new_complementary_data[DISCRETE_PENALTY_KEY] = gripper_penalty
+        new_transition[TransitionKey.COMPLEMENTARY_DATA] = new_complementary_data
+
+        return new_transition
+
+    def get_config(self) -> dict[str, Any]:
+        """
+        Returns the configuration of the step for serialization.
+
+        Returns:
+            A dictionary containing the penalty value and max gripper position.
+        """
+        return {
+            "penalty": self.penalty,
+            "max_gripper_pos": self.max_gripper_pos,
+        }
+
+    def reset(self) -> None:
+        """Resets the processor's internal state."""
+        pass
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+
+@dataclass
 @ProcessorStepRegistry.register("discretize_gripper_processor")
 class DiscretizeGripperProcessorStep(ActionProcessorStep):
     """
@@ -935,4 +1017,3 @@ class RewardClassifierProcessorStep(ProcessorStep):
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         return features
-

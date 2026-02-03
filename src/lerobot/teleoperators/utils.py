@@ -13,12 +13,14 @@
 # limitations under the License.
 
 from enum import Enum
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from lerobot.utils.import_utils import make_device_from_device_class
 
 from .config import TeleoperatorConfig
-from .teleoperator import Teleoperator
+
+if TYPE_CHECKING:
+    from .teleoperator import Teleoperator
 
 
 class TeleopEvents(Enum):
@@ -35,7 +37,7 @@ class TeleopEvents(Enum):
     RESUME_RECORDING = "resume_recording"
 
 
-def make_teleoperator_from_config(config: TeleoperatorConfig) -> Teleoperator:
+def make_teleoperator_from_config(config: TeleoperatorConfig) -> "Teleoperator":
     # TODO(Steven): Consider just using the make_device_from_device_class for all types
     if config.type == "keyboard":
         from .keyboard import KeyboardTeleop
@@ -77,10 +79,14 @@ def make_teleoperator_from_config(config: TeleoperatorConfig) -> Teleoperator:
         from .homunculus import HomunculusArm
 
         return HomunculusArm(config)
-    elif config.type == "bi_so100_leader":
-        from .bi_so100_leader import BiSO100Leader
+    elif config.type == "unitree_g1":
+        from .unitree_g1 import UnitreeG1Teleoperator
 
-        return BiSO100Leader(config)
+        return UnitreeG1Teleoperator(config)
+    elif config.type == "bi_so_leader":
+        from .bi_so_leader import BiSOLeader
+
+        return BiSOLeader(config)
     elif config.type == "reachy2_teleoperator":
         from .reachy2_teleoperator import Reachy2Teleoperator
 
@@ -89,8 +95,16 @@ def make_teleoperator_from_config(config: TeleoperatorConfig) -> Teleoperator:
         from .spacemouse import SpaceMouse
 
         return SpaceMouse(config)
+    elif config.type == "openarm_leader":
+        from .openarm_leader import OpenArmLeader
+
+        return OpenArmLeader(config)
+    elif config.type == "bi_openarm_leader":
+        from .bi_openarm_leader import BiOpenArmLeader
+
+        return BiOpenArmLeader(config)
     else:
         try:
-            return cast(Teleoperator, make_device_from_device_class(config))
+            return cast("Teleoperator", make_device_from_device_class(config))
         except Exception as e:
             raise ValueError(f"Error creating robot with config {config}: {e}") from e
