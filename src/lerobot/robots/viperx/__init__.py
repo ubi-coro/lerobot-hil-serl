@@ -15,3 +15,6 @@
 # limitations under the License.
 from .config_viperx import ViperXConfig
 from .viperx import ViperX
+
+from .config_sim_viperx import SimViperXConfig
+from .sim_viperx import SimViperX

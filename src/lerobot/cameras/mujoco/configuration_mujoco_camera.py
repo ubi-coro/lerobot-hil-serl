@@ -1,6 +1,5 @@
 import logging
 from dataclasses import dataclass
-
 from lerobot.cameras import CameraConfig
 
 logger = logging.getLogger(__name__)

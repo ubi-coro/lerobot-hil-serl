@@ -6,8 +6,9 @@ from lerobot.sim.mujoco_utils.viewer import create_viewer, AbstractViewer
 
 
 class SimSession:
+    """Owns a single MuJoCo gym environment and its live viewer."""
     def __init__(self, sim_config):
-        """Init sim, env, and viewer."""
+        """Create env, viewer, and internal state."""
         env_cfg = make_env_config(sim_config.type)
         gym_env = make_env(env_cfg)
         self.env: gym.Env = gym_env.get(sim_config.type).get(0)
@@ -38,27 +39,37 @@ class SimSession:
         """Step sim with staged action."""
         action = self._format_next_action()
         obs, reward, terminated, truncated, events = self.env.step(action)
-        self._format_observation(obs)
+        self._store_observation(obs)
         self.viewer.sync(obs)  # TODO(jzilke) set framerate
         return self.observation, reward, terminated, truncated, events
 
 
     def _format_next_action(self):
-        """Pack dict to action vector."""
+        """Convert staged joint commands to env action vector."""
         return np.array([[self.next_action.get(joint, -1.0) for joint in self.action_order]])
 
 
-    def _format_observation(self, obs):
-        """Unpack sim obs to dict."""
-        self.observation |= obs['pixels']
-        pos = obs['agent_pos'][0]
-        self.observation |= {
-            self.action_order[i]: pos[i] for i in range(len(self.action_order))
-        }
+    def _store_observation(self, obs):
+        """Cache env observation in flattened dict form."""
+        new = {}
+
+        new |= obs["pixels"]
+
+        pos = obs["agent_pos"][0]
+        new |= {self.action_order[i]: pos[i] for i in range(len(self.action_order))}
+
+        for k, v in self.observation.items():
+            if k not in new:
+                new[k] = v # keep last
+
+        self.observation = new
 
 
     def get_observation(self, name: str):
-        return self.observation.get(name)
+        """Return a single cached observation entry."""
+        if name not in self.observation:
+            raise KeyError(name)
+        return self.observation[name]
 
 
     def add_action(self, name, action):
@@ -68,17 +79,19 @@ class SimSession:
 
 
     def reset(self, seed=None, options=None):
-        """Reset sim and cache obs."""
+        """Reset sim env and cached obsservation."""
         obs, events = self.env.reset(seed=seed, options=options)
-        self._format_observation(obs)
+        self._store_observation(obs)
         return obs, events
 
 
 class SimManager:
+    """Singleton access to the active simulation."""
     _sim: SimSession = None
 
     @classmethod
     def init(cls, cfg):
+        """Create the global simulation instance."""
         if cls._sim is not None:
             raise RuntimeError("Simulation already initialized")
         cls._sim = SimSession(cfg)
@@ -86,6 +99,7 @@ class SimManager:
 
     @classmethod
     def get(cls):
+        """Return the active simulation instance."""
         if cls._sim is None:
             raise RuntimeError("Simulation not initialized")
         return cls._sim

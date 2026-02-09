@@ -93,7 +93,7 @@ class MockTeleop(Teleoperator):
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
         if self.config.random_values:
-            return {f"{motor}.pos": random.uniform(-100, 100) for motor in self.motors}
+            return {f"{motor}.pos": random.uniform(-0.8, 0.8) for motor in self.motors}
         else:
             return {
                 f"{motor}.pos": val for motor, val in zip(self.motors, self.config.static_values, strict=True)
