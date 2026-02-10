@@ -89,6 +89,10 @@ def make_teleoperator_from_config(config: TeleoperatorConfig) -> Teleoperator:
         from .spacemouse import SpaceMouse
 
         return SpaceMouse(config)
+    elif config.type == "gelloha":
+        from .gello import Gello
+
+        return Gello(config)
     else:
         try:
             return cast(Teleoperator, make_device_from_device_class(config))

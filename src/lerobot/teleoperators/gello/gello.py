@@ -143,3 +143,6 @@ class Gello(Teleoperator):
 
         self.bus.disconnect()
         logger.info(f"{self} disconnected.")
+
+    def disable_torque(self):
+        pass

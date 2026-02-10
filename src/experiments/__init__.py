@@ -4,6 +4,7 @@ from .env.aloha_bimanual_v2 import AlohaBimanualEnvConfigV2
 from .env.aloha_bimanual_v2_lemgo import AlohaBimanualEnvConfigLemgoV2
 from .env.aloha_sim import SimAlohaEnvConfig
 from .env.aloha_twin import AlohaTwinEnvConfig
+from .env.gelloha_sim import GellohaSimEnvConfig
 from .env.ur5e_bimanual_polytec import UR5eBimanualPolytecEnvConfig, UR5eSinglePolytecEnvConfig
 
 from .dataset.test import DatasetTestConfig
