@@ -1,6 +1,4 @@
-#!/usr/bin/env python
-
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,11 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .config_viperx import ViperXConfig
-from .viperx import ViperX
 
-from .config_sim_viperx import SimViperXConfig
-from .sim_viperx import SimViperX
+from dataclasses import dataclass
 
-from .config_viperx_sim_twin import ViperXSimTwinConfig
-from .viperx_sim_twin import ViperXSimTwin
+from ..config import RobotConfig
+
+@RobotConfig.register_subclass("viperx_sim_twin")
+@dataclass
+class ViperXSimTwinConfig(RobotConfig):
+    sim_config: None = None
+    real_config: None = None
+

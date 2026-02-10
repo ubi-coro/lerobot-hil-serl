@@ -72,6 +72,10 @@ def get_robot_cls_from_config(config: RobotConfig) -> Type[Robot]:
         from .viperx import SimViperX
 
         return SimViperX
+    elif config.type == "viperx_sim_twin":
+        from .viperx import ViperXSimTwin
+
+        return ViperXSimTwin
     elif config.type == "ur":
         from .ur import TF_UR
 
