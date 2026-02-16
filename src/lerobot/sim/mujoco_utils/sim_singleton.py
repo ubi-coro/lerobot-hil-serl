@@ -11,7 +11,7 @@ class SimSession:
         """Create env, viewer, and internal state."""
         env_cfg = make_env_config(sim_config.type)
         gym_env = make_env(env_cfg)
-        self.env: gym.Env = gym_env.get(sim_config.type).get(0)
+        self.env: gym.Env = gym_env.get(sim_config.env).get(0)
 
         self.next_action: dict = {}
         self.observation: dict = {}

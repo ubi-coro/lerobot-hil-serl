@@ -16,6 +16,8 @@ from lerobot.robots.viperx import SimViperXConfig
 from lerobot.teleoperators import TeleopEvents
 from tests.mocks.mock_teleop import MockTeleopConfig
 
+from lerobot.motors import MotorCalibration, MotorNormMode, Motor
+
 
 @dataclass
 @EnvConfig.register_subclass("gelloha_sim")
@@ -30,8 +32,31 @@ class GellohaSimEnvConfig(RobotEnvConfig):
             "right": SimViperXConfig(id="right")
         }
         self.teleop = {
-            "left": GellohaConfig(port="/dev/ttyUSB0", id="left"),
-            "right": GellohaConfig(port="/dev/ttyUSB1", id="right")
+            "left": GellohaConfig(
+                id="left",
+                port="/dev/ttyUSB1",
+                motors={
+                    "waist": Motor(1, "xl330-m288", MotorNormMode.RADIANS),
+                    "shoulder": Motor(2, "xl330-m288", MotorNormMode.RADIANS),
+                    "elbow": Motor(3, "xl330-m288", MotorNormMode.RADIANS),
+                    "forearm_roll": Motor(4, "xl330-m288", MotorNormMode.RADIANS),
+                    "wrist_angle": Motor(5, "xl330-m288", MotorNormMode.RADIANS),
+                    "wrist_rotate": Motor(6, "xl330-m288", MotorNormMode.RADIANS),
+                    "gripper": Motor(7, "xl330-m077", MotorNormMode.RADIANS),
+                },
+                default_calibration={
+                    "waist": MotorCalibration(id=1, drive_mode=0, homing_offset=1024, range_min=0, range_max=4095),
+                    "shoulder": MotorCalibration(id=2, drive_mode=1, homing_offset=1024, range_min=0, range_max=4095),
+                    "elbow": MotorCalibration(id=3, drive_mode=1, homing_offset=-3072, range_min=0, range_max=4095),
+                    "forearm_roll": MotorCalibration(id=4, drive_mode=0, homing_offset=1024, range_min=0, range_max=4095),
+                    "wrist_angle": MotorCalibration(id=5, drive_mode=0, homing_offset=-1024, range_min=0, range_max=4095),
+                    "wrist_rotate": MotorCalibration(id=6, drive_mode=0, homing_offset=1024, range_min=0, range_max=4095),
+                    "gripper": MotorCalibration(id=7, drive_mode=0, homing_offset=0, range_min=1500, range_max=3072),
+                }
+
+            ),
+            # "right": GellohaConfig(id="right", port="/dev/ttyUSB0")
+            "right": MockTeleopConfig(id="right", n_motors=7)
         }
         self.cameras = {
             "cam_low": MujocoCameraConfig(

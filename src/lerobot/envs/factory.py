@@ -22,7 +22,7 @@ from gymnasium.envs.registration import registry as gym_registry
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.cameras import Camera
-from lerobot.envs.configs import AlohaEnv, EnvConfig, HubEnvConfig, IsaaclabArenaEnv, LiberoEnv, PushtEnv, HILSerlProcessorConfig
+from lerobot.envs.configs import AlohaEnv, EnvConfig, HubEnvConfig, IsaaclabArenaEnv, LiberoEnv, PushtEnv, HILSerlProcessorConfig, Ur5eEnv
 from lerobot.envs.utils import _call_make_env, _download_hub_file, _import_hub_module, _normalize_hub_result
 from lerobot.robots import Robot
 from lerobot.processor import ProcessorStep
@@ -33,6 +33,8 @@ from lerobot.processor.pipeline import PolicyProcessorPipeline
 def make_env_config(env_type: str, **kwargs) -> EnvConfig:
     if env_type == "aloha" or env_type == "sim_aloha":
         return AlohaEnv(**kwargs)
+    elif env_type == "bimanual_ur5e":
+        return Ur5eEnv(**kwargs)
     elif env_type == "pusht":
         return PushtEnv(**kwargs)
     elif env_type == "libero":

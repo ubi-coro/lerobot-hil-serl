@@ -130,6 +130,50 @@ class AlohaEnv(EnvConfig):
         }
 
 
+@EnvConfig.register_subclass("ur5e")
+@dataclass
+class Ur5eEnv(EnvConfig):
+    task: str | None = "Ur5eEmpty-v0"
+    fps: int = 50
+    episode_length: int = 400
+    obs_type: str = "pixels_agent_pos"
+    observation_height: int = 480
+    observation_width: int = 640
+    render_mode: str = "rgb_array"
+    package_name: str = "gym_aloha"
+    features: dict[str, PolicyFeature] = field(
+        default_factory=lambda: {
+            ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(14,)),
+        }
+    )
+    features_map: dict[str, str] = field(
+        default_factory=lambda: {
+            ACTION: ACTION,
+            "agent_pos": OBS_STATE,
+            "top": f"{OBS_IMAGE}.top",
+            "pixels/top": f"{OBS_IMAGES}.top",
+        }
+    )
+
+    def __post_init__(self):
+        if self.obs_type == "pixels":
+            self.features["top"] = PolicyFeature(
+                type=FeatureType.VISUAL, shape=(self.observation_height, self.observation_width, 3)
+            )
+        elif self.obs_type == "pixels_agent_pos":
+            self.features["agent_pos"] = PolicyFeature(type=FeatureType.STATE, shape=(14,))
+            self.features["pixels/top"] = PolicyFeature(
+                type=FeatureType.VISUAL, shape=(self.observation_height, self.observation_width, 3)
+            )
+
+    @property
+    def gym_kwargs(self) -> dict:
+        return {
+            "obs_type": self.obs_type,
+            "render_mode": self.render_mode,
+            "max_episode_steps": self.episode_length,
+        }
+
 @EnvConfig.register_subclass("pusht")
 @dataclass
 class PushtEnv(EnvConfig):

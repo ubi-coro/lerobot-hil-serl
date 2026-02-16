@@ -130,6 +130,7 @@ class Gello(Teleoperator):
         action = self.bus.sync_read("Present_Position")
         action = {f"{motor}.pos": val for motor, val in action.items()}
         action["finger.pos"] = action.pop("gripper.pos")
+        print(action)
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read action: {dt_ms:.1f}ms")
         return action

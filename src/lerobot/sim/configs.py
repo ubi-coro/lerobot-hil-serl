@@ -31,4 +31,13 @@ class AlohaSimConfig(SimConfig):
     ])
     calibration_dir: str = ".cache/calibration/aloha_sim"
 
+@SimConfig.register_subclass("bimanual_ur5e")
+@dataclass
+class BimanualUr5eConfig(SimConfig):
+    env: str = "ur5e"
+    viewer: str = "mujoco"
+    image_keys: List[str] = field(default_factory=lambda: [
+        "teleoperator_pov"
+    ])
+    calibration_dir: str = ""
 

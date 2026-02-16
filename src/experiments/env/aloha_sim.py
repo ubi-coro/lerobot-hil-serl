@@ -8,7 +8,7 @@ from lerobot.envs import RobotEnvConfig
 from lerobot.envs.configs import EnvConfig
 from lerobot.envs.factory import RobotEnvInterface
 from lerobot.processor import DataProcessorPipeline
-from lerobot.sim.configs import AlohaSimConfig, SimConfig
+from lerobot.sim.configs import AlohaSimConfig, SimConfig, BimanualUr5eConfig
 from lerobot.sim.mujoco_utils.sim_singleton import SimManager
 from lerobot.sim.sim_robot_env import SimRobotEnv
 from lerobot.robots.viperx import SimViperXConfig
@@ -20,7 +20,7 @@ from tests.mocks.mock_teleop import MockTeleopConfig
 @EnvConfig.register_subclass("sim_aloha")
 class SimAlohaEnvConfig(RobotEnvConfig):
     benchmark: bool = False
-    sim: SimConfig = field(default_factory=AlohaSimConfig)  # TODO(jzilke)
+    sim: SimConfig = field(default_factory=BimanualUr5eConfig)  # TODO(jzilke)
 
     def __post_init__(self):
         self.kinematics_solver = None
