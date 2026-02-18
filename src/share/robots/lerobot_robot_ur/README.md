@@ -1,0 +1,1 @@
+implements installable robot
