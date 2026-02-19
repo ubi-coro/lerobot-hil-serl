@@ -9,6 +9,7 @@ from share_rl.primitives.config import (
     RobotPrimitiveConfig,
     TaskFrameCommand,
 )
+from share_rl.primitives.processor import PrimitiveProcessorBuilder
 from share_rl.primitives.runtime import Primitive, PrimitiveGraphEnv
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "ControlSpace",
     "Origin",
     "Primitive",
+    "PrimitiveProcessorBuilder",
     "PrimitiveGraphConfig",
     "PrimitiveGraphEnv",
     "PrimitiveGraphNodeConfig",
