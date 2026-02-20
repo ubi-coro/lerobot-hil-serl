@@ -515,7 +515,6 @@ class GripperPenaltyProcessorStep(ComplementaryDataProcessorStep):
         max_gripper_pos: Dict of robot_name -> max gripper pos (for normalization).
     """
 
-    gripper_idc: dict[str, int | None] = field(default_factory=dict)
     penalty: dict[str, float | None] = field(default_factory=dict)
     max_gripper_pos: dict[str, float] = field(default_factory=dict)
 
@@ -558,7 +557,6 @@ class GripperPenaltyProcessorStep(ComplementaryDataProcessorStep):
 
     def get_config(self) -> dict[str, Any]:
         return {
-            "gripper_idc": self.gripper_idc,
             "penalty": self.penalty,
             "max_gripper_pos": self.max_gripper_pos,
         }
@@ -902,7 +900,7 @@ class InterventionActionProcessorStep(ProcessorStep):
             A dictionary containing the step's configuration attributes.
         """
         return {
-            "use_gripper": self.use_gripper,
+            "enable": self.use_gripper,
             "terminate_on_success": self.terminate_on_success,
         }
 

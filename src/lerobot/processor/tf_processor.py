@@ -286,7 +286,7 @@ class SixDofVelocityInterventionActionProcessorStep(ProcessorStep):
 
     def get_config(self) -> dict[str, Any]:
         return {
-            "use_gripper": self.use_gripper,
+            "enable": self.use_gripper,
             "terminate_on_success": self.terminate_on_success,
             "control_mask": self.control_mask
         }

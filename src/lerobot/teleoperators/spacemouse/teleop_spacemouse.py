@@ -107,7 +107,6 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
             data["event"]: 0 for data in self.config.button_mapping.values()
         }
 
-
     @property
     def action_features(self) -> dict[str, type]:
         return {f"{ax}.vel": float for ax in ["x", "y", "z", "wx", "wy", "wz"]}

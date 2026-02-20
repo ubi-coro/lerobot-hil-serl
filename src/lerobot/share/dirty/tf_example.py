@@ -1,11 +1,8 @@
 import time
 
-import numpy as np
-
 from experiments import UR5eBimanualPolytecEnvConfig
-from lerobot.robots.ur import URConfig
-from lerobot.robots.ur.robotiq_controller import RTDERobotiqController
-from lerobot.robots.ur.tf_controller import RTDETFFController, TaskFrameCommand, AxisMode
+from share.grippers.robotiq_controller import RTDERobotiqController
+from lerobot.robots.ur.tf_controller import RTDETFFController, AxisMode
 from lerobot.teleoperators.spacemouse import SpacemouseConfig, SpaceMouse
 
 

@@ -33,7 +33,7 @@ from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnected
 logger = logging.getLogger(__name__)
 
 
-class TF_UR(Robot):
+class UR(Robot):
 
     config_class = URConfig
     name = "ur"
@@ -196,7 +196,8 @@ class TF_UR(Robot):
             obs_dict[f"{ax}.ee_wrench"] = controller_data['ActualTCPForce'][i]
 
         for i, joint_name in enumerate(self.joint_names):
-            obs_dict[f"{joint_name}.q_pos"] = controller_data['ActualQ'][i]
+            obs_dict[f"{joint_name}.pos"] = controller_data['ActualQ'][i]
+            obs_dict[f"{joint_name}.vel"] = controller_data['ActualQd'][i]
 
         if self.gripper is not None:
             obs_dict["gripper.pos"] = float(self.gripper.get_state()["width"]) / 255.0
@@ -248,6 +249,9 @@ class TF_UR(Robot):
 
     def send_gripper_action(self, gripper_action: float):
         self.gripper.move(gripper_action, vel=self.config.gripper_vel, force=self.config.gripper_force)
+
+    def set_task_frame(self, new_task_frame: TaskFrameCommand):
+        self.task_frame = new_task_frame
 
     def disconnect(self):
         if not self.is_connected:

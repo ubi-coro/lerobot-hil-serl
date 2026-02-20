@@ -46,14 +46,14 @@ class RobotEnv(RobotEnvInterface):
 
         Args:
             robot: Robot interface for hardware communication.
-            use_gripper: Whether to include gripper in action space.
+            enable: Whether to include gripper in action space.
             display_cameras: Whether to show camera feeds during execution.
             reset_pose: Joint positions for environment reset.
             reset_time_s: Time to wait during reset.
         """
         super().__init__(robot_dict=robot_dict, cameras=cameras, processor=processor)
 
-        self.use_gripper = self.processor.gripper.use_gripper
+        self.use_gripper = self.processor.gripper.enable
         self.reset_pose = self.processor.reset.fixed_reset_joint_positions
         self.reset_time_s = self.processor.reset.reset_time_s
         self.display_cameras = self.processor.display_cameras
@@ -78,7 +78,7 @@ class RobotEnv(RobotEnvInterface):
     @staticmethod
     def get_features_from_cfg(cfg: 'RobotEnvConfig'):
         # calculate state == action dim
-        gripper = cfg.processor.gripper.use_gripper
+        gripper = cfg.processor.gripper.enable
         state_dim = 6 * len(gripper) + sum(gripper.values())
 
         # action features
