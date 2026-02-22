@@ -15,20 +15,9 @@ class PolicyMode(IntEnum):
 
 
 class ControlMode(IntEnum):
-    STIFF_POS = 0
-    STIFF_VEL = 1
-    COMPLIANT_POS = 2
-    COMPLIANT_VEL = 3
-    FORCE = 4
-
-    @property
-    def is_position_mode(self) -> bool:
-        return self.name.endswith("_POS")
-    
-    @property
-    def is_compliant(self) -> bool:
-        return not self.name.startswith("STIFF_")
-
+    POS = 0
+    VEL = 1
+    FORCE = 2
 
 @dataclass(slots=True)
 class TaskFrame:
@@ -36,8 +25,10 @@ class TaskFrame:
     target: list[float] = field(default_factory=lambda: 6 * [0.0])
     space: ControlSpace = ControlSpace.TASK
     policy_mode: list[PolicyMode | None] = field(default_factory=lambda: 6 * [None])
-    control_mode: list[ControlMode] = field(default_factory=lambda: 6 * [ControlMode.COMPLIANT_VEL])
+    control_mode: list[ControlMode] = field(default_factory=lambda: 6 * [ControlMode.VEL])
     origin: list[float] | None = None
+    min_pose: list[float] | None = None  # 6-vector: min xyz (m), min extrinsic euler (rad)
+    max_pose: list[float] | None = None  # 6-vector: max xyz (m), max extrinsic euler (rad)
 
     def __post_init__(self) -> None:
         width = len(self.target)
@@ -60,11 +51,11 @@ class TaskFrame:
             if self.policy_mode[i] is None:
                 continue
                 
-            if self.policy_mode[i] == PolicyMode.RELATIVE and not self.control_mode[i].is_position_mode:
-                raise ValueError("policy_mode == RELATIVE only supports *_POS control modes")
+            if self.policy_mode[i] == PolicyMode.RELATIVE and not self.control_mode[i] == ControlMode.POS:
+                raise ValueError("policy_mode == RELATIVE only supports POS control modes")
             
-            if self.space == ControlSpace.JOINT and not self.control_mode[i].is_position_mode:
-                raise ValueError("space == JOINT only supports *_POS axis modes")
+            if self.space == ControlSpace.JOINT and not self.control_mode[i] == ControlMode.POS:
+                raise ValueError("space == JOINT only supports POS axis modes")
 
     @property
     def learnable_axis_indices(self) -> list[int]:
@@ -81,6 +72,8 @@ class TaskFrame:
             "target": self.target,
             "policy_mode": [int(policy_mode) for policy_mode in self.policy_mode],
             "control_mode": [int(control_mode) for control_mode in self.control_mode],
+            "min_pose": self.min_pose,
+            "max_pose": self.max_pose,
         }
 
     @classmethod
@@ -91,6 +84,8 @@ class TaskFrame:
             target=list(raw["target"]),
             policy_mode=[PolicyMode(item) for item in raw["policy_mode"]],
             control_mode=[ControlMode(item) for item in raw["control_mode"]],
+            min_pose=list(raw["min_pose"]),
+            max_pose=list(raw["max_pose"]),
         )
 
 @dataclass(slots=True)

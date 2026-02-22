@@ -214,6 +214,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
             action_pipeline_steps.append(
                 ToJointActionProcessorStep(
                     is_task_frame_robot=is_task_frame_robot,
+                    task_frame=self.task_frame,
                     kinematics=self._kinematics_solver,
                     joint_names=self._joint_names,
                     use_virtual_reference=self.processor.kinematics.use_virtual_reference
