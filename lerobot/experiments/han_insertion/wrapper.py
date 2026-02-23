@@ -44,7 +44,7 @@ class TrapezoidResetWrapper(StaticTaskFrameResetWrapper):
         c_std_norm = (x - min_x) / (max_x - min_x)
         c_std = (max_c - min_c) * c_std_norm + min_c
         c_lim = c_std * np.sqrt(12) / 2
-        noisy_cmd.target[5] = np.random.uniform(-c_lim, c_lim)
+        noisy_cmd.target[5] = base_cmd.target[5] + np.random.uniform(-c_lim, c_lim)
 
         # bound noisy target
         noisy_cmd.target = np.clip(

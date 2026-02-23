@@ -28,7 +28,7 @@ import torch
 from lerobot.common.robot_devices.cameras.utils import make_cameras_from_configs
 from lerobot.common.robot_devices.motors.dynamixel import TorqueMode
 from lerobot.common.robot_devices.motors.rtde_robotiq_controller import RTDERobotiqController
-from lerobot.common.robot_devices.motors.rtde_tff_controller import RTDETFFController, TaskFrameCommand
+from lerobot.common.robot_devices.motors.rtde_tff_controller import RTDETFFController, TaskFrameCommand, AxisMode
 from lerobot.common.robot_devices.motors.rtde_tff_mock_controller import RTDETFFMockController
 from lerobot.common.robot_devices.motors.utils import make_motors_buses_from_configs
 from lerobot.common.robot_devices.robots.configs import URConfig
@@ -312,6 +312,14 @@ class UR:
 
         self.shm.shutdown()
         self.is_connected = False
+
+    def safe_stop(self):
+        safe_cmd = TaskFrameCommand(
+            mode=[AxisMode.PURE_VEL] * 6,
+            target=[0.0] * 6
+        )
+        for controller in self.controllers.values():
+            controller.send_cmd(safe_cmd)
 
     def __del__(self):
         if getattr(self, "is_connected", False):

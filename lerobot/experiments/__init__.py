@@ -18,7 +18,10 @@ from lerobot.experiments.deprecated.nist_insertion import (
 from lerobot.experiments.han_insertion.rlpd_sparse import (
     HAN_Insertion_RLPD_Sparse,
     HAN_Insertion_RLPD_Sparse_NoVision,
-    HAN_Insertion_RLPD_Sparse_DGN
+    HAN_Insertion_RLPD_Sparse_DGN,
+    HAN_Insertion_RLPD_Sparse_RotAB,
+    HAN_Insertion_RLPD_Sparse_RotAB_NoPriors,
+    HAN_Insertion_RLPD_Sparse_Large_Connector
 )
 from lerobot.experiments.han_insertion.rlpd_dense import (
     HAN_Insertion_RLPD_Dense,
@@ -27,8 +30,10 @@ from lerobot.experiments.han_insertion.rlpd_dense import (
 )
 from lerobot.experiments.han_insertion.bc_dagger import HAN_Insertion_BC_DAgger
 from lerobot.experiments.han_insertion.eval import (
-    HAN_Insertion_Record_Forces,
-    HAN_Insertion_Static_Limits,
-    HAN_Insertion_Adaptive_Limits,
-    HAN_Insertion_Random_Policy
+    HAN_Insertion_Eval_Z_Force,
+    HAN_Insertion_Eval_Static_Limits,
+    HAN_Insertion_Eval_Adaptive_Limits,
+    HAN_Insertion_Eval_HILSERL_Limits,
+    HAN_Insertion_Eval_6D,
+    HAN_Insertion_Eval_Random_Policy,
 )

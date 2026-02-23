@@ -55,9 +55,9 @@ class HAN_Insertion_RLPD_Dense_NoPriors(HAN_Insertion):
                 use_gripper=False,
                 speed_limits=[15.0, 15.0, 15.0, 0.40, 0.40, 1.0],
                 wrench_limits=[30.0, 30.0, 30.0, 15.0, 15.0, 10.0],
-                enable_contact_aware_force_scaling=[True, True, True, False, False, True],
-                contact_desired_wrench=[4.0, 4.0, 5.0, 0, 0, 0.5],
-                contact_limit_scale_min=[0.09, 0.09, 0.12, 0, 0, 0.04],
+                compliance_safety_enable=[True, True, True, False, False, True],
+                compliance_desired_wrench=[4.0, 4.0, 5.0, 0, 0, 0.5],
+                compliance_adaptive_limit_min=[0.09, 0.09, 0.12, 0, 0, 0.04],
                 debug=False,
                 debug_axis=0,
                 mock=False

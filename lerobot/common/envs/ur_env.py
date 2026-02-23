@@ -104,3 +104,7 @@ class UREnv(gym.Env):
         for key in self.image_keys:
             cv2.imshow(key, cv2.cvtColor(observation[key].numpy(), cv2.COLOR_RGB2BGR))
             cv2.waitKey(1)
+
+    def safe_stop(self):
+        self.robot.safe_stop()
+

@@ -16,7 +16,7 @@ import abc
 import logging
 from dataclasses import dataclass, field
 from multiprocessing.managers import SharedMemoryManager
-from typing import Optional, List, Sequence
+from typing import Optional, List, Sequence, Literal
 
 import draccus
 import numpy as np
@@ -74,6 +74,8 @@ class URArmConfig:
     launch_timeout: float = 3.0
     get_max_k: int = 128
     receive_keys: Optional[list[str]] = None
+    ft_filter_cutoff_hz: Optional[float] = None  # Hz, EMA low-pass cutoff for f/t sensor
+    force_mode_gain_scaling: float = 1.0
 
     # gripper
     use_gripper: bool = False  # attempts to initialize gripper from RTDEControlInterface
@@ -88,10 +90,11 @@ class URArmConfig:
     speed_limits: List[float] = field(default_factory = lambda: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])
 
     # contact-aware scaling of wrench limits
-    enable_contact_aware_force_scaling: List[bool] = field(default_factory = lambda: [True] * 6)
-    contact_desired_wrench: List[float] = field(default_factory = lambda: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])  # desired max contact force at equilibrium (N)
-    contact_limit_scale_theta: Optional[List[float]] = None  # minimum force limit scaling factor, usually computed automatically
-    contact_limit_scale_min: List[float] = field(default_factory = lambda: [0.1] * 6)  # minimum force limit scaling factor
+    compliance_safety_mode: Literal["adaptive_wrench_limits", "reference_limits"] = "adaptive_limits"
+    compliance_safety_enable: List[bool] = field(default_factory = lambda: [False] * 6)
+    compliance_desired_wrench: List[float] = field(default_factory = lambda: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])  # desired max contact force at equilibrium (N)
+    compliance_adaptive_limit_theta: Optional[List[float]] = None  # minimum force limit scaling factor, usually computed automatically
+    compliance_adaptive_limit_min: List[float] = field(default_factory = lambda: [0.1] * 6)  # minimum force limit scaling factor
 
     # latency
     obs_latency: float = 0.0001
@@ -105,37 +108,37 @@ class URArmConfig:
     debug_axis: int = 0
 
     def __post_init__(self):
-        if self.contact_limit_scale_theta is None:
+        if self.compliance_adaptive_limit_theta is None:
             if self.verbose:
                 logging.info(f"=== Compute parameters for exponential contact force limit scaling: ===")
 
-            self.contact_limit_scale_theta = [0.0] * 6
+            self.compliance_adaptive_limit_theta = [0.0] * 6
             for i in range(6):
-                if not self.enable_contact_aware_force_scaling[i]:
+                if not self.compliance_safety_enable[i]:
                     continue
 
                 if self.wrench_limits[i] == float("inf"):
-                    self.wrench_limits[i] = 2.0 * self.contact_desired_wrench[i]
+                    self.wrench_limits[i] = 2.0 * self.compliance_desired_wrench[i]
 
                 # Compute theta
                 theta = self.compute_theta(
                     self.wrench_limits[i],  # assume uniform limits
-                    self.contact_desired_wrench[i],
-                    self.contact_limit_scale_min[i],
+                    self.compliance_desired_wrench[i],
+                    self.compliance_adaptive_limit_min[i],
                 )
 
                 # Evaluate scale and derivative at f_star
                 s_star, ds_df_star = self.exp_scale_and_derivative(
-                    self.contact_desired_wrench[i],
+                    self.compliance_desired_wrench[i],
                     theta,
-                    self.contact_limit_scale_min[i]
+                    self.compliance_adaptive_limit_min[i]
                 )
                 g_prime = self.wrench_limits[i] * ds_df_star
 
                 if self.verbose:
                     logging.info(f" {['X', 'Y', 'Z', 'A', 'B', 'C'][i]}-Axis:")
                     logging.info(f"  Computed θ = {theta:.4f}")
-                    logging.info(f"  At f* = {self.contact_desired_wrench[i]} N:")
+                    logging.info(f"  At f* = {self.compliance_desired_wrench[i]} N:")
                     logging.info(f"    s(f*) = {s_star:.4f}")
                     logging.info(f"    s'(f*) = {ds_df_star:.4f}")
                     logging.info(f"    g'(f*) = F_max * s'(f*) = {g_prime:.4f}")
@@ -150,7 +153,7 @@ class URArmConfig:
                     raise ValueError(f"Likely oscillation on {['X', 'Y', 'Z', 'A', 'B', 'C'][i]}-axis contact "
                                      f"force limiter, run again with verbose=True and check parameters!")
 
-                self.contact_limit_scale_theta[i] = theta
+                self.compliance_adaptive_limit_theta[i] = theta
 
     @staticmethod
     def compute_theta(F_max: float, f_star: float, s_min: float) -> float:

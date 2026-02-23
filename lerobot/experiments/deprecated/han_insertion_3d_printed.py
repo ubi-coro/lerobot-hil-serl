@@ -248,9 +248,9 @@ class UR3_HAN_Insertion_3d_Printed(MPNetConfig):
                 use_gripper=False,
                 speed_limits=[15.0, 15.0, 15.0, 0.40, 0.40, 1.0],
                 wrench_limits=[30.0, 30.0, 30.0, 15.0, 15.0, 5.0],
-                enable_contact_aware_force_scaling=[True, True, False, False, False, True],
-                contact_desired_wrench=[3.0, 3.0, 0, 0, 0, 0.4],
-                contact_limit_scale_min=[0.09, 0.09, 0, 0, 0, 0.06],
+                compliance_safety_enable=[True, True, False, False, False, True],
+                compliance_desired_wrench=[3.0, 3.0, 0, 0, 0, 0.4],
+                compliance_adaptive_limit_min=[0.09, 0.09, 0, 0, 0, 0.06],
                 debug=False,
                 debug_axis=0
             )

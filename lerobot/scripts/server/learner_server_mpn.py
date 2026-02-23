@@ -599,7 +599,7 @@ def add_actor_information_and_train(
                     policy.update_target_networks()
 
                 # Save checkpoint at specified intervals
-                if saving_checkpoint and (optimization_step[name] % save_freq == 0 or optimization_step[name] == online_steps[name]):
+                if saving_checkpoint and (optimization_step[name] + 1 % save_freq == 0 or optimization_step[name] == online_steps[name]):
                     save_training_checkpoint(
                         primitive_id=name,
                         cfg=cfg,

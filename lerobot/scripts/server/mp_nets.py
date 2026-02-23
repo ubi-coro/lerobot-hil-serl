@@ -271,14 +271,16 @@ class InteractionCounter:
         # initialize per-primitive step budgets and counters
         self._budget: dict[str, int] = {}
         self._count: dict[str, int] = {}
+        self._last_finish_count: dict[str, int] = {}
         for name, p in primitives.items():
+            self._last_finish_count[name] = 0
             if p.is_adaptive and p.policy is not None:
                 # use the online_steps from the primitive's SACConfig
                 self._budget[name] = p.policy.config.online_steps
                 self._count[name] = 0
             else:
                 # non-adaptive → treat as already "finished"
-                self._budget[name] = 0
+                self._budget[name] = 10_000
                 self._count[name] = 0
 
     def __getitem__(self, item):
@@ -293,6 +295,14 @@ class InteractionCounter:
         """True if this primitive is non-adaptive or has reached its online_steps."""
         # budget == 0 means non-adaptive, so budget <= count ⇒ finished
         return self._count.get(name, 0) >= self._budget.get(name, 0)
+
+    def finish_episode(self, name: str):
+        """True if this primitive is non-adaptive or has reached its online_steps."""
+        if name in self._count:
+            self._last_finish_count[name] = self._count[name]
+
+    def episode_length(self, name: str) -> int:
+        return self._count.get(name, 0) - self._last_finish_count.get(name, 0)
 
     @property
     def global_step(self):

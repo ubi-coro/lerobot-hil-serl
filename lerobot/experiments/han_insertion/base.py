@@ -43,7 +43,7 @@ class InsertionPrimitive(MPConfig):
     is_terminal: bool = False
     tff: Dict[str, TaskFrameCommand] = field(default_factory=lambda: {
             "main": TaskFrameCommand(  # z_succ: 0.10340
-                T_WF=[0.03383, -0.25478, 0.138, 0.0, float(np.pi), 0.0],
+                T_WF=[0.06947, -0.35062, 0.138, 0.0, float(np.pi), 0.0],
                 target=[0.0, 0.0, 5.0, 0.0, -0.0, 0.0],
                 mode=2 * [AxisMode.PURE_VEL] + [AxisMode.FORCE] + 2 * [AxisMode.POS] + [AxisMode.PURE_VEL],
                 kp=[2500, 2500, 2500, 100, 100, 100],
@@ -272,20 +272,20 @@ class HAN_Insertion(MPNetConfig):
             "main": URArmConfig(
                 robot_ip="172.22.22.2",
                 frequency=500,
-                payload_mass=1.080,
-                payload_cog=[-0.000, 0.000, 0.071],
                 soft_real_time=True,
                 rt_core=3,
                 get_max_k=10,
                 use_gripper=False,
                 speed_limits=[15.0, 15.0, 15.0, 0.40, 0.40, 1.0],
-                wrench_limits=[30.0, 30.0, 30.0, 15.0, 15.0, 10.0],
-                enable_contact_aware_force_scaling=[True, True, False, False, False, True],
-                contact_desired_wrench=[4.0, 4.0, 0, 0, 0, 0.5],
-                contact_limit_scale_min=[0.09, 0.09, 0, 0, 0, 0.04],
+                wrench_limits=[30.0, 30.0, 5.0, 10.0, 10.0, 10.0],
+                compliance_safety_mode="adaptive_limits",
+                compliance_safety_enable=[True, True, False, False, False, True],
+                compliance_desired_wrench=[4.0, 4.0, 0.0, 0.5, 0.5, 0.5],
+                compliance_adaptive_limit_min=[0.09, 0.09, 0.0, 0.04, 0.04, 0.04],
                 debug=False,
-                debug_axis=0,
-                mock=False
+                debug_axis=2,
+                mock=False,
+                verbose=False
             )
         },
         cameras={
@@ -303,7 +303,7 @@ class HAN_Insertion(MPNetConfig):
     # initialization states
     reset: ResetConfig = ResetConfig(
         pos={
-            "main": [0.0] * 6  # origin in task frame
+            "main": [0.0, 0.0, -0.005, 0.0, 0.0] + [float(np.pi) / 2]  # origin in task frame
         },
         noise_dist="uniform",
         noise_std={

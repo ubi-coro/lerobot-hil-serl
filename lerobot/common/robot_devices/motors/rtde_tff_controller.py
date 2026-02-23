@@ -17,7 +17,6 @@ Assumptions
 * Units:  metres, rad, N, N·m
 """
 import collections
-import logging
 import os
 import time
 import enum
@@ -25,12 +24,42 @@ import multiprocessing as mp
 from dataclasses import dataclass, asdict
 from multiprocessing.managers import SharedMemoryManager
 from typing import Optional
+import gc
+import math
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from lerobot.common.robot_devices.motors.configs import URArmConfig
 from lerobot.common.utils.shared_memory import SharedMemoryRingBuffer, SharedMemoryQueue, Empty
+
+
+
+# --- timing helpers ---
+def _ms(x): return 1000.0 * float(x)
+
+class _PerfWin:
+    def __init__(self, maxlen):
+        self.maxlen = maxlen
+        self.buf = collections.deque(maxlen=maxlen)
+
+    def add(self, d):
+        self.buf.append(d)
+
+    def stats(self):
+        if not self.buf:
+            return None
+        a = np.fromiter(self.buf, dtype=np.float64)
+        return {
+            "n": int(a.size),
+            "mean": float(a.mean()),
+            "std": float(a.std()),
+            "p50": float(np.percentile(a, 50)),
+            "p90": float(np.percentile(a, 90)),
+            "p99": float(np.percentile(a, 99)),
+            "max": float(a.max()),
+            "min": float(a.min()),
+        }
 
 
 
@@ -148,6 +177,7 @@ class RTDETFFController(mp.Process):
         example = dict()
         for key in config.receive_keys:
             example[key] = np.array(getattr(rtde_r, 'get' + key)())
+        example["ActualTCPForceFiltered"] = np.array([0.0] * 6)
         example["SetTCPForce"] = np.array([0.0] * 6)
         example['timestamp'] = time.time()
         self.robot_out_rb = SharedMemoryRingBuffer.create_from_examples(
@@ -273,6 +303,15 @@ class RTDETFFController(mp.Process):
         rtde_c = RTDEControlInterface(robot_ip, frequency)
         rtde_r = RTDEReceiveInterface(robot_ip)
         wrench_W = [0.0] * 6
+        measured_wrench_F = np.zeros(6, dtype=np.float64)
+
+        if self.config.ft_filter_cutoff_hz is None:
+            ft_alpha = None
+        else:
+            fc = float(self.config.ft_filter_cutoff_hz)
+            tau = 1.0 / (2.0 * np.pi * max(fc, 1e-6))
+            ft_alpha = dt / (tau + dt)
+
 
         try:
             if self.config.verbose:
@@ -296,6 +335,7 @@ class RTDETFFController(mp.Process):
             self.target = x_cmd.copy()  # in task frame
 
             # 4.2) Put the robot into 6D forceMode (zero‐wrench to begin)
+            rtde_c.forceModeSetGainScaling(self.config.force_mode_gain_scaling)
             rtde_c.forceMode(
                 self.T_WF.tolist(),
                 [1, 1, 1, 1, 1, 1],
@@ -310,104 +350,131 @@ class RTDETFFController(mp.Process):
             keep_running = True
 
             # 4.4) Prepare for jitter logging
-            hist = collections.deque(maxlen=1000)
+
+            # --- config-ish knobs ---
+            log_interval = 0.5
+            win_secs = 2.0
+            win_len = int(win_secs * self.config.frequency)
+
+            # spike thresholds (tune)
+            dt_nom = dt
+            spike_abs_s = max(0.002, 3.0 * dt_nom)  # absolute dt_loop spike
+            spike_rel = 3.0  # dt_loop > spike_rel * dt
+            spike_compute_s = max(0.0015, 2.0 * dt_nom)  # compute-time spike (pre-wait)
+
+            # windows for metrics
+            dt_win = _PerfWin(win_len)
+            compute_win = _PerfWin(win_len)
+
+            # per-section windows
+            sec_names = [
+                "queue_get", "cmd_apply", "read_state", "recv_extra",
+                "rb_put", "virt_update", "wrench", "forcemode", "waitPeriod"
+            ]
+            sec_wins = {k: _PerfWin(win_len) for k in sec_names}
+
             t_prev = time.monotonic()
-            log_interval = 5.0
             next_log_time = t_prev + log_interval
 
             # 5) Start main control loop
             while keep_running:
                 t_loop_start = rtde_c.initPeriod()
+                t_iter0 = time.monotonic()
 
-                # 5.1) Jitter measurement
-                t_now = time.monotonic()
-                dt_loop = t_now - t_prev
-                hist.append(dt_loop)
-                t_prev = t_now
+                # start-to-start loop dt (jitter)
+                dt_loop = t_iter0 - t_prev
+                t_prev = t_iter0
+                dt_win.add(dt_loop)
 
-                # 5.2) read any pending commands
+                # ---------------- section: queue_get ----------------
+                t0 = time.monotonic()
                 try:
                     msgs = self.robot_cmd_queue.get_all()
                     n_cmd = len(msgs['cmd'])
                 except Empty:
+                    msgs = None
                     n_cmd = 0
+                sec_wins["queue_get"].add(time.monotonic() - t0)
 
-                for i in range(n_cmd):
-                    single = {k: msgs[k][i] for k in msgs}
-                    cmd_id = int(single['cmd'])
-                    if cmd_id == Command.STOP.value:
-                        keep_running = False
-                        break
+                # ---------------- section: cmd_apply ----------------
+                t0 = time.monotonic()
+                if n_cmd:
+                    for i in range(n_cmd):
+                        single = {k: msgs[k][i] for k in msgs}
+                        cmd_id = int(single['cmd'])
+                        if cmd_id == Command.STOP.value:
+                            keep_running = False
+                            break
+                        elif cmd_id == Command.ZERO_FT.value:
+                            rtde_c.zeroFtSensor()
+                            continue
+                        elif cmd_id == Command.SET.value:
+                            new_T = single.get('T_WF', None)
+                            if new_T is not None:
+                                self.T_WF = new_T.copy()
+                                pose_F = self.read_current_state(rtde_r)["ActualTCPPose"]
 
-                    elif cmd_id == Command.ZERO_FT.value:
-                        rtde_c.zeroFtSensor()
-                        continue
+                            new_mode = single.get('mode', None)
+                            if new_mode is not None:
+                                for j in range(6):
+                                    if new_mode[j] != self.mode[j] and new_mode[j] == AxisMode.IMPEDANCE_VEL:
+                                        x_cmd[j] = pose_F[j]
+                                self.mode = new_mode.copy()
 
-                    # Only SET is supported besides STOP
-                    elif cmd_id == Command.SET.value:
-                        # Update any fields that arrived in the queue
-                        # (T_WF, mode, target, gains, bounds)
-                        new_T = single.get('T_WF', None)
-                        if new_T is not None:
-                            self.T_WF = new_T.copy()
-                            pose_F = self.read_current_state(rtde_r)["ActualTCPPose"]
+                            new_target = single.get('target', None)
+                            if new_target is not None:
+                                self.target = new_target.copy()
 
-                        # mode: 6×int8
-                        new_mode = single.get('mode', None)
-                        if new_mode is not None:
-                            # reset virtual position when switching to force-based velocity control
-                            for i in range(6):
-                                if new_mode[i] != self.mode[i] and new_mode[i] == AxisMode.IMPEDANCE_VEL:
-                                    x_cmd[i] = pose_F[i]
-                            self.mode = new_mode.copy()
+                            new_kp = single.get('kp', None)
+                            if new_kp is not None:
+                                self.kp = new_kp.copy()
+                            new_kd = single.get('kd', None)
+                            if new_kd is not None:
+                                self.kd = new_kd.copy()
 
-                        # target: 6×float64
-                        new_target = single.get('target', None)
-                        if new_target is not None:
-                            self.target = new_target.copy()
+                            new_max_pose_rpy = single.get('max_pose_rpy', None)
+                            if new_max_pose_rpy is not None:
+                                self.max_pose_rpy = new_max_pose_rpy.copy()
+                            new_min_pose_rpy = single.get('min_pose_rpy', None)
+                            if new_min_pose_rpy is not None:
+                                self.min_pose_rpy = new_min_pose_rpy.copy()
+                        else:
+                            keep_running = False
+                            break
+                sec_wins["cmd_apply"].add(time.monotonic() - t0)
 
-                        # kp, kd gains
-                        new_kp = single.get('kp', None)
-                        if new_kp is not None:
-                            self.kp = new_kp.copy()
-                        new_kd = single.get('kd', None)
-                        if new_kd is not None:
-                            self.kd = new_kd.copy()
-
-                        # bounds
-                        new_max_pose_rpy = single.get('max_pose_rpy', None)
-                        if new_max_pose_rpy is not None:
-                            self.max_pose_rpy = new_max_pose_rpy.copy()
-                        new_min_pose_rpy = single.get('min_pose_rpy', None)
-                        if new_min_pose_rpy is not None:
-                            self.min_pose_rpy = new_min_pose_rpy.copy()
-
-                    else:
-                        # Unknown command → treat as STOP
-                        keep_running = False
-                        break
-
-                # 5.3) exit loop on stop command
                 if not keep_running:
                     break
 
-                # 5.4) read current state (task frame)
+                # ---------------- section: read_state ----------------
+                t0 = time.monotonic()
                 current_state = self.read_current_state(rtde_r)
                 pose_F = current_state["ActualTCPPose"]
                 v_F = current_state["ActualTCPSpeed"]
-                measured_wrench_F = current_state["ActualTCPForce"]
+                # filtered wrench
+                if ft_alpha is None:
+                    measured_wrench_F = current_state["ActualTCPForce"]
+                else:
+                    measured_wrench_F += ft_alpha * (current_state["ActualTCPForce"] - measured_wrench_F)
+                sec_wins["read_state"].add(time.monotonic() - t0)
 
-                # read remaining keys
+                # ---------------- section: recv_extra ----------------
+                t0 = time.monotonic()
                 for key in self.config.receive_keys:
                     if key not in current_state:
                         current_state[key] = np.array(getattr(rtde_r, 'get' + key)())
+                current_state["ActualTCPForceFiltered"] = np.array(measured_wrench_F)
                 current_state["SetTCPForce"] = np.array(wrench_W)
                 current_state['timestamp'] = time.time()
+                sec_wins["recv_extra"].add(time.monotonic() - t0)
 
-                # push new state into the ring buffer
+                # ---------------- section: rb_put ----------------
+                t0 = time.monotonic()
                 self.robot_out_rb.put(current_state)
+                sec_wins["rb_put"].add(time.monotonic() - t0)
 
-                # 5.5) update virtual position
+                # ---------------- section: virt_update ----------------
+                t0 = time.monotonic()
 
                 # --- translation ---
                 for i in range(3):
@@ -439,90 +506,122 @@ class RTDETFFController(mp.Process):
 
                 # --- clamp virtual target pos ---
                 x_cmd = self.clip_pose(x_cmd)
+                sec_wins["virt_update"].add(time.monotonic() - t0)
 
-                # 5.6) compute wrench based on mode and target
+                # ---------------- section: wrench ----------------
+                t0 = time.monotonic()
                 wrench_W = np.zeros(6, dtype=np.float64)
 
-                # --- translation ---
-                mask_virtual = np.array([1 if AxisMode(self.mode[i]) in (AxisMode.IMPEDANCE_VEL, AxisMode.POS) else 0 for i in range(3, 6)])
-                if np.any(mask_virtual):
-                    pos_err_vec = x_cmd[:3] - np.array(pose_F[:3])
+                # compute errors
+                err_vec = np.zeros(6, dtype=np.float64)
+                err_vec[:3] = x_cmd[:3] - np.array(pose_F[:3])
 
-                for i in range(3):
+                R_cmd = R.from_rotvec(x_cmd[3:6])
+                R_act = R.from_rotvec(pose_F[3:6])
+                R_err = R_cmd * R_act.inv()
+                err_vec[3:6] = R_err.as_rotvec()
+
+                for i in range(6):
                     mode_i = AxisMode(self.mode[i])
-                    if mode_i == AxisMode.POS:
-                        wrench_W[i] = self.kp[i] * pos_err_vec[i] + self.kd[i] * -v_F[i]
-                    elif mode_i == AxisMode.IMPEDANCE_VEL:
-                        vel_err = self.target[i] - v_F[i]
-                        wrench_W[i] = self.kp[i] * pos_err_vec[i] + self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
-                    elif mode_i == AxisMode.PURE_VEL:
-                        vel_err = self.target[i] - v_F[i]
-                        wrench_W[i] = self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
-                    elif mode_i == AxisMode.FORCE:
+
+                    if mode_i == AxisMode.FORCE:
                         wrench_W[i] = float(self.target[i])  # directly obey commanded force
-                    else:
-                        wrench_W[i] = 0.0  # safety fallback
+                        continue
 
-                # --- rotation ---
-                if np.any(mask_virtual):
-                    R_cmd = R.from_rotvec(x_cmd[3:6])
-                    R_act = R.from_rotvec(pose_F[3:6])
-                    R_err = R_cmd * R_act.inv()
-                    rot_err_vec = R_err.as_rotvec()
-
-                for i in range(3, 6):
-                    mode_i = AxisMode(self.mode[i])
                     if mode_i == AxisMode.POS:
-                        wrench_W[i] = self.kp[i] * rot_err_vec[i - 3] + self.kd[i] * -v_F[i]
+                        e = float(err_vec[i])
+                        edot = float(-v_F[i])  # desired vel = 0
                     elif mode_i == AxisMode.IMPEDANCE_VEL:
-                        vel_err = self.target[i] - v_F[i]
-                        wrench_W[i] = self.kp[i] * rot_err_vec[i - 3] + self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
+                        e = float(err_vec[i])
+                        edot = float(self.target[i] - v_F[i])  # desired vel = target vel
                     elif mode_i == AxisMode.PURE_VEL:
-                        vel_err = self.target[i] - v_F[i]
-                        wrench_W[i] = self.kd[i] * vel_err  # we use kd[i] as a “velocity‐gain” here
-                    elif mode_i == AxisMode.FORCE:
-                        wrench_W[i] = float(self.target[i])  # directly obey commanded wrench
+                        e = 0.0
+                        edot = float(self.target[i] - v_F[i])
                     else:
-                        wrench_W[i] = 0.0  # safety fallback
+                        e = 0.0
+                        edot = 0.0
 
-                # 5.7) bound the wrench based on pose constraints and contact forcesyy
+                    if (self.config.compliance_safety_mode == "reference_limits" and
+                        self.config.compliance_safety_enable[i]):
+                        e, edot = self.clip_reference_errors(e, edot, i)
+
+                    wrench_W[i] = self.kp[i] * e + self.kd[i] * edot
+
                 self.apply_wrench_bounds(pose_F, desired_wrench=wrench_W, measured_wrench=measured_wrench_F)
+                sec_wins["wrench"].add(time.monotonic() - t0)
 
-                # 5.8) command the task space wrench via forceMode(...)
-                if not self.force_on:
-                    # If for some reason we dropped out of forceMode, re‐enter it
-                    rtde_c.forceMode(
-                        self.T_WF.tolist(),
-                        [1, 1, 1, 1, 1, 1],
-                        wrench_W.tolist(),
-                        2,
-                        self.config.speed_limits
+                # ---------------- section: forcemode ----------------
+                t0 = time.monotonic()
+                rtde_c.forceMode(
+                    self.T_WF.tolist(),
+                    [1, 1, 1, 1, 1, 1],
+                    wrench_W.tolist(),
+                    2,
+                    self.config.speed_limits
+                )
+                self.force_on = True
+                sec_wins["forcemode"].add(time.monotonic() - t0)
+
+                # compute time (everything before wait)
+                t_pre_wait = time.monotonic()
+                compute_time = t_pre_wait - t_iter0
+                compute_win.add(compute_time)
+
+                # ---------------- section: waitPeriod ----------------
+                t0 = time.monotonic()
+                rtde_c.waitPeriod(t_loop_start)
+                sec_wins["waitPeriod"].add(time.monotonic() - t0)
+
+                if self.config.verbose and t_iter0 >= next_log_time and dt_win.buf:
+                    dt_s = dt_win.stats()
+                    ct_s = compute_win.stats()
+
+                    # rank sections by p99 or max
+                    sec_lines = []
+                    for k in sec_names:
+                        s = sec_wins[k].stats()
+                        if s is None:
+                            continue
+                        sec_lines.append((k, s["p99"], s["max"], s["mean"]))
+                    sec_lines.sort(key=lambda x: x[1], reverse=True)
+
+                    top = sec_lines[:5]
+                    top_str = "  ".join([f"{k}:p99={_ms(p99):.2f} max={_ms(mx):.2f}" for k, p99, mx, _ in top])
+
+                    print(
+                        f"[RTDETFFController] dt_loop(ms) p50={_ms(dt_s['p50']):.2f} p90={_ms(dt_s['p90']):.2f} "
+                        f"p99={_ms(dt_s['p99']):.2f} max={_ms(dt_s['max']):.2f} | "
+                        f"compute(ms) p50={_ms(ct_s['p50']):.2f} p99={_ms(ct_s['p99']):.2f} max={_ms(ct_s['max']):.2f} | "
+                        f"top: {top_str}"
                     )
-                    self.force_on = True
-                else:
-                    # Simply update the wrench each cycle
-                    rtde_c.forceMode(
-                        self.T_WF.tolist(),
-                        [1, 1, 1, 1, 1, 1],
-                        wrench_W.tolist(),
-                        2,
-                        self.config.speed_limits
-                    )
+                    next_log_time = t_iter0 + log_interval
 
-                # 5.9) Jitter print every log_interval
-                if self.config.verbose and t_now >= next_log_time and len(hist) >= 10:
-                    arr = np.array(hist)
-                    print(f"[RTDETFFController] Loop Jitter: μ={arr.mean() * 1000:.2f} ms  σ={arr.std() * 1000:.2f} ms  "
-                          f"min={arr.min() * 1000:.2f} ms  max={arr.max() * 1000:.2f} ms")
-                    next_log_time = t_now + log_interval
-
-                # 5.10) After first iteration signal ready
-                if iter_idx == 0:
-                    self.ready_event.set()
+                # regulate loop frequency
+                rtde_c.waitPeriod(t_loop_start)
                 iter_idx += 1
 
-                # 5.11) regulate loop frequency
-                rtde_c.waitPeriod(t_loop_start)
+                is_dt_spike = (dt_loop > spike_abs_s) or (dt_loop > spike_rel * dt_nom)
+                is_compute_spike = (compute_time > spike_compute_s)
+
+                if self.config.verbose and (is_dt_spike or is_compute_spike):
+                    # snapshot last section durations (use the most recent appended values)
+                    last_secs = {k: (sec_wins[k].buf[-1] if sec_wins[k].buf else float("nan")) for k in sec_names}
+                    # find culprit
+                    culprit = max(last_secs.items(), key=lambda kv: (0.0 if math.isnan(kv[1]) else kv[1]))
+
+                    gc_counts = gc.get_count()
+                    # if you want more: gc.get_stats() is heavier; only do it on spike.
+                    # gc_stats = gc.get_stats()
+
+                    print(
+                        f"[RTDETFFController][SPIKE] iter={iter_idx} "
+                        f"dt_loop={_ms(dt_loop):.2f}ms (dt={_ms(dt_nom):.2f}ms) "
+                        f"compute={_ms(compute_time):.2f}ms n_cmd={n_cmd} "
+                        f"culprit={culprit[0]}:{_ms(culprit[1]):.2f}ms "
+                        f"secs(ms)="
+                        + " ".join([f"{k}={_ms(last_secs[k]):.2f}" for k in sec_names])
+                        + f" gc_count={gc_counts}"
+                    )
 
             # end of while keep_running
         finally:
@@ -629,21 +728,22 @@ class RTDETFFController(mp.Process):
         outside its per-axis (xyz + RPY) bounds.
         """
         scale_vec = np.array([1.0] * 6)
-        for i in range(6):
-            if not self.config.enable_contact_aware_force_scaling[i]:
-                continue
+        if self.config.compliance_safety_mode == "adaptive_limits":
+            for i in range(6):
+                if not self.config.compliance_safety_enable[i]:
+                    continue
 
-            f_measured = measured_wrench[i]
+                f_measured = measured_wrench[i]
 
-            if np.sign(desired_wrench[i]) == np.sign(f_measured):
-                f_measured = 0.0
+                if np.sign(desired_wrench[i]) == np.sign(f_measured):
+                    f_measured = 0.0
 
-            scale_vec[i] = self.exp_scale(
-                abs(f_measured),
-                self.config.wrench_limits[i],
-                self.config.contact_limit_scale_min[i],
-                self.config.contact_limit_scale_theta[i],
-            )
+                scale_vec[i] = self.exp_scale(
+                    abs(f_measured),
+                    self.config.wrench_limits[i],
+                    self.config.compliance_adaptive_limit_min[i],
+                    self.config.compliance_adaptive_limit_theta[i],
+                )
 
         scaled_wrench_limits = scale_vec * np.array(self.config.wrench_limits)
 
@@ -661,7 +761,6 @@ class RTDETFFController(mp.Process):
         # ----- rotation axes (convert to Euler first) -----
         for i in range(3, 6):
             desired_wrench[i] = np.clip(desired_wrench[i], -scaled_wrench_limits[i], scaled_wrench_limits[i])
-            # we ignore rotation pose limits, bc I do not care. Why would you force control rotation anyway?
 
         if self.config.debug:
             axis = self.config.debug_axis
@@ -673,15 +772,27 @@ class RTDETFFController(mp.Process):
                 f"{'a * F_max':<10}: {scaled_wrench_limits[axis]:10.3f}"
             )
 
-    @staticmethod
-    def _rotvec_to_rpy(rv: np.ndarray) -> np.ndarray:
-        """rotation-vector → roll-pitch-yaw (xyz, radians)."""
-        return R.from_rotvec(rv).as_euler('xyz', degrees=False)
+    def clip_reference_errors(self, e: float, edot: float, i: int) -> tuple[float, float]:
+        """
+        Limit position/orientation error e and velocity error edot so that
+        kp*e and kd*edot cannot exceed +/- fmax (HIL-SERL style reference limiting).
+        """
+        _kp = self.kp[i]
+        _kd = self.kd[i]
+        _fmax = self.config.compliance_desired_wrench[i]
+
+        if _fmax <= 0:
+            return 0.0, 0.0
+
+        if _kp > 0:
+            e = float(np.clip(e, -_fmax / _kp, _fmax / _kp))
+        if _kd > 0:
+            edot = float(np.clip(edot, -_fmax / _kd, _fmax / _kd))
+        return e, edot
 
     @staticmethod
-    def _rpy_to_rotvec(rpy: np.ndarray) -> np.ndarray:
-        """roll-pitch-yaw → rotation-vector (axis-angle)."""
-        return R.from_euler('xyz', rpy, degrees=False).as_rotvec()
+    def exp_scale(f_meas, f_thresh, s_min=0.2, theta=0.1):
+        return s_min + (1 - s_min) * np.exp(-f_meas / theta)
 
     @staticmethod
     def homogenous_to_sixvec(T):
@@ -754,8 +865,14 @@ class RTDETFFController(mp.Process):
         return T
 
     @staticmethod
-    def exp_scale(f_meas, f_thresh, s_min=0.2, theta=0.1):
-        return s_min + (1 - s_min) * np.exp(-f_meas / theta)
+    def _rotvec_to_rpy(rv: np.ndarray) -> np.ndarray:
+        """rotation-vector → roll-pitch-yaw (xyz, radians)."""
+        return R.from_rotvec(rv).as_euler('xyz', degrees=False)
+
+    @staticmethod
+    def _rpy_to_rotvec(rpy: np.ndarray) -> np.ndarray:
+        """roll-pitch-yaw → rotation-vector (axis-angle)."""
+        return R.from_euler('xyz', rpy, degrees=False).as_rotvec()
 
 
 def _validate_config(config: URArmConfig) -> URArmConfig:

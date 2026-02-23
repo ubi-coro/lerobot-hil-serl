@@ -2,7 +2,7 @@ import logging
 import os
 import pickle
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Tuple, Dict
 
@@ -23,6 +23,7 @@ from lerobot.scripts.server.mp_nets import MPNetConfig, reset_mp_net
 @dataclass
 class RecordConfig:
     env: MPNetConfig
+    root: str = "results/contact_forces_gain_1.0.pkl"
 
 
 @parser.wrap()
@@ -67,18 +68,25 @@ def record_dataset(cfg: RecordConfig):
 
         # Maintain consistent timing
         if mp_net.fps:
-            dt_s = time.perf_counter() - start_loop_t
-            busy_wait(1 / mp_net.fps - dt_s)
+            dt_load = time.perf_counter() - start_loop_t
+            busy_wait(1 / mp_net.fps - dt_load)
+            dt_loop = time.perf_counter() - start_loop_t
+            #logging.info(
+            #    f"dt_loop: {dt_loop * 1000:5.2f}ms ({1 / dt_loop:3.1f}hz), "
+            #    f"dt_load: {dt_load * 1000:5.2f}ms ({1 / dt_load:3.1f}hz)"
+            #)
 
     robot.disconnect()
     env.close()
 
     # save results
     measured_forces = []
+    filtered_forces = []
     ctrl_forces = []
     timestamps = []
     for ctrl_states in ctrl_states_hist:
         measured_forces.append(ctrl_states["ActualTCPForce"][:, 2])
+        filtered_forces.append(ctrl_states["ActualTCPForceFiltered"][:, 2])
         ctrl_forces.append(ctrl_states["SetTCPForce"][:, 2])
         timestamps.append(ctrl_states["timestamp"])
 
@@ -87,27 +95,32 @@ def record_dataset(cfg: RecordConfig):
     timestamps = np.concatenate(timestamps)
 
     data = {
+        "fps": mp_net.fps,
         "axis": 2,
         "measured_forces": measured_forces,
+        "filtered_forces": filtered_forces,
         "ctrl_forces": ctrl_forces,
         "timestamps": timestamps,
         "F_max": robot.config.follower_arms["main"].wrench_limits[2],
-        "s_min": robot.config.follower_arms["main"].contact_limit_scale_min[2],
-        "f_star": robot.config.follower_arms["main"].contact_desired_wrench[2],
+        "s_min": robot.config.follower_arms["main"].compliance_adaptive_limit_min[2],
+        "f_star": robot.config.follower_arms["main"].compliance_desired_wrench[2],
     }
 
     os.makedirs("results", exist_ok=True)
-    with open(os.path.join("results", "contact_forces.pkl"), 'wb') as f:
+    with open(cfg.root, 'wb') as f:
         pickle.dump(data, f)
 
     # visualize results
     timestamps = timestamps - timestamps[0]
     plt.figure()
-    plt.scatter(timestamps, ctrl_forces, label="$F_{ctrl}$", s=4)
-    plt.scatter(timestamps, measured_forces, label="$F_{meas}$", s=4)
+    plt.plot(timestamps, -ctrl_forces, label="$-F_{ctrl}$", color="orange")
+    plt.plot(timestamps, measured_forces, label="$F_{meas}$", color="blue")
+    plt.axhline(y=5.0, color="k", linestyle="--", label="$F^*$")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Force (N)")
     plt.grid()
     plt.legend()
-    plt.savefig(os.path.join("results", "contact_forces.pdf"))
+    plt.savefig(os.path.join(cfg.root.replace("pkl", "pdf")))
     plt.show()
 
 

@@ -3,7 +3,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 
 import numpy as np
 from termcolor import colored
@@ -20,9 +20,11 @@ from lerobot.scripts.server.mp_nets import MPNetConfig, reset_mp_net
 @dataclass
 class RecordConfig:
     env: MPNetConfig
+    output_dir: Optional[str] = None
+    name: str = "offline-demos"
 
 
-def init_datasets(cfg: MPNetConfig) -> Tuple[Dict[str, LeRobotDataset], int]:
+def init_datasets(cfg: MPNetConfig, ds_name: str) -> Tuple[Dict[str, LeRobotDataset], int]:
     datasets = {}
     min_episode = float('inf')
     for name, primitive in cfg.primitives.items():
@@ -55,7 +57,7 @@ def init_datasets(cfg: MPNetConfig) -> Tuple[Dict[str, LeRobotDataset], int]:
                 }
 
         # Create dataset
-        dataset_root = os.path.join(cfg.root, "offline-demos", name)
+        dataset_root = os.path.join(cfg.root, ds_name, name)
         repo_id = cfg.repo_id + f"-{name}"
         if cfg.resume:
             datasets[primitive.id] = LeRobotDataset(repo_id, root=dataset_root)
@@ -84,19 +86,18 @@ def init_datasets(cfg: MPNetConfig) -> Tuple[Dict[str, LeRobotDataset], int]:
 @parser.wrap()
 def record_dataset(cfg: RecordConfig):
     mp_net = cfg.env
-    policies = mp_net.make_policies()
+    policies = mp_net.make_policies(path=cfg.output_dir, resume=cfg.output_dir is not None)
     robot = make_robot_from_config(mp_net.robot)
     step_counter = mp_net.get_step_counter()
 
     # Go through each primitive and setup their datasets, policies and transition functions
-    datasets, episode = init_datasets(mp_net)
+    datasets, episode = init_datasets(mp_net, ds_name=cfg.name)
     episode = 0
 
     # Record episodes
     while episode < mp_net.num_episodes:
         log_say(f"Recording episode {episode}", play_sounds=True)
         current_primitive = mp_net.primitives[mp_net.start_primitive]
-        policy = policies.get(current_primitive.id, None)
         sum_reward = 0.0
 
         # full reset at the beginning of each sequence
@@ -107,10 +108,11 @@ def record_dataset(cfg: RecordConfig):
         while True:
             start_loop_t = time.perf_counter()
             prev_primitive = current_primitive
+            policy = policies.get(current_primitive.id, None)
 
             # Sample action
             if policy is not None:
-                action = policy.select_action(obs, deterministic=True)
+                action, info = policy.select_action(obs, deterministic=False)
             else:
                 action = env.action_space.sample()
 
@@ -128,15 +130,15 @@ def record_dataset(cfg: RecordConfig):
                 # Process info dict
                 if info.get("is_intervention", False):
                     # For teleop, get action from intervention
-                    recorded_action = {"action": info["action_intervention"]}
+                    recorded_action = {"action": info["action_intervention"].cpu().squeeze(0).float()}
                 else:
-                    recorded_action = {"action": action}
+                    recorded_action = {"action": action.cpu().squeeze(0).float()}
 
                 # Process observation for dataset
-                obs = {k: v.cpu().squeeze(0).float() for k, v in obs.items()}
+                dataset_obs = {k: v.cpu().squeeze(0).float() for k, v in obs.items()}
 
                 # Add frame to dataset
-                frame = {**obs, **recorded_action}
+                frame = {**dataset_obs, **recorded_action}
                 frame["next.reward"] = np.array([reward], dtype=np.float32)
                 frame["next.done"] = np.array([terminated], dtype=bool)
                 frame["task"] = mp_net.task
@@ -150,23 +152,31 @@ def record_dataset(cfg: RecordConfig):
             done = (terminated or truncated)  # and info.get("success", False)
             current_primitive = mp_net.check_transitions(current_primitive, obs, done)
 
+            if current_primitive.is_terminal:
+                env.safe_stop()
+
             # If primitive changed, close old env and make new env
             if prev_primitive != current_primitive:
+                episode_length = step_counter.episode_length(prev_primitive.id)
+                step_counter.finish_episode(prev_primitive.id)
+
                 if prev_primitive.is_adaptive:
                     datasets[prev_primitive.id].save_episode()
                     logging.info(
-                        f"Finished {episode} episode for {prev_primitive.id} primitive (Demo), "
+                        f"Finished episode {episode} for {prev_primitive.id} primitive (Demo), "
                         f"episode reward: {sum_reward}, "
                         f"successful? {['no', 'yes'][int(info.get('success', False))]}, "
-                        f"local step: {step_counter[prev_primitive.id]}, "
+                        f"duration: {episode_length} (steps) / {episode_length / mp_net.fps:.2f} (s), "
+                        f"local step: {step_counter[prev_primitive.id]} ({step_counter[prev_primitive.id] / mp_net.fps:.2f} s), "
                         f"global step: {step_counter.global_step}"
                     )
                 else:
                     logging.info(
-                        f"Finished {episode} episode for {prev_primitive.id} primitive (Demo), "
+                        f"Finished episode {episode} for {prev_primitive.id} primitive (Demo), "
+                        f"duration: {episode_length} (steps) / {episode_length / mp_net.fps:.2f} (s)"
                     )
 
-                logging.info(f"Now transition to  {current_primitive.id} primitive")
+                logging.info(f"Now transition to {current_primitive.id} primitive")
 
                 if current_primitive.is_terminal:
                     episode += 1

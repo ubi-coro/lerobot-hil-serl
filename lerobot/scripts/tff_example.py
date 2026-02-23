@@ -11,7 +11,7 @@ from lerobot.common.robot_devices.motors.configs import URArmConfig
 from lerobot.common.robot_devices.motors.rtde_tff_controller import RTDETFFController, TaskFrameCommand, AxisMode
 from lerobot.common.envs.wrapper.spacemouse import SpaceMouseExpert
 
-USE_ROT = False
+USE_ROT = True
 
 # ----------------------------------------
 # 1. Configure and start the controller
@@ -31,12 +31,12 @@ config = URArmConfig(
     mock=False,
     use_gripper=True,
     speed_limits=[15.0, 15.0, 15.0, 0.40, 0.40, 1.0],
-    wrench_limits=[30.0, 30.0, 30.0, 15.0, 15.0, 10.0],
-    enable_contact_aware_force_scaling=[True, True, False, False, False, True],
-    contact_desired_wrench=[3.0, 3.0, 0, 0, 0, 0.5],
-    contact_limit_scale_min=[0.09, 0.09, 0, 0, 0, 0.04],
+    wrench_limits=[30.0, 30.0, 30.0, 10.0, 10.0, 10.0],
+    compliance_safety_enable=[True, True, True, False, False, True],
+    compliance_desired_wrench=[3.0, 3.0, 3.0, 0.5, 0.5, 0.5],
+    compliance_adaptive_limit_min=[0.09, 0.09, 0.09, 0.04, 0.04, 0.04],
     debug=False,
-    debug_axis=5
+    debug_axis=3
 )
 
 # Instantiate and start the controller (in its own process)
@@ -49,17 +49,17 @@ action_scale = np.array([1 / 10] * 3 + [1.0] * 3)
 # setup tff command
 if USE_ROT:
     cmd = TaskFrameCommand(
-        T_WF=[0.03383, -0.25478, 0.138, float(np.pi), 0.0, 0.0],
+        T_WF=[0.06947, -0.35062, 0.138, 0.0, float(np.pi), 0.0],
         target=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-        mode=3 * [AxisMode.IMPEDANCE_VEL],
+        mode=6 * [AxisMode.PURE_VEL],
         kp=np.array([2500, 2500, 2500, 100, 100, 100]),
         kd=np.array([160, 160, 320, 6, 6, 6])
     )
 else:
     cmd = TaskFrameCommand(
-        T_WF=[0.03383, -0.25478, 0.138, float(np.pi), 0.0, 0.0],
+        T_WF=[0.06947, -0.35062, 0.138, 0.0, float(np.pi), 0.0],
         target=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-        mode=2 * [AxisMode.PURE_VEL] + 1 * [AxisMode.IMPEDANCE_VEL] + 2 * [AxisMode.POS] + 1 * [AxisMode.PURE_VEL],
+        mode=3 * [AxisMode.PURE_VEL] + 2 * [AxisMode.POS] + 1 * [AxisMode.PURE_VEL],
         kp=np.array([2500, 2500, 2500, 100, 100, 100]),
         kd=np.array([960, 960, 320, 6, 6, 6])
     )
@@ -77,11 +77,11 @@ while controller.is_alive():
     action = action_scale * action
 
     if USE_ROT:
-        cmd.target[0] = -action[0]
-        cmd.target[1] = action[1]
+        cmd.target[0] = action[0]
+        cmd.target[1] = -action[1]
         cmd.target[2] = -action[2]
-        cmd.target[3] = 0.2 * -action[3]
-        cmd.target[4] = 0.2 * action[4]
+        cmd.target[3] = 0.2 * action[3]
+        cmd.target[4] = 0.2 * -action[4]
         cmd.target[5] = 0.2 * -action[5]
     else:
         cmd.target[0] = 0.5 * action[0]
@@ -91,7 +91,7 @@ while controller.is_alive():
 
     controller.send_cmd(cmd)
 
-    print("EE Pose:", controller.get_robot_state()["ActualTCPPose"][:])
+    print("EE Pose:", "".join([f"{p:.5f}, " for p in controller.get_robot_state()["ActualTCPPose"][:]]))
     #print("EE Wrench:", controller.get_robot_state()["ActualTCPForce"][:])
 
     t_loop = time.perf_counter() - t_start

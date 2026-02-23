@@ -320,6 +320,9 @@ def act_with_policy(
             done = (terminated or truncated)  # and info.get("success", False)
             current_primitive = mp_net.check_transitions(current_primitive, obs, done)
 
+            if current_primitive.is_terminal:
+                online_env.safe_stop()
+
             # If primitive changed, send messages, close old env and make new env
             if prev_primitive != current_primitive:
                 if prev_primitive.is_adaptive:

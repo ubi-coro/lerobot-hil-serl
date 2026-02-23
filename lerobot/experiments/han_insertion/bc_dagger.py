@@ -7,7 +7,7 @@ from lerobot.scripts.server.mp_nets import MPNetConfig, MPConfig
 @MPNetConfig.register_subclass("han_insertion_bc_dagger")
 @dataclass
 class HAN_Insertion_BC_DAgger(HAN_Insertion):
-    root: str = "/home/jannick/data/paper/hil-amp/dagger_reward_sparse_cam_toWindow_terminate_early_init_large_demos_itv_2"
+    root: str = "/home/jannick/data/paper/hil-amp/dagger_reward_sparse_cam_toWindow_terminate_early_init_large_demos_itv_3"
 
     primitives: dict[str, MPConfig] = field(default_factory=lambda: {
         "press": MPConfig(
