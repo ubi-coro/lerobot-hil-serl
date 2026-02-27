@@ -6,6 +6,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.path import Path as PltPath
 from matplotlib.patches import PathPatch, Circle
+from matplotlib.lines import Line2D
 from tqdm import tqdm
 
 try:
@@ -33,28 +34,28 @@ plt.rcParams.update({
     "text.latex.preamble": r"\usepackage{bm}"
 })
 
-SPARSE_ROOT = "/home/jstranghoener/Documents/Paper & Projects/HIL-AMP/paper/data/dataset_dense"
-DENSE_ROOT  = "/home/jstranghoener/Documents/Paper & Projects/HIL-AMP/paper/data/dataset_sparse"
+SPARSE_ROOT = "/mnt/nvme0n1p3/Paper & Projects (Disk)/SHaRe/paper/data//dataset_dense/"
+DENSE_ROOT  = "/mnt/nvme0n1p3/Paper & Projects (Disk)/SHaRe/paper/data//dataset_sparse"
 
 SPARSE_REPO_ID = "hil_amp_main/rlpd_reward_sparse_cam_toWindow_terminate_early_init_large_demos_itv_2"
 DENSE_REPO_ID  = "hil_amp_main/rlpd_reward_dense_cam_toWindow_terminate_early_init_large_no_priors_1"
 
 SUB_SAMPLING = 1
-MAX_LEN = 10000000
+MAX_LEN = 1000000000
 ROT_DEG = 1.0
 POSE_KEY = 'complementary_info.observation.main_eef_pos'
 
-connector_img   = plt.imread("connector.png")
+connector_img = plt.imread("connector.png")
 cross_section_img = plt.imread("cross_section.png")
 
 # --- helpers -----------------------------------------------------------------
 def load_dense(dataset, max_len, sub=1):
     xs, ys = [], []
-    for i in tqdm(range(len(dataset)), desc="Load pose information"):
-        p = dataset[i][POSE_KEY]
+    for sample in tqdm(dataset, desc="Load pose information"):
+        p = sample[POSE_KEY]
         xs.append(-p[0] * 1000.0)        # x
-        ys.append(-p[2] * 1000.0)       # -z (goal is low)
-        if i >= max_len:
+        ys.append(-p[2] * 1000.0)        # -z (goal is low)
+        if len(xs) >= max_len:
             break
     xs = np.asarray(xs)[::sub]
     ys = np.asarray(ys)[::sub]
@@ -62,7 +63,10 @@ def load_dense(dataset, max_len, sub=1):
 
 def load_sparse(dataset: LeRobotDataset, max_len, sub=1):
     xs, ys = [], []
-    for e, (start, end) in tqdm(enumerate(zip(dataset.episode_data_index["from"], dataset.episode_data_index["to"])), desc="Load pose information"):
+    for e, (start, end) in tqdm(
+        enumerate(zip(dataset.episode_data_index["from"], dataset.episode_data_index["to"])),
+        desc="Load pose information"
+    ):
         xs_episode, ys_episode = [], []
         is_intervention = False
         for i in range(start, end):
@@ -85,71 +89,36 @@ def load_sparse(dataset: LeRobotDataset, max_len, sub=1):
 
     xs = np.asarray(xs)[::sub]
     ys = np.asarray(ys)[::sub]
-
     return xs, ys
 
 def rotate_points(x: np.ndarray, y: np.ndarray, deg: float):
-    """Return x', y' rotated by *deg* degrees counter-clockwise."""
-    if abs(deg) < 1e-9:                                # fast-exit
+    if abs(deg) < 1e-9:
         return x, y
     rad = math.radians(deg)
     cos_t, sin_t = math.cos(rad), math.sin(rad)
-    x_r =  cos_t * x - sin_t * y
-    y_r =  sin_t * x + cos_t * y
+    x_r = cos_t * x - sin_t * y
+    y_r = sin_t * x + cos_t * y
     return x_r, y_r
 
 def density_grid(x, y, bins=200, xy_range=None, smooth_sigma=1.2):
-    """Return normalized 2D density H, xedges, yedges."""
     if xy_range is None:
         pad_x = 0.05 * (np.max(x) - np.min(x) + 1e-12)
         pad_y = 0.05 * (np.max(y) - np.min(y) + 1e-12)
         xy_range = [[np.min(x)-pad_x, np.max(x)+pad_x],
                     [np.min(y)-pad_y, np.max(y)+pad_y]]
-    #H, xedges, yedges = np.histogram2d(x, y, bins=bins, range=xy_range, density=True)
-    #if _HAS_SCIPY and smooth_sigma and smooth_sigma > 0:
-    #    H = _gaussian_filter(H, smooth_sigma, mode='nearest')
-    ## Avoid zero-only arrays
-    #if np.max(H) > 0:
-    #    H /= np.max(H)
-    #return H.T, xedges, yedges  # transpose so H[y, x] matches imshow/contour
 
     H, xedges, yedges = np.histogram2d(x, y, bins=bins, range=xy_range, density=True)
     if _HAS_SCIPY and smooth_sigma and smooth_sigma > 0:
-        # slightly stronger smoothing + reflect to improve connectivity near edges
         H = _gaussian_filter(H, smooth_sigma, mode='reflect')
-    # normalize and boost contrast so edges look crisper
     H = H / (np.max(H) + 1e-12)
-    H = np.power(H, 0.7)  # gamma < 1 sharpens transitions
-    return H.T, xedges, yedges  # transpose so H[y, x] matches imshow/contour
-
-
-def quantile_levels(H, qs=(0.70, 0.85, 0.95, 0.99)):
-    """Compute contour levels so that each level encloses approximately q-mass."""
-    flat = H.ravel()
-    # sort descending (highest density center → outward)
-    idx = np.argsort(flat)[::-1]
-    cumsum = np.cumsum(flat[idx])
-    cumsum /= cumsum[-1] if cumsum[-1] > 0 else 1.0
-    levels = []
-    for q in qs:
-        # find threshold t where mass inside >= q
-        pos = np.searchsorted(cumsum, q, side='left')
-        t = flat[idx[pos]] if pos < len(idx) else flat[idx[-1]]
-        levels.append(t)
-    # ensure strictly increasing for contour
-    levels = sorted(set(levels))
-    # if degenerate (e.g., tiny dataset), fall back to linear levels
-    if len(levels) < 3:
-        levels = np.linspace(0.3, 0.95, 4)
-    return levels
-
+    H = np.power(H, 0.7)
+    return H.T, xedges, yedges
 
 # --- load datasets ------------------------------------------------------------
 dataset_path = Path("preprocessed") / "occupancies.pkl"
 if dataset_path.exists():
     with open(dataset_path, "rb") as fn:
         data = pickle.load(fn)
-
     sx, sy = data["sx"], data["sy"]
     dx, dy = data["dx"], data["dy"]
 else:
@@ -159,71 +128,58 @@ else:
     sx, sy = load_sparse(sparse_dataset, MAX_LEN, SUB_SAMPLING)
     dx, dy = load_dense(dense_dataset,  MAX_LEN, SUB_SAMPLING)
 
-    data = {
-        "sx": sx, "sy": sy,
-        "dx": dx, "dy": dy
-    }
+    data = {"sx": sx, "sy": sy, "dx": dx, "dy": dy}
+    dataset_path.parent.mkdir(parents=True, exist_ok=True)
     with open(dataset_path, "wb") as fn:
         pickle.dump(data, fn, protocol=pickle.HIGHEST_PROTOCOL)
 
 sy += 30.0
 dy += 30.0
 
-# rotate points
 sx, sy = rotate_points(sx, sy, ROT_DEG)
 dx, dy = rotate_points(dx, dy, ROT_DEG)
 
-# Use a shared range so contours are comparable
+# swap since I f'ed up the paths
+dx, sx = sx, dx
+dy, sy = sy, dy
+
 x_min = min(sx.min(), dx.min()); x_max = max(sx.max(), dx.max())
 y_min = min(sy.min(), dy.min()); y_max = max(sy.max(), dy.max())
 xy_range = [[x_min, x_max], [y_min, y_max]]
 xy_diffs = [x_max - x_min, y_max - y_min]
 
-# Build densities
-bins = 500  # higher resolution → crisper edges
+bins = 500
 H_sparse, xedges, yedges = density_grid(sx, sy, bins=bins, xy_range=xy_range, smooth_sigma=1.1)
 H_dense,  _,      _      = density_grid(dx, dy, bins=bins, xy_range=xy_range, smooth_sigma=1.1)
 
-
-# Compute quantile-based contour levels (shared for fairness)
 eps = 1e-6
 levels_sparse = np.linspace(0.03, 1.0 + eps, 8)
 levels_dense  = np.linspace(0.03, 1.0 + eps, 8)
 
 # --- plot ---------------------------------------------------------------------
-plt.figure(figsize=(3.54, 3.54))
-ax = plt.gca()
+fig = plt.figure(figsize=(4.6, 3.15), dpi=200)
+ax = fig.add_axes([0.075, 0.14, 0.59, 0.79])  # main plot (smaller, tighter)
+
 ax.grid(True, linewidth=0.5, alpha=0.8)
-for spine in ax.spines.values(): spine.set_linewidth(0.7)
+for spine in ax.spines.values():
+    spine.set_linewidth(1.1)
 
-ax.set_xlim(left=xy_range[0][0] - 0.1 * xy_diffs[0], right=xy_range[0][1] + 0.3 * xy_diffs[0])
-ax.set_ylim(bottom=xy_range[1][0] - 0.1 * xy_diffs[1], top=xy_range[1][1] + 0.1 * xy_diffs[1])
+ax.set_xlim(left=xy_range[0][0] - 0.05 * xy_diffs[0], right=xy_range[0][1] + 0.2 * xy_diffs[0])
+ax.set_ylim(bottom=xy_range[1][0] - 0.1 * xy_diffs[1], top=xy_range[1][1] + 0.05 * xy_diffs[1])
 
-# --- background connector on right -------------------------------------------
-# compute placement in data units so it aligns with your axes (mm)
+# --- background connector image on main axis ---------------------------------
 x0, x1 = ax.get_xlim()
 y0, y1 = ax.get_ylim()
 xr, yr = (x1 - x0), (y1 - y0)
 
-# tweakable parameters
-
-# center
-conn_width_frac   = 0.29   # fraction of x-range the connector should span
-conn_right_margin = 0.26   # fraction of x-range as right margin
-conn_y_center_frac = 0.39  # vertical center of image as fraction of y-range
-conn_alpha = 0.5
-
-# top
-conn_width_frac   = 0.27   # fraction of x-range the connector should span
-conn_right_margin = 0.195   # fraction of x-range as right margin
-conn_y_center_frac = 0.56  # vertical center of image as fraction of y-range
-conn_alpha = 0.6
-
+conn_width_frac = 0.27
+conn_right_margin = 0.195
+conn_y_center_frac = 0.56
+conn_alpha = 0.8
 
 conn_w = conn_width_frac * xr
-conn_aspect = connector_img.shape[0] / connector_img.shape[1]  # (px height / px width)
-conn_h = conn_w * conn_aspect  # equal aspect => mm in x == mm in y
-
+conn_aspect = connector_img.shape[0] / connector_img.shape[1]
+conn_h = conn_w * conn_aspect
 conn_x2 = x1 - conn_right_margin * xr
 conn_x1 = conn_x2 - conn_w
 conn_yc = y0 + conn_y_center_frac * yr
@@ -234,13 +190,12 @@ ax.imshow(
     connector_img,
     extent=[conn_x1, conn_x2, conn_y1, conn_y2],
     alpha=conn_alpha,
-    zorder=0,                  # behind contourf (which defaults > 0)
+    zorder=0,
     interpolation="bilinear",
     clip_on=True,
 )
 
-
-# --- line work for the hole. In axes units. ---
+# --- geometry path ------------------------------------------------------------
 center = [
     (-25, 24),
     (-6.3, 24),
@@ -250,76 +205,88 @@ center = [
     (11, 16),
     (11, 24),
 ]
-
-line_data = center
-codes = [PltPath.MOVETO] + [PltPath.LINETO]*(len(line_data)-1)
-patch = PathPatch(
-    PltPath(line_data, codes),
-    transform=ax.transData,   # <<--- axes units!
-    facecolor="none",         # line only, no fill
-    edgecolor=(0, 0, 0, 0.7),  # black @ 55 % opacity
-    linewidth=2.0,              # points
-    capstyle="round",         # round line ends
-    joinstyle="round",        # round joints
-    label="Geometry"
+codes = [PltPath.MOVETO] + [PltPath.LINETO] * (len(center) - 1)
+geom_patch = PathPatch(
+    PltPath(center, codes),
+    transform=ax.transData,
+    facecolor="none",
+    edgecolor=(0, 0, 0, 1.0),
+    linewidth=3.0,
+    capstyle="round",
+    joinstyle="round",
+    label="Geometry",
+    zorder=4
 )
-geom_patch = ax.add_patch(patch)
+ax.add_patch(geom_patch)
 
-circle = Circle(
-    (0.6, 6.5), 0.4,
-    transform=ax.transData,    # data coordinates
-    facecolor="black",          # hollow
-    linestyle='',
-    alpha=0.85,
-)
-ax.add_patch(circle)
+# TCP and Goal markers (as in the paper legend)
+tcp_xy = (0.6, 6.5)
+goal_xy = (0.0, 0.0)
 
+ax.add_patch(Circle(tcp_xy, 1.0, transform=ax.transData, facecolor="black",
+                    edgecolor="black", linewidth=0.8, alpha=0.95, zorder=6))
+ax.plot(goal_xy[0], goal_xy[1], marker='x', markersize=8, markeredgewidth=2.0,
+        color='black', linestyle='None', zorder=6)
 
-# --- Filled contours (semi transparent). Choose two readable colormaps. ---
+# --- densities ----------------------------------------------------------------
 Xc = 0.5 * (xedges[1:] + xedges[:-1])
 Yc = 0.5 * (yedges[1:] + yedges[:-1])
 
-# trim the colormaps so the lightest shades are not near-white
 from matplotlib import cm, colors
-blues = colors.ListedColormap(cm.Blues(np.linspace(0.36, 1.00, 256)))
-oranges = colors.ListedColormap(cm.Oranges(np.linspace(0.40, 1.00, 256)))
+greens  = colors.ListedColormap(cm.Greens(np.linspace(0.45, 1.00, 256)))
+oranges = colors.ListedColormap(cm.Oranges(np.linspace(0.45, 1.00, 256)))
 
-cs2 = ax.contourf(
+# Dense - SHaRe (orange)
+ax.contourf(
     Xc, Yc, H_dense * 1.3,
-    levels = levels_dense,
-    cmap = oranges,
+    levels=levels_dense,
+    cmap=oranges,
     vmin=0.0, vmax=0.6,
-    alpha = 0.68,
-    antialiased = True
+    alpha=0.70,
+    antialiased=True,
+    zorder=1
 )
 
-cs1 = ax.contourf(
+# Sparse + SHaRe (green)
+ax.contourf(
     Xc, Yc, H_sparse * 1.3,
-    levels=levels_sparse,  # include top bin so center isn't white
-    cmap = blues,
+    levels=levels_sparse,
+    cmap=greens,
     vmin=0.0, vmax=0.6,
-    alpha = 0.72,
-    antialiased = True
+    alpha=0.72,
+    antialiased=True,
+    zorder=2
 )
 
-# Cosmetics
-ax.set_xlabel("$\mathbf{X [mm]}$")
-ax.set_ylabel("$\mathbf{Z [mm]}$")
-ax.set_aspect("equal")  # distances comparable
+# --- labels / style -----------------------------------------------------------
+ax.set_xlabel(r"$\mathbf{x\ [mm]}$")
+ax.set_ylabel(r"$\mathbf{z\ [mm]}$")
+ax.set_aspect("equal")
 
-# Legend patches
-from matplotlib.patches import Patch, PathPatch
+# --- upper-right inset image (cross-section) ----------------------------------
+ax_inset = fig.add_axes([0.58, 0.50, 0.45, 0.43])
+ax_inset.imshow(cross_section_img)
+ax_inset.axis("off")
+
+# --- legend (paper-style) -----------------------------------------------------
+from matplotlib.patches import Patch
 
 legend_handles = [
-    Patch(facecolor=plt.cm.Blues(0.6),  edgecolor="navy",       label="Dense $-$ Priors"),
-    Patch(facecolor=plt.cm.Oranges(0.6), edgecolor="darkorange", label="Sparse $+$ Priors"),
-    geom_patch
-
+    Patch(facecolor="white", edgecolor="black", linewidth=1.2, label="Geometry"),
+    Line2D([0], [0], marker='o', color='black', markerfacecolor='black',
+           markersize=8, linestyle='None', label="TCP"),
+    Line2D([0], [0], marker='x', color='black', markersize=7,
+           markeredgewidth=1.8, linestyle='None', label="Goal"),
+    Patch(facecolor=cm.Oranges(0.65), edgecolor=cm.Oranges(0.85), linewidth=1.5, label=r"SAC (dense)"),
+    Patch(facecolor=cm.Greens(0.60), edgecolor=cm.Greens(0.85), linewidth=1.5, label=r"SHaRe-RL (sparse)"),
 ]
-ax.legend(handles=legend_handles, loc="lower left", frameon=True, title_fontsize=9)
 
-plt.tight_layout()
-# Save a vector and a bitmap version for the paper
-plt.savefig("results/occupancy.pdf", dpi=600, bbox_inches='tight', pad_inches=0, transparent=False)
-plt.savefig("results/occupancy.png", dpi=400)
+ax_leg = fig.add_axes([0.61, 0.185, 0.4, 0.305])
+ax_leg.axis("off")
+leg = ax_leg.legend(handles=legend_handles, loc="upper left", frameon=True, fontsize=10)
+leg.get_frame().set_alpha(0.95)
+
+Path("results").mkdir(parents=True, exist_ok=True)
+plt.savefig("results/occupancy.pdf", dpi=600, bbox_inches='tight', pad_inches=0.0, transparent=False)
+plt.savefig("results/occupancy.png", dpi=400, bbox_inches='tight', pad_inches=0.01)
 plt.show()

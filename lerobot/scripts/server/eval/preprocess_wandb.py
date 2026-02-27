@@ -28,6 +28,7 @@ from typing import List, Dict, Any
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 try:
     import wandb  # type: ignore
@@ -54,7 +55,7 @@ METRIC_INFO = [
 #CUSTOM_KWARGS = {"gap_threshold": 300, "duration_s": 9600}
 
 CUSTOM_PREPROCESS = "scale_and_cut"
-CUSTOM_KWARGS = {"gap_threshold": 300, "duration_s": 9600, "max_time_s": 19680}
+CUSTOM_KWARGS = {"gap_threshold": 300, "duration_s": 10800, "max_time_s": 19680}
 
 def ScaleToDuration(df, duration_s: float = 9600):
     max_time_s = df["time_s"].max()
@@ -77,13 +78,27 @@ CUMSTOM_PREPROCESS_DICT = {
 def fetch_history(entity: str, project: str, run_id: str,
                   max_points: int | None = None) -> List[Dict[str, Any]]:
     api = wandb.Api(timeout=60)
-    run = api.run(f"{entity}/{project}/{run_id}")
+
     #rows = run.history(samples=max_points, pandas=False)
     rows: List[Dict[str, Any]] = []
-    for row in run.scan_history(page_size=1000):
-        rows.append(row)
-        if max_points and len(rows) >= max_points:
-            break
+    metric_keys = [
+        "train/insert/Cycle Time [s]",
+        "train/insert/Intervention rate [%]",
+        "train/insert/Episode intervention",
+        "train/insert/Success",
+    ]
+    default_keys = [
+        "train/insert/Interaction step",
+        "_timestamp",
+        "_step"
+    ]
+    for m_key in metric_keys:
+        run = api.run(f"{entity}/{project}/{run_id}")
+        print(default_keys + [m_key])
+        for row in tqdm(run.scan_history(page_size=50000, keys=default_keys + [m_key])):
+            rows.append(row)
+            if max_points and len(rows) >= max_points:
+                break
     return rows, run.name
 
 
@@ -218,7 +233,7 @@ def main():
     p.add_argument("--entity", default="bielefeld-coro")
     p.add_argument("--project", default="hil_amp_main")
     p.add_argument("--max_points", type=int, default=None)
-    p.add_argument("--no_plot", action="store_true")
+    p.add_argument("--plot", action="store_false")
     args = p.parse_args()
 
     api = wandb.Api(timeout=60)
@@ -236,50 +251,54 @@ def main():
     os.makedirs("preprocessed", exist_ok=True)
 
     for run in runs:
-        out_dir = Path("preprocessed") / f"{run.name}_{run.id}"
-        out_dir.mkdir(parents=True, exist_ok=True)
 
-        if (out_dir / f"base.pkl").exists():
-            print(f"Loading local history for {run.name} ({run.id}) …")
+        try:
+            out_dir = Path("preprocessed") / f"{run.name}_{run.id}"
+            out_dir.mkdir(parents=True, exist_ok=True)
 
-            with open(out_dir / f"base.pkl", "rb") as fh:
-                df_base = pickle.load(fh)
-        else:
-            print(f"Downloading history for {run.name} ({run.id}) …")
-            hist, _ = fetch_history(args.entity, args.project, run.id,
-                                max_points=args.max_points)
+            if (out_dir / f"base.pkl").exists():
+                print(f"Loading local history for {run.name} ({run.id}) …")
 
-            if not hist:
-                print("   (no history rows – skipped)")
-                continue
+                with open(out_dir / f"base.pkl", "rb") as fh:
+                    df_base = pickle.load(fh)
+            else:
+                print(f"Downloading history for {run.name} ({run.id}) …")
+                hist, _ = fetch_history(args.entity, args.project, run.id, max_points=args.max_points)
 
-            df_base = pd.DataFrame(hist).sort_values(TS_KEY).reset_index(drop=True)
-
-            save_df(df_base, out_dir / f"base")
-
-        df_metrics = {}
-        is_ppo = "ppo" in run.name
-
-        for tag, key, _, window in METRIC_INFO:
-            if is_ppo:
-                old_key = key
-                if tag == "success":
-                    key = "Success Rate"
-                elif tag == "cycle":
-                    key = "Cycle Time"
-                else:
+                if not hist:
+                    print("   (no history rows – skipped)")
                     continue
 
-            df_metric = build_metric_df(df_base, key, window)
+                df_base = pd.DataFrame(hist).sort_values(TS_KEY).reset_index(drop=True)
 
-            if is_ppo:
-                df_metric[old_key] = df_metric[key]
+                save_df(df_base, out_dir / f"base")
 
-            df_metrics[tag] = df_metric
-            save_df(df_metric, out_dir / f"{tag}_{len(df_metric[key])}_episodes")
+            df_metrics = {}
+            is_ppo = "ppo" in run.name
 
-        if not args.no_plot:
-            plot_stacked(df_metrics, title=f"{run.name}_{run.id}")
+            for tag, key, _, window in METRIC_INFO:
+                if is_ppo:
+                    old_key = key
+                    if tag == "success":
+                        key = "Success Rate"
+                    elif tag == "cycle":
+                        key = "Cycle Time"
+                    else:
+                        continue
+
+                df_metric = build_metric_df(df_base, key, window)
+
+                if is_ppo:
+                    df_metric[old_key] = df_metric[key]
+
+                df_metrics[tag] = df_metric
+                save_df(df_metric, out_dir / f"{tag}_{len(df_metric[key])}_episodes")
+
+            if not args.plot:
+                plot_stacked(df_metrics, title=f"{run.name}_{run.id}")
+
+        except Exception as e:
+            print("There was an error:", e)
 
     plt.show()
 
