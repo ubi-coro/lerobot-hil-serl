@@ -65,6 +65,50 @@ class TaskFrame:
     def is_adaptive(self) -> bool:
         return len(self.learnable_axis_indices) > 0
 
+    @property
+    def policy_action_dim(self) -> int:
+        """Infer learning-space action dimension from the task-frame contract.
+
+        Rules:
+        - Any learnable VEL/FORCE axis contributes +1.
+        - Any learnable POS translational axis (x/y/z) contributes +1.
+        - Any learnable POS axis in RELATIVE mode contributes +1.
+        - Learnable rotational POS axes (rx/ry/rz) in ABSOLUTE mode are represented on manifolds:
+            * 1 axis -> +2 (S1)
+            * 2 axes -> +3 (S2)
+            * 3 axes -> +6 (SO(3), 6D representation)
+        """
+        dim = 0
+        absolute_rotation_axes = 0
+
+        for axis in self.learnable_axis_indices:
+            control_mode = self.control_mode[axis]
+            policy_mode = self.policy_mode[axis]
+
+            if control_mode in {ControlMode.VEL, ControlMode.FORCE}:
+                dim += 1
+                continue
+
+            if axis < 3 or policy_mode == PolicyMode.RELATIVE:
+                dim += 1
+                continue
+
+            absolute_rotation_axes += 1
+
+        if absolute_rotation_axes == 0:
+            return dim
+        if absolute_rotation_axes == 1:
+            return dim + 2
+        if absolute_rotation_axes == 2:
+            return dim + 3
+        if absolute_rotation_axes == 3:
+            return dim + 6
+
+        raise ValueError(
+            "Invalid absolute rotation axis count while inferring policy_action_dim. "
+            f"Expected 0..3, got {absolute_rotation_axes}."
+        )
+
     def to_dict(self) -> dict:
         return {
             "space": int(self.space),

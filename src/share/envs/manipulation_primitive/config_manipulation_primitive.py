@@ -35,9 +35,10 @@ from lerobot.processor.tf_processor import (
     VanillaTFFProcessorStep,
     SixDofVelocityInterventionActionProcessorStep
 )
-from lerobot.utils.constants import ACTION
+from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
+from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 from share.envs.manipulation_primitive.env_manipulation_primitive import ManipulationPrimitive
-from share.envs.manipulation_primitive.task_frame import TaskFrame
+from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, TaskFrame
 from share.envs.utils import check_task_frame_robot, check_delta_teleoperator
 from share.utils.kinematics import get_kinematics
 
@@ -107,20 +108,20 @@ class ManipulationPrimitiveProcessorConfig:
     control_time_s: float = 10.0
     fps: float = 10.0
     image_preprocessing: ImagePreprocessingConfig | None = None
-    events: EventConfig = EventConfig()
-    hooks: HookConfig = HookConfig()
+    events: EventConfig = field(default_factory=EventConfig)
+    hooks: HookConfig = field(default_factory=HookConfig)
 
     # per arm
-    observation: ObservationConfig = ObservationConfig()
-    gripper: GripperConfig = GripperConfig()
-    kinematics: KinematicsConfig = KinematicsConfig()
+    observation: ObservationConfig = field(default_factory=ObservationConfig)
+    gripper: GripperConfig = field(default_factory=GripperConfig)
+    kinematics: KinematicsConfig = field(default_factory=KinematicsConfig)
 
 
 @dataclass
 class ManipulationPrimitiveConfig(EnvConfig):
     """Configuration for the HILSerlRobotEnv environment."""
     task_frame: dict[str, TaskFrame] = field(default_factory=dict)
-    processor: ManipulationPrimitiveProcessorConfig = ManipulationPrimitiveProcessorConfig()
+    processor: ManipulationPrimitiveProcessorConfig = field(default_factory=ManipulationPrimitiveProcessorConfig)
 
     _kinematics_solver: dict = field(default_factory=dict)
     _joint_names: dict = field(default_factory=dict)
@@ -331,7 +332,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
         is_delta_teleoperator = check_delta_teleoperator(teleop_dict)
 
         # go through each processor and check if we need to turn scalar configs into configs for each robot
-        for attr in ["observation", "gripper", "reset", "inverse_kinematics", "task_frame"]:
+        for attr in ["observation", "gripper", "kinematics"]:
             _attr = getattr(self.processor, attr)
             for fn in fields(_attr):
                 if is_union_with_dict(fn.type) and not isinstance(getattr(_attr, fn.name), dict):
@@ -350,14 +351,59 @@ class ManipulationPrimitiveConfig(EnvConfig):
                 )
 
         # checks per robot
+        for name, frame in self.task_frame.items():
+            if name not in robot_dict:
+                raise ValueError(f"Missing robot for task-frame entry '{name}'.")
+
+            if name not in is_delta_teleoperator:
+                raise ValueError(
+                    f"Missing teleoperator for '{name}' while validating task-frame teleop compatibility."
+                )
+
+            # ENV-101: learnable VEL/FORCE axes require delta teleoperator input.
+            for axis in frame.learnable_axis_indices:
+                if frame.control_mode[axis] in {ControlMode.VEL, ControlMode.FORCE} and not is_delta_teleoperator[name]:
+                    raise ValueError(
+                        "Adaptive task-frame axes with VEL/FORCE control require a delta teleoperator. "
+                        f"Got robot='{name}', axis={axis}, control_mode={frame.control_mode[axis].name}, "
+                        "teleoperator_kind='absolute'."
+                    )
+
+            # ENV-102: JOINT-space and joint-only robots must only receive POS axis modes.
+            if frame.space == ControlSpace.JOINT:
+                non_pos_axes = [i for i, mode in enumerate(frame.control_mode) if mode != ControlMode.POS]
+                if non_pos_axes:
+                    raise ValueError(
+                        "ControlSpace.JOINT only supports POS axis modes. "
+                        f"Got robot='{name}', non_pos_axes={non_pos_axes}."
+                    )
+
+            if not is_task_frame_robot[name]:
+                non_pos_axes = [i for i, mode in enumerate(frame.control_mode) if mode != ControlMode.POS]
+                if non_pos_axes:
+                    raise ValueError(
+                        "Joint-only robots only support POS axis modes in this pipeline. "
+                        f"Got robot='{name}', non_pos_axes={non_pos_axes}."
+                    )
+
+            # ENV-102: TASK-space with absolute-joint teleop or joint-only robot requires kinematics.
+            requires_kinematics = frame.space == ControlSpace.TASK and (
+                not is_delta_teleoperator[name] or not is_task_frame_robot[name]
+            )
+            if requires_kinematics and not self.processor.kinematics.enable[name]:
+                raise ValueError(
+                    "Kinematics must be enabled for TASK-space control when teleop/robot modalities require FK/IK. "
+                    f"Set processor.kinematics.enable['{name}']=True."
+                )
+
+            if requires_kinematics and name not in self._kinematics_solver:
+                raise ValueError(
+                    "Kinematics are required but no solver was initialized. "
+                    f"Check kinematics config and robot interface for '{name}' "
+                    "(urdf_path/target_frame_name/bus availability)."
+                )
 
         # if gripper.enable but the robot has no GRIPPER_KEY action feature, disable
-
-        # if task_frame is cartesian, teleoperator is not cartesian, we need fk / ik
-
-        # if task_frame is cartesian, robot is not cartesian, we need fk / ik
-
-        # if robot is not cartesian and any axis mode is != *POS, error
 
     def infer_features(self, robot_dict):
         # process features with respective pipeline
@@ -366,9 +412,11 @@ class ManipulationPrimitiveConfig(EnvConfig):
         pipeline_features = env_processor.transform_features(self.initial_features)
         obs_features = pipeline_features[PipelineFeatureType.OBSERVATION]
 
+        action_dim = sum(frame.policy_action_dim for frame in self.task_frame.values())
+
         # expose state, action and visual features
         self.features = {
-            ACTION: None #pipeline_features[PipelineFeatureType.ACTION][ACTION],
+            ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(action_dim,)),
             OBS_STATE: pipeline_features[PipelineFeatureType.OBSERVATION][OBS_STATE]
         }
 
@@ -378,8 +426,6 @@ class ManipulationPrimitiveConfig(EnvConfig):
             if ft.type == FeatureType.VISUAL:
                 key = strip_prefix(key, PREFIXES_TO_STRIP)
                 self.features[f"{OBS_IMAGES}.{key}"] = PolicyFeature(type=FeatureType.VISUAL, shape=ft.shape)
-
-
 
 
 
