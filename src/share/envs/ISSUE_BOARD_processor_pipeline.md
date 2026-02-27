@@ -247,6 +247,58 @@ Documentation references `min_target`/`max_target` while dataclass currently use
 
 ---
 
+
+## EPIC F — Mocking Infrastructure for Robots, Kinematics, and Teleoperators
+
+### ENV-601: Add reusable mock entities for pipeline modality coverage
+**Priority:** P0  
+**Status:** Done  
+**Owner:** Unassigned
+
+#### Problem
+Pipeline tickets depend on deterministic, hardware-free fixtures that model both robot capabilities and teleoperator modalities.
+
+#### Scope
+- Add reusable mock entities that represent:
+  - task-frame-capable robot,
+  - joint-only robot,
+  - delta teleoperator,
+  - absolute-joint teleoperator,
+  - deterministic FK/IK mock solver.
+- Keep the mocks lightweight and independent from hardware backends.
+
+#### Acceptance Criteria
+- Mocks can be instantiated in unit tests with no hardware dependencies.
+- Teleoperator and robot modality helpers can distinguish each mock correctly.
+
+#### Tests
+- `test_mock_robots_cover_task_frame_and_joint_only_modalities`
+- `test_mock_teleoperators_cover_delta_and_absolute_joint_modalities`
+
+---
+
+### ENV-602: Validate deterministic mock kinematics behavior for FK/IK-dependent tickets
+**Priority:** P0  
+**Status:** Done  
+**Owner:** Unassigned
+
+#### Problem
+Upcoming processor-step tests require a deterministic and invertible kinematics stub to validate FK/IK branching logic.
+
+#### Scope
+- Provide deterministic FK mapping from joint dictionary to 6D task-frame pose.
+- Provide deterministic IK mapping that round-trips back to the original joint dictionary.
+- Add explicit tests for repeatability and numerical sanity.
+
+#### Acceptance Criteria
+- FK output is deterministic and stable for fixed joint input.
+- IK(FK(q)) returns the original joint targets for test fixtures.
+
+#### Tests
+- `test_mock_kinematics_solver_is_deterministic_for_fk_and_ik`
+
+---
+
 ## Suggested execution order
 1. ENV-101  
 2. ENV-102  
@@ -258,6 +310,8 @@ Documentation references `min_target`/`max_target` while dataclass currently use
 8. ENV-402  
 9. ENV-501  
 10. ENV-502
+11. ENV-601
+12. ENV-602
 
 ## Definition of Done (overall)
 - All P0 tickets merged.
