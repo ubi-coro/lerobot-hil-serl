@@ -39,6 +39,7 @@ from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeatur
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 from share.envs.manipulation_primitive.env_manipulation_primitive import ManipulationPrimitive
 from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, TaskFrame
+from share.envs.manipulation_primitive.processor_steps import MatchTeleopToPolicyActionProcessorStep
 from share.envs.utils import check_task_frame_robot, check_delta_teleoperator
 from share.utils.kinematics import get_kinematics
 
@@ -144,7 +145,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
         env = ManipulationPrimitive(task_frame=self.task_frame, robot_dict=robot_dict, cameras=cameras, display_cameras=display_cameras)
 
         env_processor = self.make_env_processor(device)
-        action_processor = self.make_action_processor(teleop_dict, device)
+        action_processor = self.make_action_processor(robot_dict, teleop_dict, device)
         return env, env_processor, action_processor
 
     def make_action_processor(self, robot_dict, teleop_dict, device) -> DataProcessorPipeline:
@@ -188,7 +189,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
             # scatter policy / teleop action (depending on is-intervention event) into full task frame action target
             # send feedback to teleoperators if they need it
             InterventionActionProcessorStep(
-                teleoperators=teleoperators,
+                teleoperators=teleop_dict,
                 task_frame=self.task_frame,
             ),
 
