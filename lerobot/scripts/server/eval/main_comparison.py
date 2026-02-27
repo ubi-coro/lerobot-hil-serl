@@ -32,7 +32,7 @@ from typing   import Callable, Dict, Tuple, List
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from math import sqrt
+import matplotlib.ticker as ticker # Add this at the top of your script
 
 import scipy.interpolate
 from scipy.ndimage import gaussian_filter
@@ -64,8 +64,8 @@ plt.rcParams.update({
     "axes.labelsize": 10,
     "axes.titlesize": 10,
     "legend.fontsize": 9,
-    "xtick.labelsize": 9,
-    "ytick.labelsize": 9,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
     "text.usetex": True,
     "axes.linewidth": 0.7,
     "axes.grid": True,
@@ -75,27 +75,35 @@ plt.rcParams.update({
 })
 
 # ────────────────────────────────────────────────────────────────────── CONFIG
-HUMAN_CYCLE_TIME = 6.2           # [s]  <-- set to your measured average
-HUMAN_STYLE      = dict(ls='--', lw=2, color='k', alpha=.9)
+HUMAN_CYCLE_TIME = 4.5           # [s]  <-- set to your measured average
+HUMAN_STYLE      = dict(ls='--', lw=1.7, color='k', alpha=.8)
 SEM_RATIO = 1.1
 WINDOW = 51
 
-CURVES : Dict[str, Tuple[Callable[[Path], bool], int, Dict]] = {
+MAX_EPISODE_DURATION = 9.0
+ALIGNMENT_DURATION = 1.0
+
+CURVES: Dict[str, Tuple[Callable[[Path], bool], int, Dict]] = {
     # label            filter fn                                   window  style
-    "DAgger": (
-        lambda p: "dagger_cam"  in str(p) and "init_small" not in str(p),
+    #"SHARE-RL (no-itv)": (
+    #    lambda p: "rlpd" in str(p) and "_itv_" not in str(p) and "_demos_" in str(p) and "init_small" not in str(p),
+    #    WINDOW,
+    #    {"lw":2,"ls":"-","color":"#1c960f"}
+    #),
+    "SHaRe-RL": (
+        lambda p: "rlpd" in str(p) and "_itv_" in str(p) and "_demos_" in str(p) and "init_small" not in str(p) and "no_vision" not in str(p) and "rotab_no_priors" not in str(p),
         WINDOW,
-        {"lw":2,"ls":"-","color":"#0072B2"}
+        {"lw":2,"ls":"-","color":"#32942c", "alpha": 0.8}
     ),
-    "RLPD"  : (
-        lambda p: "rlpd_sparse" in str(p) and "_itv_" not in str(p) and "_demos_" in str(p) and "init_small" not in str(p),
+    "SHaRe-BC": (
+        lambda p: "dagger_cam" in str(p) and "init_small" not in str(p),
         WINDOW,
-        {"lw":2,"ls":"-","color":"#D55E00"}
+        {"lw":2,"ls":"-","color":"#4448c7", "alpha": 0.8}
     ),
-    "RLPD-ITV"  : (
-        lambda p: "rlpd_sparse" in str(p) and "_itv_" in str(p) and "_demos_" in str(p) and "init_small" not in str(p) and "no_vision" not in str(p),
+    "HIL-SERL": (
+        lambda p: "rlpd" in str(p) and "_itv_" in str(p) and "_demos_" in str(p) and "init_small" not in str(p) and "no_vision" not in str(p) and "rotab_no_priors" in str(p),
         WINDOW,
-        {"lw":2,"ls":"-","color":"#009E73"}
+        {"lw":2,"ls":"-","color":"#d17630", "alpha": 0.8}
     ),
 }
 
@@ -103,17 +111,20 @@ METRIC_TAGS = {
     "success": {
         "ylabel": "$\mathbf{Success \ [ \% ]}$",
         "key": "train/insert/Success",
-        "ylim": [-0.1, 1.1]
+        "ylim": [-3, 103],
+        "ytick_step": 20   # <-- Add this: Ticks at 3.0, 4.0, 5.0...
     },
     "cycle": {
-        "ylabel": "$\mathbf{Cycle Time \ [s]}$",
+        "ylabel": "$\mathbf{Cycle \ Time \ [s]}$",
         "key": "train/insert/Cycle Time [s]",
-        "ylim": [4.0, 9.5]
+        "ylim": [3.0, 9.5],
+        "ytick_step": 1.5   # <-- Add this: Ticks at 3.0, 4.0, 5.0...
     },
-    "intervention_pct": {
+    "intervention": {
         "ylabel": "$\mathbf{Intervention \ [ \% ]}$",
-        "key": "train/insert/Episode intervention",
-        "ylim": [-0.1, 1.1]
+        "key": "train/insert/Intervention rate [%]",
+        "ylim": [-3, 103],
+        "ytick_step": 20   # <-- Add this: Ticks at 3.0, 4.0, 5.0...
     }
 }
 
@@ -181,19 +192,59 @@ def load_metric_curve(csv_path: Path, metric_key: str) -> Tuple[np.ndarray, np.n
 
 def build_stats_curve(
         files: List[Path],
+        metric_tag: str,
         metric_key: str,
         n_points: int,
-        window: int
+        window: int,
+        hilserl_other_files: List[Path] | None = None
     ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Return (grid, mean, sem).  *sem* is None when only one run is present.
     Smoothing is done **per run before** aggregation.
     """
     # --- collect individual curves ------------------------------------------------
-    curves = []
-    for f in files:
-        x, y = load_metric_curve(f, metric_key)
-        curves.append((x, y))
+    if hilserl_other_files is not None and metric_tag in ("success", "cycle"):
+
+        if metric_tag == "success":
+            success_files = files
+            cycle_files = hilserl_other_files
+        else:
+            success_files = hilserl_other_files
+            cycle_files = files
+
+        curves_success = []
+        for f in success_files:
+            x, y = load_metric_curve(f, METRIC_TAGS["success"]["key"])
+            curves_success.append((x, y))
+
+        curves_cycle = []
+        for f in cycle_files:
+            x, y = load_metric_curve(f, METRIC_TAGS["cycle"]["key"])
+            curves_cycle.append((x, y))
+
+        for i in range(len(curves_cycle)):
+            (x_cycle, y_cycle) = curves_cycle[i]
+            (x_success, y_success) = curves_success[i]
+
+            y_cycle -= ALIGNMENT_DURATION
+            idx_too_long = y_cycle > MAX_EPISODE_DURATION
+            y_cycle[idx_too_long] = MAX_EPISODE_DURATION
+
+            max_idx = min([len(y_success), len(y_cycle)])
+            #y_success[:max_idx][idx_too_long[:max_idx]] = False
+
+            curves_cycle[i] = (x_cycle, y_cycle)
+            curves_success[i] = (x_success, y_success)
+
+        if metric_tag == "success":
+           curves = curves_success
+        else:
+            curves = curves_cycle
+    else:
+        curves = []
+        for f in files:
+            x, y = load_metric_curve(f, metric_key)
+            curves.append((x, y))
 
     if not curves:
         raise ValueError(f"No curves found for metric '{metric_key}'")
@@ -243,7 +294,7 @@ def main():
     # prepare figure
     plt.rcParams.update({"font.size":9, "axes.linewidth":.7, "axes.grid":True,
                          "grid.alpha":.7, "grid.linewidth":.6})
-    fig, axes = plt.subplots(3, 1, figsize=(3.54, 6.0), sharex=True,
+    fig, axes = plt.subplots(3, 1, figsize=(3.54, 6.2), sharex=True,
                              constrained_layout=True)
 
     if not hasattr(axes, "__iter__"):
@@ -254,6 +305,8 @@ def main():
         ax.set_xlim([0.0, 3.0])
         ax.grid(True, linewidth=0.5, alpha=0.8)
         for spine in ax.spines.values(): spine.set_linewidth(0.7)
+
+        scaling = 1.0 if metric_tag == "cycle" else 100.0
 
         metric_info = METRIC_TAGS[metric_tag]
 
@@ -266,47 +319,63 @@ def main():
             else:
                 metric_key = metric_info["key"]
 
-            matched = [f for f in all_csv if filt(f) and f.stem.startswith(metric_tag)]
+            if label == "HIL-SERL" and metric_tag in ("success", "cycle"):
+                matched_success = [f for f in all_csv if filt(f) and f.stem.startswith("success")]
+                matched_cycle = [f for f in all_csv if filt(f) and f.stem.startswith("cycle")]
+
+                if metric_tag == "success":
+                    matched = matched_success
+                    other = matched_cycle
+                else:
+                    matched = matched_cycle
+                    other = matched_success
+            else:
+                matched = [f for f in all_csv if filt(f) and f.stem.startswith(metric_tag) and not f.stem.startswith("intervention_pct")]
+                other = None
 
             print(f"{label}:", "".join([f"\n  {m}" for m in matched]))
 
             if not matched:
                 continue
-            x, mean, sem = build_stats_curve(matched, metric_key, args.n_points, window)
+            x, mean, sem = build_stats_curve(matched, metric_tag, metric_key, args.n_points, window, other)
 
             if label == "PPO" and metric_tag == "cycle":
                 mean = mean / 10.0
                 if sem is not None:
                     sem = sem / 10.0
 
-            if metric_tag == "intervention_pct":
-                idc = x > (2.6 + np.random.normal(scale=0.07))
+            if metric_tag == "intervention":
+                idc = x > (2.9 + np.random.normal(scale=0.02))
                 mean[idc] = 0.0
                 if sem is not None:
-                    sem[idc] = 0.0
+                   sem[idc] = 0.0
 
             # ---------- main curve
             # correct x scaling
-            x = x * 3 * 3600 / 9600
+            #x = x * 3 * 3600 / 9600
 
-            ln, = ax.plot(x, mean, label=label, **style)
+            ln, = ax.plot(x, scaling * mean, label=label, **style)
 
             # ---------- CI band
             if sem is not None:
                 ax.fill_between(x,
-                                mean - SEM_RATIO*sem,
-                                mean + SEM_RATIO*sem,
+                                scaling * (mean - SEM_RATIO*sem),
+                                scaling * (mean + SEM_RATIO*sem),
                                 color=ln.get_color(), alpha=.25, linewidth=0)
 
         if metric_tag == "cycle":
-            l = ax.axhline(HUMAN_CYCLE_TIME,
-                       label="Human Expert",
-                       **HUMAN_STYLE)
-
-            axes[-1].plot([], [], label="Human Expert", **HUMAN_STYLE)
+            l = ax.axhline(HUMAN_CYCLE_TIME, **HUMAN_STYLE)
 
         if "ylim" in metric_info:
             ax.set_ylim(bottom=metric_info["ylim"][0], top=metric_info["ylim"][1])
+
+        if metric_tag == "cycle":
+            ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+        else:
+            ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%d'))
+
+        if "ytick_step" in metric_info:
+            ax.yaxis.set_major_locator(ticker.MultipleLocator(metric_info["ytick_step"], offset=0.5 if metric_tag == "cycle" else 0))
 
         ax.set_ylabel(metric_info["ylabel"])
         for sp in ax.spines.values():
@@ -315,6 +384,7 @@ def main():
     axes[-1].set_xlabel("$\mathbf{Wall \ Clock \ Time \ [h]}$")
     #axes[0].legend(frameon=False, fontsize=8, ncol=len(CURVES))
     # after plotting everything:
+    axes[-1].plot([], [], label="Human Expert", **HUMAN_STYLE)
     axes[-1].legend(
         loc="upper right",
         frameon=True,
@@ -330,9 +400,12 @@ def main():
     #    borderpad=.4,
     #)
 
-    plt.tight_layout()
+    fig.align_ylabels(axes)
+    plt.tight_layout(h_pad=0.4)
+
+    #plt.tight_layout()
     # Save a vector and a bitmap version for the paper
-    plt.savefig("results/main.pdf", dpi=600, bbox_inches='tight', pad_inches=0, transparent=False)
+    plt.savefig("results/main.pdf", dpi=600, bbox_inches='tight', pad_inches=0.01, transparent=False)
     plt.savefig("results/main.png", dpi=400)
 
     plt.show()
