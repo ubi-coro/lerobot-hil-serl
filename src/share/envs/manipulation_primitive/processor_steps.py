@@ -1,0 +1,486 @@
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import Any
+
+import torch
+
+from lerobot.configs.types import PipelineFeatureType, PolicyFeature
+from lerobot.processor.core import EnvTransition, TransitionKey
+from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
+from lerobot.processor.pipeline import ProcessorStep, ProcessorStepRegistry
+from lerobot.teleoperators import TeleopEvents
+from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, PolicyMode, TaskFrame
+from share.envs.utils import check_delta_teleoperator
+
+
+def _euler_xyz_to_matrix(rx: float, ry: float, rz: float) -> list[list[float]]:
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+
+    # Extrinsic XYZ == Rz @ Ry @ Rx.
+    return [
+        [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+        [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+        [-sy, cy * sx, cy * cx],
+    ]
+
+
+@dataclass
+@ProcessorStepRegistry.register("match_teleop_to_policy_action")
+class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
+    teleoperators: dict[str, Any] = field(default_factory=dict)
+    task_frame: dict[str, TaskFrame] = field(default_factory=dict)
+    kinematics: dict[str, Any] = field(default_factory=dict)
+    use_virtual_reference: bool | dict[str, bool] = True
+
+    _is_delta_teleoperator: dict[str, bool] = field(default_factory=dict, init=False)
+    _virtual_task_pose: dict[str, list[float]] = field(default_factory=dict, init=False)
+    _prev_fk_pose: dict[str, list[float]] = field(default_factory=dict, init=False)
+
+    def __post_init__(self) -> None:
+        self._is_delta_teleoperator = check_delta_teleoperator(self.teleoperators)
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        new_transition = transition.copy()
+        complementary_data = dict(new_transition.get(TransitionKey.COMPLEMENTARY_DATA) or {})
+        teleop_action_dict = complementary_data.get(TELEOP_ACTION_KEY)
+        if not isinstance(teleop_action_dict, dict):
+            return new_transition
+
+        converted_actions: dict[str, torch.Tensor] = {}
+        for name, teleop_action in teleop_action_dict.items():
+            frame = self.task_frame.get(name)
+            if frame is None or not frame.is_adaptive:
+                continue
+
+            if self._is_delta_teleoperator.get(name, False):
+                converted_actions[name] = self._map_delta_teleop(name, frame, teleop_action)
+            else:
+                converted_actions[name] = self._map_absolute_joint_teleop(name, frame, teleop_action)
+
+        complementary_data[TELEOP_ACTION_KEY] = converted_actions
+        new_transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
+        return new_transition
+
+    def _map_delta_teleop(self, name: str, frame: TaskFrame, teleop_action: Any) -> torch.Tensor:
+        deltas = self._extract_delta_action(teleop_action)
+
+        if frame.space == ControlSpace.JOINT:
+            solver = self._require_solver(name)
+            base_pose = self._integration_base_pose(name, frame)
+            pose_target = [base_pose[i] + deltas[i] for i in range(6)]
+            joint_target = solver.inverse_kinematics(pose_target)
+            values = [joint_target.get(f"joint_{axis + 1}", 0.0) for axis in frame.learnable_axis_indices]
+            return torch.tensor(values, dtype=torch.float32)
+
+        source_pose = deltas
+        if any(
+            frame.control_mode[axis] == ControlMode.POS and frame.policy_mode[axis] == PolicyMode.ABSOLUTE
+            for axis in frame.learnable_axis_indices
+        ):
+            base_pose = self._integration_base_pose(name, frame)
+            source_pose = [base_pose[i] + deltas[i] for i in range(6)]
+            self._virtual_task_pose[name] = source_pose
+
+        return self._encode_learning_space(frame, source_pose)
+
+    def _map_absolute_joint_teleop(self, name: str, frame: TaskFrame, teleop_action: Any) -> torch.Tensor:
+        joint_state = self._extract_joint_action(teleop_action)
+        if frame.space == ControlSpace.JOINT:
+            values = [joint_state.get(f"joint_{axis + 1}", 0.0) for axis in frame.learnable_axis_indices]
+            return torch.tensor(values, dtype=torch.float32)
+
+        solver = self._require_solver(name)
+        pose = solver.forward_kinematics(joint_state)
+        prev_pose = self._prev_fk_pose.get(name, pose)
+        self._prev_fk_pose[name] = pose
+
+        source = []
+        for axis in range(6):
+            if frame.policy_mode[axis] == PolicyMode.RELATIVE:
+                source.append(pose[axis] - prev_pose[axis])
+            else:
+                source.append(pose[axis])
+
+        return self._encode_learning_space(frame, source)
+
+    def _encode_learning_space(self, frame: TaskFrame, source_pose: list[float]) -> torch.Tensor:
+        values: list[float] = []
+        absolute_rot_axes = [
+            axis
+            for axis in frame.learnable_axis_indices
+            if axis >= 3 and frame.control_mode[axis] == ControlMode.POS and frame.policy_mode[axis] == PolicyMode.ABSOLUTE
+        ]
+
+        for axis in frame.learnable_axis_indices:
+            control_mode = frame.control_mode[axis]
+            policy_mode = frame.policy_mode[axis]
+
+            if axis in absolute_rot_axes:
+                continue
+
+            if control_mode in {ControlMode.VEL, ControlMode.FORCE}:
+                values.append(source_pose[axis])
+            elif axis < 3 or policy_mode == PolicyMode.RELATIVE:
+                values.append(source_pose[axis])
+
+        if absolute_rot_axes:
+            rot = [source_pose[3], source_pose[4], source_pose[5]]
+            if len(absolute_rot_axes) == 1:
+                angle = rot[absolute_rot_axes[0] - 3]
+                values.extend([math.cos(angle), math.sin(angle)])
+            elif len(absolute_rot_axes) == 2:
+                matrix = _euler_xyz_to_matrix(*rot)
+                values.extend([matrix[0][0], matrix[1][0], matrix[2][0]])
+            else:
+                matrix = _euler_xyz_to_matrix(*rot)
+                values.extend(
+                    [
+                        matrix[0][0],
+                        matrix[1][0],
+                        matrix[2][0],
+                        matrix[0][1],
+                        matrix[1][1],
+                        matrix[2][1],
+                    ]
+                )
+
+        return torch.tensor(values, dtype=torch.float32)
+
+    def _integration_base_pose(self, name: str, frame: TaskFrame) -> list[float]:
+        use_virtual = self.use_virtual_reference[name] if isinstance(self.use_virtual_reference, dict) else self.use_virtual_reference
+        if use_virtual and name in self._virtual_task_pose:
+            return self._virtual_task_pose[name]
+        return list(frame.target)
+
+    def _require_solver(self, name: str) -> Any:
+        solver = self.kinematics.get(name)
+        if solver is None:
+            raise ValueError(f"Missing kinematics solver for '{name}'")
+        return solver
+
+    @staticmethod
+    def _extract_delta_action(teleop_action: Any) -> list[float]:
+        if isinstance(teleop_action, dict):
+            return [
+                float(teleop_action.get("delta_x", 0.0)),
+                float(teleop_action.get("delta_y", 0.0)),
+                float(teleop_action.get("delta_z", 0.0)),
+                float(teleop_action.get("delta_rx", 0.0)),
+                float(teleop_action.get("delta_ry", 0.0)),
+                float(teleop_action.get("delta_rz", 0.0)),
+            ]
+        return [float(v) for v in teleop_action][:6]
+
+    @staticmethod
+    def _extract_joint_action(teleop_action: Any) -> dict[str, float]:
+        if isinstance(teleop_action, dict):
+            joint_state: dict[str, float] = {}
+            for k, v in teleop_action.items():
+                name = k.replace(".pos", "")
+                joint_state[name] = float(v)
+            return joint_state
+        return {f"joint_{i + 1}": float(v) for i, v in enumerate(teleop_action)}
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+
+@dataclass
+@ProcessorStepRegistry.register("task_frame_intervention_action_processor")
+class InterventionActionProcessorStep(ProcessorStep):
+    """Project learning-space actions into full task-frame targets with intervention override."""
+
+    teleoperators: dict[str, Any] = field(default_factory=dict)
+    task_frame: dict[str, TaskFrame] = field(default_factory=dict)
+
+    _intervention_occurred: bool = field(default=False, init=False)
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        action = transition.get(TransitionKey.ACTION)
+        if not isinstance(action, torch.Tensor):
+            raise TypeError(f"Action should be a torch.Tensor, got {type(action)}")
+
+        new_transition = transition.copy()
+        info = dict(new_transition.get(TransitionKey.INFO) or {})
+        complementary_data = dict(new_transition.get(TransitionKey.COMPLEMENTARY_DATA) or {})
+
+        teleop_action_dict = complementary_data.get(TELEOP_ACTION_KEY)
+        is_intervention = bool(info.get(TeleopEvents.IS_INTERVENTION, False))
+
+        self._intervention_occurred = self._intervention_occurred | is_intervention
+        if self._intervention_occurred and not is_intervention:
+            info[TeleopEvents.INTERVENTION_COMPLETED] = True
+
+        if is_intervention and isinstance(teleop_action_dict, dict):
+            source_actions = teleop_action_dict
+        else:
+            source_actions = self._split_policy_action(action)
+
+        full_action: dict[str, torch.Tensor] = {}
+        for name, frame in self.task_frame.items():
+            encoded_action = source_actions.get(name)
+            if encoded_action is None:
+                full_action[name] = torch.tensor(frame.target, dtype=action.dtype, device=action.device)
+                continue
+
+            projected = self._project_learning_action(frame, encoded_action)
+            full_action[name] = torch.tensor(projected, dtype=action.dtype, device=action.device)
+
+        new_transition[TransitionKey.ACTION] = full_action
+        complementary_data[TELEOP_ACTION_KEY] = full_action
+        new_transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
+        new_transition[TransitionKey.INFO] = info
+        return new_transition
+
+    def _split_policy_action(self, action: torch.Tensor) -> dict[str, torch.Tensor]:
+        policy_by_robot: dict[str, torch.Tensor] = {}
+        idx = 0
+        for name, frame in self.task_frame.items():
+            dim = frame.policy_action_dim
+            policy_by_robot[name] = action[idx : idx + dim]
+            idx += dim
+        return policy_by_robot
+
+    def _project_learning_action(self, frame: TaskFrame, encoded_action: Any) -> list[float]:
+        raw = torch.as_tensor(encoded_action, dtype=torch.float32).flatten().tolist()
+
+        full_target = list(frame.target)
+        cursor = 0
+        absolute_rot_axes = [
+            axis
+            for axis in frame.learnable_axis_indices
+            if axis >= 3 and frame.control_mode[axis] == ControlMode.POS and frame.policy_mode[axis] == PolicyMode.ABSOLUTE
+        ]
+
+        for axis in frame.learnable_axis_indices:
+            if axis in absolute_rot_axes:
+                continue
+
+            if cursor >= len(raw):
+                raise ValueError("Encoded action is shorter than expected for task-frame projection")
+
+            value = raw[cursor]
+            cursor += 1
+            if frame.control_mode[axis] in {ControlMode.VEL, ControlMode.FORCE}:
+                value = self._bound_differential_axis(frame, axis, value)
+
+            full_target[axis] = float(value)
+
+        if absolute_rot_axes:
+            rotation_values, consumed = self._decode_absolute_rotation(absolute_rot_axes, raw[cursor:])
+            cursor += consumed
+            for axis in absolute_rot_axes:
+                full_target[axis] = float(rotation_values[axis - 3])
+
+        if cursor != len(raw):
+            raise ValueError("Encoded action has trailing values that do not match task-frame manifold layout")
+
+        return full_target
+
+    @staticmethod
+    def _bound_differential_axis(frame: TaskFrame, axis: int, value: float) -> float:
+        if frame.min_target is not None and frame.max_target is not None:
+            scale = max(abs(frame.min_target[axis]), abs(frame.max_target[axis]))
+            if scale > 0:
+                return math.tanh(value) * scale
+        return math.tanh(value)
+
+    def _decode_absolute_rotation(self, absolute_rot_axes: list[int], raw: list[float]) -> tuple[list[float], int]:
+        rot = [0.0, 0.0, 0.0]
+
+        if len(absolute_rot_axes) == 1:
+            if len(raw) < 2:
+                raise ValueError("S1 rotation representation requires 2 values")
+            rot[absolute_rot_axes[0] - 3] = math.atan2(raw[1], raw[0])
+            return rot, 2
+
+        if len(absolute_rot_axes) == 2:
+            if len(raw) < 3:
+                raise ValueError("S2 rotation representation requires 3 values")
+            x, y, z = raw[0], raw[1], raw[2]
+            norm = math.sqrt(x * x + y * y + z * z)
+            if norm < 1e-8:
+                x, y, z = 1.0, 0.0, 0.0
+                norm = 1.0
+            x, y, z = x / norm, y / norm, z / norm
+
+            # First SO(3) column parameterization -> recover (ry, rz), leave rx at zero.
+            rot[1] = math.asin(max(-1.0, min(1.0, -z)))
+            rot[2] = math.atan2(y, x)
+            return rot, 3
+
+        if len(absolute_rot_axes) == 3:
+            if len(raw) < 6:
+                raise ValueError("SO(3) 6D representation requires 6 values")
+            matrix = self._rotation_6d_to_matrix(raw[:6])
+            return self._matrix_to_euler_xyz(matrix), 6
+
+        raise ValueError(f"Expected 1..3 absolute rotation axes, got {len(absolute_rot_axes)}")
+
+    @staticmethod
+    def _rotation_6d_to_matrix(raw: list[float]) -> list[list[float]]:
+        a1 = [raw[0], raw[1], raw[2]]
+        a2 = [raw[3], raw[4], raw[5]]
+
+        def normalize(v: list[float]) -> list[float]:
+            n = math.sqrt(sum(x * x for x in v))
+            if n < 1e-8:
+                return [1.0, 0.0, 0.0]
+            return [x / n for x in v]
+
+        b1 = normalize(a1)
+        dot = sum(a2[i] * b1[i] for i in range(3))
+        u2 = [a2[i] - dot * b1[i] for i in range(3)]
+        if math.sqrt(sum(x * x for x in u2)) < 1e-8:
+            fallback = [0.0, 1.0, 0.0] if abs(b1[0]) > 0.9 else [1.0, 0.0, 0.0]
+            dot_fb = sum(fallback[i] * b1[i] for i in range(3))
+            u2 = [fallback[i] - dot_fb * b1[i] for i in range(3)]
+        b2 = normalize(u2)
+        b3 = [
+            b1[1] * b2[2] - b1[2] * b2[1],
+            b1[2] * b2[0] - b1[0] * b2[2],
+            b1[0] * b2[1] - b1[1] * b2[0],
+        ]
+
+        return [
+            [b1[0], b2[0], b3[0]],
+            [b1[1], b2[1], b3[1]],
+            [b1[2], b2[2], b3[2]],
+        ]
+
+    @staticmethod
+    def _matrix_to_euler_xyz(matrix: list[list[float]]) -> list[float]:
+        sy = max(-1.0, min(1.0, -matrix[2][0]))
+        ry = math.asin(sy)
+        cy = math.cos(ry)
+
+        if abs(cy) > 1e-6:
+            rx = math.atan2(matrix[2][1], matrix[2][2])
+            rz = math.atan2(matrix[1][0], matrix[0][0])
+        else:
+            rx = 0.0
+            rz = math.atan2(-matrix[0][1], matrix[1][1])
+
+        return [rx, ry, rz]
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+    def reset(self) -> None:
+        self._intervention_occurred = False
+
+
+@dataclass
+@ProcessorStepRegistry.register("to_joint_action_processor")
+class ToJointActionProcessorStep(ProcessorStep):
+    """Convert task-frame action dictionaries into joint command dictionaries when needed."""
+
+    is_task_frame_robot: dict[str, bool] = field(default_factory=dict)
+    task_frame: dict[str, TaskFrame] = field(default_factory=dict)
+    kinematics: dict[str, Any] = field(default_factory=dict)
+    joint_names: dict[str, list[str]] = field(default_factory=dict)
+    use_virtual_reference: bool | dict[str, bool] = True
+
+    _virtual_task_pose: dict[str, list[float]] = field(default_factory=dict, init=False)
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        action = transition.get(TransitionKey.ACTION)
+        if not isinstance(action, dict):
+            return transition
+
+        new_transition = transition.copy()
+        joint_action: dict[str, float] = {}
+
+        for name, robot_action in action.items():
+            frame = self.task_frame.get(name)
+            if frame is None:
+                continue
+
+            if self.is_task_frame_robot.get(name, False):
+                raise ValueError(
+                    f"ToJointActionProcessorStep received task-frame robot '{name}', "
+                    "but this step only supports joint-only robots."
+                )
+
+            task_target = torch.as_tensor(robot_action, dtype=torch.float32).flatten().tolist()
+            if len(task_target) != len(frame.target):
+                raise ValueError(
+                    f"Task-frame action for '{name}' has width {len(task_target)}, "
+                    f"expected {len(frame.target)}"
+                )
+
+            absolute_target = self._integrate_relative_axes(name, frame, task_target, transition)
+            bounded_target = self._clamp_target(frame, absolute_target)
+
+            solver = self.kinematics.get(name)
+            if solver is None:
+                raise ValueError(f"Missing kinematics solver for joint-only robot '{name}'")
+
+            try:
+                ik_solution = solver.inverse_kinematics(bounded_target)
+            except Exception as exc:  # pragma: no cover - exercised with mock solver in unit tests
+                raise ValueError(f"IK failed for '{name}': {exc}") from exc
+
+            for joint_name in self.joint_names.get(name, []):
+                if joint_name not in ik_solution:
+                    raise ValueError(f"IK solution for '{name}' missing joint '{joint_name}'")
+                joint_action[f"{joint_name}.pos"] = float(ik_solution[joint_name])
+
+            self._virtual_task_pose[name] = bounded_target
+
+        new_transition[TransitionKey.ACTION] = joint_action
+        return new_transition
+
+    def _integrate_relative_axes(
+        self,
+        name: str,
+        frame: TaskFrame,
+        task_target: list[float],
+        transition: EnvTransition,
+    ) -> list[float]:
+        base_pose = self._base_pose(name, frame, transition)
+        out = list(task_target)
+        for axis in frame.learnable_axis_indices:
+            if frame.control_mode[axis] == ControlMode.POS and frame.policy_mode[axis] == PolicyMode.RELATIVE:
+                out[axis] = base_pose[axis] + task_target[axis]
+        return out
+
+    def _base_pose(self, name: str, frame: TaskFrame, transition: EnvTransition) -> list[float]:
+        use_virtual = self.use_virtual_reference[name] if isinstance(self.use_virtual_reference, dict) else self.use_virtual_reference
+        if use_virtual and name in self._virtual_task_pose:
+            return list(self._virtual_task_pose[name])
+
+        observation = transition.get(TransitionKey.OBSERVATION)
+        if isinstance(observation, dict):
+            axis_names = ["x", "y", "z", "wx", "wy", "wz"]
+            obs_pose = []
+            for axis_name in axis_names:
+                key = f"{name}.{axis_name}.ee_pos"
+                if key not in observation:
+                    obs_pose = []
+                    break
+                value = observation[key]
+                obs_pose.append(float(value.item()) if isinstance(value, torch.Tensor) else float(value))
+            if len(obs_pose) == 6:
+                return obs_pose
+
+        return list(frame.target)
+
+    @staticmethod
+    def _clamp_target(frame: TaskFrame, target: list[float]) -> list[float]:
+        if frame.min_target is None or frame.max_target is None:
+            return target
+        return [max(frame.min_target[i], min(frame.max_target[i], target[i])) for i in range(len(target))]
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
