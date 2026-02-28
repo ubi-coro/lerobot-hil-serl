@@ -13,10 +13,15 @@ class DummyEnv:
         self.truncated = truncated
         self.info = info or {}
         self.last_action = None
+        self.reset_calls = []
 
     def step(self, action):
         self.last_action = action
         return self.obs, self.reward, self.terminated, self.truncated, dict(self.info)
+
+    def reset(self, *, seed=None, options=None):
+        self.reset_calls.append({"seed": seed, "options": dict(options or {})})
+        return self.obs, {"env": "dummy", "seed": seed}
 
 
 class StaticBoolTransition:
@@ -43,7 +48,9 @@ def _make_net(envs, transitions, active="pick"):
     net = ManipulationPrimitiveNet.__new__(ManipulationPrimitiveNet)
     net._envs = envs
     net._active_primitive = active
-    net.config = SimpleNamespace(transitions=transitions)
+    net.config = SimpleNamespace(transitions=transitions, start_primitive=active, reset_primitives=[])
+    net._episode_step_count = 0
+    net._last_reset_info = {}
     return net
 
 
@@ -106,3 +113,47 @@ def test_mp_net_step_applies_transition_reward_and_done_flags():
     assert info["transition"]["reason"] == "success"
     assert info["transition"]["transition_name"] == "success_edge"
     assert info["transition"]["transition_type"] == "threshold"
+
+
+def test_mp_net_reset_starts_from_start_primitive():
+    pick_env = DummyEnv(obs={"obs": np.array([1.0])})
+    place_env = DummyEnv(obs={"obs": np.array([2.0])})
+    net = _make_net(
+        envs={"pick": pick_env, "place": place_env},
+        transitions=[],
+        active="place",
+    )
+    net.config.start_primitive = "pick"
+    net.config.reset_primitives = ["reset"]
+    net._episode_step_count = 99
+
+    obs, info = net.reset(seed=7)
+
+    assert np.allclose(obs["obs"], np.array([1.0]))
+    assert net._active_primitive == "pick"
+    assert net._episode_step_count == 0
+    assert info["active_primitive"] == "pick"
+    assert info["reset_reason"] == "start_primitive"
+    assert len(pick_env.reset_calls) == 1
+    assert len(place_env.reset_calls) == 1
+
+
+def test_mp_net_reset_path_via_reset_primitives():
+    reset_env = DummyEnv(obs={"obs": np.array([9.0])})
+    place_env = DummyEnv(obs={"obs": np.array([2.0])})
+    net = _make_net(
+        envs={"reset": reset_env, "place": place_env},
+        transitions=[],
+        active="place",
+    )
+    net.config.start_primitive = "pick"
+    net.config.reset_primitives = ["reset", "alt_reset"]
+
+    obs, info = net.reset()
+
+    assert np.allclose(obs["obs"], np.array([9.0]))
+    assert net._active_primitive == "reset"
+    assert info["active_primitive"] == "reset"
+    assert info["reset_reason"] == "reset_primitive_fallback"
+    assert len(reset_env.reset_calls) == 1
+    assert len(place_env.reset_calls) == 1

@@ -16,6 +16,7 @@ class ManipulationPrimitiveNetConfig(draccus.ChoiceRegistry):
     start_primitive: str
     primitives: dict[str, ManipulationPrimitiveConfig]
     transitions: list[tuple[str, str, MP_Transition]]
+    reset_primitives: list[str] = field(default_factory=list)
 
     fps: int = 10
     robot: RobotConfig | dict[str, RobotConfig] | None = None
@@ -28,5 +29,4 @@ class ManipulationPrimitiveNetConfig(draccus.ChoiceRegistry):
         self.teleop = self.teleop if isinstance(self.teleop, dict) else {DEFAULT_ROBOT_NAME: self.teleop}
         for name in self.robot:
             self.robot[name].cameras = {}
-
 
