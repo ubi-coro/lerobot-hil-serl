@@ -14,7 +14,7 @@ from ..manipulation_primitive.config_manipulation_primitive import ManipulationP
 
 @EnvConfig.register_subclass(name="manipulation_primitive_net")
 @dataclass
-class ManipulationPrimitiveNetConfig(draccus.ChoiceRegistry):
+class ManipulationPrimitiveNetConfig:
     """Serializable config for chaining manipulation primitives with transitions."""
 
     start_primitive: str
@@ -100,17 +100,10 @@ class ManipulationPrimitiveNetConfig(draccus.ChoiceRegistry):
 
             return visited
 
-        for reset_name in sorted(reset_primitive_set):
-            primitive_cfg = self.primitives[reset_name]
-            if not bool(getattr(primitive_cfg, "is_reset_primitive", False)):
-                raise ValueError(
-                    "reset_primitives entries must set is_reset_primitive=True. "
-                    f"Invalid primitive: '{reset_name}'."
-                )
-
         for primitive_name, primitive_cfg in self.primitives.items():
             is_terminal = bool(getattr(primitive_cfg, "is_terminal_primitive", False))
-            if not is_terminal and not outgoing_edges[primitive_name]:
+            is_reset = primitive_name in reset_primitive_set
+            if not is_terminal and not is_reset and not outgoing_edges[primitive_name]:
                 raise ValueError(
                     "Detected non-terminal dead-end primitive without outgoing transitions: "
                     f"'{primitive_name}'. Mark it terminal or add an outgoing transition."
@@ -135,3 +128,11 @@ class ManipulationPrimitiveNetConfig(draccus.ChoiceRegistry):
                         "Reset primitive has no transition path to start_primitive: "
                         f"'{reset_name}' -> '{self.start_primitive}'."
                     )
+
+        for reset_name in sorted(reset_primitive_set):
+            primitive_cfg = self.primitives[reset_name]
+            if not bool(getattr(primitive_cfg, "is_reset_primitive", False)):
+                raise ValueError(
+                    "reset_primitives entries must set is_reset_primitive=True. "
+                    f"Invalid primitive: '{reset_name}'."
+                )
