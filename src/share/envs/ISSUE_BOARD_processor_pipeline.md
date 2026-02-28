@@ -97,7 +97,7 @@ Action feature dimension is still placeholder-level and not fully inferred from 
 ### ENV-301: Implement `MatchTeleopToPolicyActionProcessorStep` mapping matrix
 **Priority:** P0  
 **Status:** Todo  
-**Owner:** Unassigned
+**Owner:** Done
 
 #### Problem
 The step is intended but needs complete behavior across teleop modality and target control space.
@@ -125,7 +125,7 @@ Implement logic for:
 ### ENV-302: Implement `InterventionActionProcessorStep` projection + scatter/merge
 **Priority:** P0  
 **Status:** Todo  
-**Owner:** Unassigned
+**Owner:** Done
 
 #### Problem
 Need canonical conversion from unconstrained learning-space vector to mixed-mode full 6-DoF task-frame command.
