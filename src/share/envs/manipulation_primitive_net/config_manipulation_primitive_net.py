@@ -12,6 +12,7 @@ from .transitions import MP_Transition
 from ..manipulation_primitive.config_manipulation_primitive import ManipulationPrimitiveConfig
 
 
+@EnvConfig.register_subclass(name="manipulation_primitive_net")
 @dataclass
 class ManipulationPrimitiveNetConfig(draccus.ChoiceRegistry):
     """Serializable config for chaining manipulation primitives with transitions."""
