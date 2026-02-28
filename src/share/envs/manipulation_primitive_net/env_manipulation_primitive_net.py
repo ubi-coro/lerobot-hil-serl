@@ -29,6 +29,72 @@ class ManipulationPrimitiveNet(gym.Env):
             self._action_processors[name] = action_processor
 
         self._active_primitive = self.config.start_primitive
+        self._last_reset_info: dict[str, Any] = {}
+        self._episode_step_count = 0
+
+
+    def _resolve_reset_start(self) -> str:
+        if self.config.start_primitive in self._envs:
+            return self.config.start_primitive
+
+        for reset_primitive in getattr(self.config, "reset_primitives", []):
+            if reset_primitive in self._envs:
+                return reset_primitive
+
+        raise KeyError(
+            f"Unable to resolve reset start primitive: start_primitive='{self.config.start_primitive}' "
+            "and no configured reset primitive exists in env map."
+        )
+
+    def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+        super().reset(seed=seed)
+
+        options = options or {}
+        requested_start = options.get("start_primitive")
+
+        if requested_start is not None:
+            if requested_start not in self._envs:
+                raise KeyError(f"Unknown reset primitive '{requested_start}'.")
+            next_active = requested_start
+            reset_reason = "explicit_option"
+        else:
+            next_active = self._resolve_reset_start()
+            reset_reason = "start_primitive" if next_active == self.config.start_primitive else "reset_primitive_fallback"
+
+        self._active_primitive = next_active
+        self._episode_step_count = 0
+
+        reset_info: dict[str, Any] = {
+            "active_primitive": self._active_primitive,
+            "reset_reason": reset_reason,
+            "requested_start": requested_start,
+        }
+
+        if seed is not None:
+            reset_info["seed"] = seed
+
+        obs = None
+        for name, env in self._envs.items():
+            env_seed = None if seed is None else seed + sum(ord(c) for c in name)
+            env_options = dict(options)
+            env_options["active_primitive"] = name
+            if name != self._active_primitive:
+                env_options["inactive_reset"] = True
+
+            if hasattr(env, "reset"):
+                env_obs, env_info = env.reset(seed=env_seed, options=env_options)
+            else:
+                env_obs, env_info = {}, {}
+
+            if name == self._active_primitive:
+                obs = env_obs
+                reset_info["primitive_reset_info"] = dict(env_info or {})
+
+        if obs is None:
+            raise RuntimeError(f"Failed to reset active primitive '{self._active_primitive}'.")
+
+        self._last_reset_info = reset_info
+        return obs, reset_info
 
     @staticmethod
     def _evaluate_transition(transition: Any, obs: dict[str, np.ndarray], info: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
@@ -57,6 +123,7 @@ class ManipulationPrimitiveNet(gym.Env):
             raise KeyError(f"Unknown active primitive '{active}'.")
 
         obs, reward, terminated, truncated, info = self._envs[active].step(action)
+        self._episode_step_count += 1
 
         transition_info = {
             "from": active,
