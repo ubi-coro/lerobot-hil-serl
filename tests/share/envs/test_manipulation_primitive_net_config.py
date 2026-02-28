@@ -153,3 +153,40 @@ def test_mp_net_config_allows_intentional_terminal_dead_end():
     )
 
     assert config.start_primitive == "pick"
+
+
+def test_mp_net_config_collects_reset_primitives_from_metadata():
+    config = ManipulationPrimitiveNetConfig(
+        start_primitive="pick",
+        primitives={
+            "pick": SimpleNamespace(),
+            "terminal": SimpleNamespace(is_terminal_primitive=True),
+            "reset": SimpleNamespace(is_reset_primitive=True),
+        },
+        transitions=[
+            ("pick", "terminal", _transition()),
+            ("terminal", "reset", _transition()),
+            ("reset", "pick", _transition()),
+        ],
+        reset_primitives=[],
+    )
+
+    assert config.reset_primitives == ["reset"]
+
+
+def test_mp_net_config_rejects_reset_list_entry_without_metadata_flag():
+    with pytest.raises(ValueError, match="must set is_reset_primitive=True"):
+        ManipulationPrimitiveNetConfig(
+            start_primitive="pick",
+            primitives={
+                "pick": SimpleNamespace(),
+                "terminal": SimpleNamespace(is_terminal_primitive=True),
+                "reset": SimpleNamespace(),
+            },
+            transitions=[
+                ("pick", "terminal", _transition()),
+                ("terminal", "reset", _transition()),
+                ("reset", "pick", _transition()),
+            ],
+            reset_primitives=["reset"],
+        )

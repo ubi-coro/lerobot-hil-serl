@@ -12,6 +12,8 @@ if TYPE_CHECKING:
 
 
 class ManipulationPrimitiveNet(gym.Env):
+    """Gym wrapper that chains manipulation primitives using typed transitions."""
+
     def __init__(self, config: "ManipulationPrimitiveNetConfig"):
 
         self.config = config
@@ -189,6 +191,7 @@ class ManipulationPrimitiveNet(gym.Env):
         raise TypeError(f"Unsupported transition evaluation output type: {type(result)!r}")
 
     def step(self, action: np.ndarray | torch.Tensor) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+        """Step active primitive, then apply one matching transition if available."""
         active = self._active_primitive
         if active not in self._envs:
             raise KeyError(f"Unknown active primitive '{active}'.")
@@ -207,6 +210,7 @@ class ManipulationPrimitiveNet(gym.Env):
             "transition_type": None,
         }
 
+        transition_fired = False
         for source, default_target, transition in self.config.transitions:
             if source != active:
                 continue
@@ -215,6 +219,7 @@ class ManipulationPrimitiveNet(gym.Env):
             if not fired:
                 continue
 
+            transition_fired = True
             transition_target = transition_metadata.get("next_primitive", default_target)
             reward += float(transition_metadata.get("additional_reward", 0.0))
             terminated = bool(terminated or transition_metadata.get("terminated", False))
@@ -230,6 +235,16 @@ class ManipulationPrimitiveNet(gym.Env):
 
             self._active_primitive = transition_target
             break
+
+        if not transition_fired and bool(getattr(self.config.primitives.get(active), "is_terminal_primitive", False)):
+            terminated = True
+            transition_info = {
+                "from": active,
+                "to": active,
+                "reason": "terminal_primitive_no_transition",
+                "transition_name": None,
+                "transition_type": "terminal_policy",
+            }
 
         info["transition"] = transition_info
         info["active_primitive"] = self._active_primitive
