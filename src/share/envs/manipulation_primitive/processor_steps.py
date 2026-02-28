@@ -376,3 +376,111 @@ class InterventionActionProcessorStep(ProcessorStep):
 
     def reset(self) -> None:
         self._intervention_occurred = False
+
+
+@dataclass
+@ProcessorStepRegistry.register("to_joint_action_processor")
+class ToJointActionProcessorStep(ProcessorStep):
+    """Convert task-frame action dictionaries into joint command dictionaries when needed."""
+
+    is_task_frame_robot: dict[str, bool] = field(default_factory=dict)
+    task_frame: dict[str, TaskFrame] = field(default_factory=dict)
+    kinematics: dict[str, Any] = field(default_factory=dict)
+    joint_names: dict[str, list[str]] = field(default_factory=dict)
+    use_virtual_reference: bool | dict[str, bool] = True
+
+    _virtual_task_pose: dict[str, list[float]] = field(default_factory=dict, init=False)
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        action = transition.get(TransitionKey.ACTION)
+        if not isinstance(action, dict):
+            return transition
+
+        new_transition = transition.copy()
+        joint_action: dict[str, float] = {}
+
+        for name, robot_action in action.items():
+            frame = self.task_frame.get(name)
+            if frame is None:
+                continue
+
+            if self.is_task_frame_robot.get(name, False):
+                raise ValueError(
+                    f"ToJointActionProcessorStep received task-frame robot '{name}', "
+                    "but this step only supports joint-only robots."
+                )
+
+            task_target = torch.as_tensor(robot_action, dtype=torch.float32).flatten().tolist()
+            if len(task_target) != len(frame.target):
+                raise ValueError(
+                    f"Task-frame action for '{name}' has width {len(task_target)}, "
+                    f"expected {len(frame.target)}"
+                )
+
+            absolute_target = self._integrate_relative_axes(name, frame, task_target, transition)
+            bounded_target = self._clamp_target(frame, absolute_target)
+
+            solver = self.kinematics.get(name)
+            if solver is None:
+                raise ValueError(f"Missing kinematics solver for joint-only robot '{name}'")
+
+            try:
+                ik_solution = solver.inverse_kinematics(bounded_target)
+            except Exception as exc:  # pragma: no cover - exercised with mock solver in unit tests
+                raise ValueError(f"IK failed for '{name}': {exc}") from exc
+
+            for joint_name in self.joint_names.get(name, []):
+                if joint_name not in ik_solution:
+                    raise ValueError(f"IK solution for '{name}' missing joint '{joint_name}'")
+                joint_action[f"{joint_name}.pos"] = float(ik_solution[joint_name])
+
+            self._virtual_task_pose[name] = bounded_target
+
+        new_transition[TransitionKey.ACTION] = joint_action
+        return new_transition
+
+    def _integrate_relative_axes(
+        self,
+        name: str,
+        frame: TaskFrame,
+        task_target: list[float],
+        transition: EnvTransition,
+    ) -> list[float]:
+        base_pose = self._base_pose(name, frame, transition)
+        out = list(task_target)
+        for axis in frame.learnable_axis_indices:
+            if frame.control_mode[axis] == ControlMode.POS and frame.policy_mode[axis] == PolicyMode.RELATIVE:
+                out[axis] = base_pose[axis] + task_target[axis]
+        return out
+
+    def _base_pose(self, name: str, frame: TaskFrame, transition: EnvTransition) -> list[float]:
+        use_virtual = self.use_virtual_reference[name] if isinstance(self.use_virtual_reference, dict) else self.use_virtual_reference
+        if use_virtual and name in self._virtual_task_pose:
+            return list(self._virtual_task_pose[name])
+
+        observation = transition.get(TransitionKey.OBSERVATION)
+        if isinstance(observation, dict):
+            axis_names = ["x", "y", "z", "wx", "wy", "wz"]
+            obs_pose = []
+            for axis_name in axis_names:
+                key = f"{name}.{axis_name}.ee_pos"
+                if key not in observation:
+                    obs_pose = []
+                    break
+                value = observation[key]
+                obs_pose.append(float(value.item()) if isinstance(value, torch.Tensor) else float(value))
+            if len(obs_pose) == 6:
+                return obs_pose
+
+        return list(frame.target)
+
+    @staticmethod
+    def _clamp_target(frame: TaskFrame, target: list[float]) -> list[float]:
+        if frame.min_pose is None or frame.max_pose is None:
+            return target
+        return [max(frame.min_pose[i], min(frame.max_pose[i], target[i])) for i in range(len(target))]
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features

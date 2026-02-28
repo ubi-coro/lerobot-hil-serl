@@ -42,6 +42,7 @@ from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpa
 from share.envs.manipulation_primitive.processor_steps import (
     InterventionActionProcessorStep,
     MatchTeleopToPolicyActionProcessorStep,
+    ToJointActionProcessorStep,
 )
 from share.envs.utils import check_task_frame_robot, check_delta_teleoperator
 from share.utils.kinematics import get_kinematics
