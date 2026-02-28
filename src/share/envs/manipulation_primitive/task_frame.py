@@ -5,16 +5,22 @@ from enum import IntEnum
 
 
 class ControlSpace(IntEnum):
+    """Target command space used by a task frame."""
+
     JOINT = 0
     TASK = 1
 
 
 class PolicyMode(IntEnum):
+    """How policy outputs are interpreted for a learnable axis."""
+
     ABSOLUTE = 0
     RELATIVE = 1
 
 
 class ControlMode(IntEnum):
+    """Low-level command type applied on each axis."""
+
     POS = 0
     VEL = 1
     FORCE = 2
@@ -31,6 +37,7 @@ class TaskFrame:
     max_pose: list[float] | None = None  # 6-vector: max xyz (m), max extrinsic euler (rad)
 
     def __post_init__(self) -> None:
+        """Validate task-frame axis layout and mode compatibility."""
         width = len(self.target)
         if width == 0:
             raise ValueError("target must contain at least one axis")
@@ -59,10 +66,12 @@ class TaskFrame:
 
     @property
     def learnable_axis_indices(self) -> list[int]:
+        """Return axis indices controlled by policy outputs."""
         return [i for i, _policy_mode in enumerate(self.policy_mode) if _policy_mode is not None]
 
     @property
     def is_adaptive(self) -> bool:
+        """Whether at least one axis is policy-controlled."""
         return len(self.learnable_axis_indices) > 0
 
     @property
@@ -110,6 +119,7 @@ class TaskFrame:
         )
 
     def to_dict(self) -> dict:
+        """Serialize to a JSON-friendly dictionary."""
         return {
             "space": int(self.space),
             "origin": self.origin,
@@ -122,6 +132,7 @@ class TaskFrame:
 
     @classmethod
     def from_dict(cls, raw: dict) -> TaskFrame:
+        """Build a task frame from a serialized dictionary."""
         min_target = raw.get("min_target", raw.get("min_pose"))
         max_target = raw.get("max_target", raw.get("max_pose"))
         return cls(
@@ -141,6 +152,7 @@ class TaskFrame:
 
     @min_target.setter
     def min_target(self, value: list[float] | None) -> None:
+        """Set lower task-frame bounds using canonical alias."""
         self.min_pose = value
 
     @property
@@ -150,6 +162,7 @@ class TaskFrame:
 
     @max_target.setter
     def max_target(self, value: list[float] | None) -> None:
+        """Set upper task-frame bounds using canonical alias."""
         self.max_pose = value
 
 
@@ -161,6 +174,7 @@ class PrimitiveGraphConfig:
     nodes: list
 
     def __post_init__(self) -> None:
+        """Ensure primitive references and transitions are valid."""
         node_ids = {node.primitive_id for node in self.nodes}
         if self.start_primitive_id not in node_ids:
             raise ValueError("start_primitive_id must reference an existing primitive_id")
@@ -173,6 +187,7 @@ class PrimitiveGraphConfig:
                     )
 
     def node_by_id(self, primitive_id: str):
+        """Return the primitive node matching ``primitive_id``."""
         for node in self.nodes:
             if node.primitive_id == primitive_id:
                 return node
