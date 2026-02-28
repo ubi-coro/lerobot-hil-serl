@@ -1,3 +1,4 @@
+from dataclasses import asdict, is_dataclass
 from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
@@ -114,6 +115,9 @@ class ManipulationPrimitiveNet(gym.Env):
             return condition, metadata or {}
         if isinstance(result, dict):
             return bool(result.get("condition_fulfilled", result.get("triggered", False))), result
+        if is_dataclass(result):
+            metadata = asdict(result)
+            return bool(metadata.get("condition_fulfilled", metadata.get("triggered", False))), metadata
 
         raise TypeError(f"Unsupported transition evaluation output type: {type(result)!r}")
 
@@ -124,6 +128,9 @@ class ManipulationPrimitiveNet(gym.Env):
 
         obs, reward, terminated, truncated, info = self._envs[active].step(action)
         self._episode_step_count += 1
+
+        info = dict(info)
+        info.setdefault("episode_step_count", self._episode_step_count)
 
         transition_info = {
             "from": active,
@@ -157,7 +164,6 @@ class ManipulationPrimitiveNet(gym.Env):
             self._active_primitive = transition_target
             break
 
-        info = dict(info)
         info["transition"] = transition_info
         info["active_primitive"] = self._active_primitive
 
