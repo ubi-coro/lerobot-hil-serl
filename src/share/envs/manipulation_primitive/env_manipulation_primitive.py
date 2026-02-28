@@ -30,8 +30,8 @@ class ManipulationPrimitive(gymnasium.Env):
 
         self.current_step = 0
         self._motor_keys: set[str] = set()
-        self._action_length = dict[str, int] = {}
-        self._is_task_frame_robot = dict[str, bool] = check_task_frame_robot(robot_dict)
+        self._action_length: dict[str, int] = {}
+        self._is_task_frame_robot: dict[str, bool] = check_task_frame_robot(robot_dict)
         for name, robot in self.robot_dict.items():
             self._motor_keys.update([f"{name}.{key}" for key in robot._motors_ft])
             self._action_length[name] = len(robot.action_features)
@@ -67,7 +67,17 @@ class ManipulationPrimitive(gymnasium.Env):
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[ObsType, dict[str, Any]]:
-        pass
+        super().reset(seed=seed, options=options)
+
+        # Manipulation primitives do not execute an autonomous reset trajectory by default.
+        # We only re-send the configured task frame to robots that support task-frame commands.
+        for name, robot in self.robot_dict.items():
+            if self._is_task_frame_robot.get(name, False):
+                robot.set_task_frame(self.task_frame[name])
+
+        self.current_step = 0
+        obs = self._get_observation()
+        return obs, self._get_info()
 
     def render(self) -> None:
         import cv2
@@ -97,4 +107,3 @@ class ManipulationPrimitive(gymnasium.Env):
     @staticmethod
     def _get_info():
         return {TeleopEvents.IS_INTERVENTION: False}
-

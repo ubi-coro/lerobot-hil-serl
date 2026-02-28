@@ -177,7 +177,7 @@ When `is_task_frame_robot=False`:
 
 ### ENV-401: Complete `ManipulationPrimitive.reset` and clean env contract
 **Priority:** P1  
-**Status:** Todo  
+**Status:** Done  
 **Owner:** Unassigned
 
 #### Problem
@@ -199,7 +199,7 @@ When `is_task_frame_robot=False`:
 
 ### ENV-402: Normalize naming consistency (`min_pose`/`max_pose` vs docs naming)
 **Priority:** P1  
-**Status:** Todo  
+**Status:** Done  
 **Owner:** Unassigned
 
 #### Problem
@@ -221,7 +221,7 @@ Documentation references `min_target`/`max_target` while dataclass currently use
 
 ### ENV-501: Build compatibility matrix tests for release confidence
 **Priority:** P1  
-**Status:** Todo  
+**Status:** Done  
 **Owner:** Unassigned
 
 #### Scope
@@ -235,7 +235,7 @@ Documentation references `min_target`/`max_target` while dataclass currently use
 
 ### ENV-502: Add one end-to-end pipeline smoke test
 **Priority:** P2  
-**Status:** Todo  
+**Status:** Done  
 **Owner:** Unassigned
 
 #### Scope

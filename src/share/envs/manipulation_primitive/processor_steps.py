@@ -285,8 +285,8 @@ class InterventionActionProcessorStep(ProcessorStep):
 
     @staticmethod
     def _bound_differential_axis(frame: TaskFrame, axis: int, value: float) -> float:
-        if frame.min_pose is not None and frame.max_pose is not None:
-            scale = max(abs(frame.min_pose[axis]), abs(frame.max_pose[axis]))
+        if frame.min_target is not None and frame.max_target is not None:
+            scale = max(abs(frame.min_target[axis]), abs(frame.max_target[axis]))
             if scale > 0:
                 return math.tanh(value) * scale
         return math.tanh(value)
@@ -476,9 +476,9 @@ class ToJointActionProcessorStep(ProcessorStep):
 
     @staticmethod
     def _clamp_target(frame: TaskFrame, target: list[float]) -> list[float]:
-        if frame.min_pose is None or frame.max_pose is None:
+        if frame.min_target is None or frame.max_target is None:
             return target
-        return [max(frame.min_pose[i], min(frame.max_pose[i], target[i])) for i in range(len(target))]
+        return [max(frame.min_target[i], min(frame.max_target[i], target[i])) for i in range(len(target))]
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
