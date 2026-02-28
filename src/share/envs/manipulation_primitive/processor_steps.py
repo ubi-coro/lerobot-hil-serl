@@ -16,6 +16,8 @@ from share.envs.utils import check_delta_teleoperator
 
 
 def _euler_xyz_to_matrix(rx: float, ry: float, rz: float) -> list[list[float]]:
+    """Convert extrinsic XYZ Euler angles to a rotation matrix."""
+
     cx, sx = math.cos(rx), math.sin(rx)
     cy, sy = math.cos(ry), math.sin(ry)
     cz, sz = math.cos(rz), math.sin(rz)
@@ -31,6 +33,8 @@ def _euler_xyz_to_matrix(rx: float, ry: float, rz: float) -> list[list[float]]:
 @dataclass
 @ProcessorStepRegistry.register("match_teleop_to_policy_action")
 class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
+    """Map raw teleop commands into the policy learning-space action format."""
+
     teleoperators: dict[str, Any] = field(default_factory=dict)
     task_frame: dict[str, TaskFrame] = field(default_factory=dict)
     kinematics: dict[str, Any] = field(default_factory=dict)
@@ -41,9 +45,11 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
     _prev_fk_pose: dict[str, list[float]] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
+        """Cache teleoperator modality flags for fast dispatch."""
         self._is_delta_teleoperator = check_delta_teleoperator(self.teleoperators)
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
+        """Rewrite complementary teleop actions using task-frame encodings."""
         new_transition = transition.copy()
         complementary_data = dict(new_transition.get(TransitionKey.COMPLEMENTARY_DATA) or {})
         teleop_action_dict = complementary_data.get(TELEOP_ACTION_KEY)
@@ -67,6 +73,7 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
         return new_transition
 
     def _map_delta_teleop(self, name: str, frame: TaskFrame, teleop_action: Any, transition: EnvTransition) -> torch.Tensor:
+        """Map Cartesian delta teleop input into learning-space values."""
         deltas = self._extract_delta_action(teleop_action)
 
         if frame.space == ControlSpace.JOINT:
@@ -91,6 +98,7 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
         return self._encode_learning_space(frame, source_pose)
 
     def _map_absolute_joint_teleop(self, name: str, frame: TaskFrame, teleop_action: Any) -> torch.Tensor:
+        """Map absolute joint teleop input into learning-space values."""
         joint_state = self._extract_joint_action(teleop_action)
         if frame.space == ControlSpace.JOINT:
             values = [joint_state.get(f"joint_{axis + 1}", 0.0) for axis in frame.learnable_axis_indices]
@@ -111,6 +119,7 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
         return self._encode_learning_space(frame, source)
 
     def _encode_learning_space(self, frame: TaskFrame, source_pose: list[float]) -> torch.Tensor:
+        """Encode a 6-DoF source pose into manifold-aware policy action vectors."""
         values: list[float] = []
         absolute_rot_axes = [
             axis
@@ -154,6 +163,7 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
         return torch.tensor(values, dtype=torch.float32)
 
     def _integration_base_pose(self, name: str, frame: TaskFrame, transition: EnvTransition) -> list[float]:
+        """Get pose baseline for integrating relative teleop commands."""
         use_virtual = self.use_virtual_reference[name] if isinstance(self.use_virtual_reference, dict) else self.use_virtual_reference
 
         # 1. Primary: Use the virtual reference if enabled and populated
@@ -180,6 +190,7 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
         return list(frame.target)
 
     def _require_solver(self, name: str) -> Any:
+        """Return configured kinematics solver for ``name`` or raise."""
         solver = self.kinematics.get(name)
         if solver is None:
             raise ValueError(f"Missing kinematics solver for '{name}'")
@@ -187,6 +198,7 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
 
     @staticmethod
     def _extract_delta_action(teleop_action: Any) -> list[float]:
+        """Normalize teleop delta input into a 6-value Cartesian delta list."""
         if isinstance(teleop_action, dict):
             return [
                 float(teleop_action.get("delta_x", 0.0)),
@@ -200,6 +212,7 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
 
     @staticmethod
     def _extract_joint_action(teleop_action: Any) -> dict[str, float]:
+        """Normalize teleop joint input into ``joint_name -> position``."""
         if isinstance(teleop_action, dict):
             joint_state: dict[str, float] = {}
             for k, v in teleop_action.items():
@@ -211,6 +224,7 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        """Leave feature specs unchanged."""
         return features
 
 
@@ -225,6 +239,7 @@ class InterventionActionProcessorStep(ProcessorStep):
     _intervention_occurred: bool = field(default=False, init=False)
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
+        """Select policy or teleop action source and emit full task-frame targets."""
         action = transition.get(TransitionKey.ACTION)
         if not isinstance(action, torch.Tensor):
             raise TypeError(f"Action should be a torch.Tensor, got {type(action)}")
@@ -262,6 +277,7 @@ class InterventionActionProcessorStep(ProcessorStep):
         return new_transition
 
     def _split_policy_action(self, action: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Split flat policy action tensor into per-robot slices."""
         policy_by_robot: dict[str, torch.Tensor] = {}
         idx = 0
         for name, frame in self.task_frame.items():
@@ -271,6 +287,7 @@ class InterventionActionProcessorStep(ProcessorStep):
         return policy_by_robot
 
     def _project_learning_action(self, frame: TaskFrame, encoded_action: Any) -> list[float]:
+        """Project encoded learning-space vectors into a full 6-DoF task target."""
         raw = torch.as_tensor(encoded_action, dtype=torch.float32).flatten().tolist()
 
         full_target = list(frame.target)
@@ -308,6 +325,7 @@ class InterventionActionProcessorStep(ProcessorStep):
 
     @staticmethod
     def _bound_differential_axis(frame: TaskFrame, axis: int, value: float) -> float:
+        """Bound velocity/force-like scalars with tanh and optional axis scaling."""
         if frame.min_target is not None and frame.max_target is not None:
             scale = max(abs(frame.min_target[axis]), abs(frame.max_target[axis]))
             if scale > 0:
@@ -315,6 +333,7 @@ class InterventionActionProcessorStep(ProcessorStep):
         return math.tanh(value)
 
     def _decode_absolute_rotation(self, absolute_rot_axes: list[int], raw: list[float]) -> tuple[list[float], int]:
+        """Decode manifold rotation chunks (S1/S2/SO3) into Euler XYZ angles."""
         rot = [0.0, 0.0, 0.0]
 
         if len(absolute_rot_axes) == 1:
@@ -348,6 +367,7 @@ class InterventionActionProcessorStep(ProcessorStep):
 
     @staticmethod
     def _rotation_6d_to_matrix(raw: list[float]) -> list[list[float]]:
+        """Convert 6D continuous rotation representation into a 3x3 matrix."""
         a1 = [raw[0], raw[1], raw[2]]
         a2 = [raw[3], raw[4], raw[5]]
 
@@ -379,6 +399,7 @@ class InterventionActionProcessorStep(ProcessorStep):
 
     @staticmethod
     def _matrix_to_euler_xyz(matrix: list[list[float]]) -> list[float]:
+        """Convert a rotation matrix into extrinsic XYZ Euler angles."""
         sy = max(-1.0, min(1.0, -matrix[2][0]))
         ry = math.asin(sy)
         cy = math.cos(ry)
@@ -395,9 +416,11 @@ class InterventionActionProcessorStep(ProcessorStep):
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        """Leave feature specs unchanged."""
         return features
 
     def reset(self) -> None:
+        """Clear intervention completion tracking state."""
         self._intervention_occurred = False
 
 
@@ -415,6 +438,7 @@ class ToJointActionProcessorStep(ProcessorStep):
     _virtual_task_pose: dict[str, list[float]] = field(default_factory=dict, init=False)
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
+        """Convert task-space actions to joint commands for joint-only robots."""
         action = transition.get(TransitionKey.ACTION)
         if not isinstance(action, dict):
             return transition
@@ -469,6 +493,7 @@ class ToJointActionProcessorStep(ProcessorStep):
         task_target: list[float],
         transition: EnvTransition,
     ) -> list[float]:
+        """Integrate relative POS axes on top of the current/base task pose."""
         base_pose = self._base_pose(name, frame, transition)
         out = list(task_target)
         for axis in frame.learnable_axis_indices:
@@ -477,6 +502,7 @@ class ToJointActionProcessorStep(ProcessorStep):
         return out
 
     def _base_pose(self, name: str, frame: TaskFrame, transition: EnvTransition) -> list[float]:
+        """Resolve integration base pose from virtual state, observation, or default target."""
         use_virtual = self.use_virtual_reference[name] if isinstance(self.use_virtual_reference, dict) else self.use_virtual_reference
         if use_virtual and name in self._virtual_task_pose:
             return list(self._virtual_task_pose[name])
@@ -499,6 +525,7 @@ class ToJointActionProcessorStep(ProcessorStep):
 
     @staticmethod
     def _clamp_target(frame: TaskFrame, target: list[float]) -> list[float]:
+        """Clamp task target to configured min/max bounds when available."""
         if frame.min_target is None or frame.max_target is None:
             return target
         return [max(frame.min_target[i], min(frame.max_target[i], target[i])) for i in range(len(target))]
@@ -506,4 +533,5 @@ class ToJointActionProcessorStep(ProcessorStep):
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        """Leave feature specs unchanged."""
         return features

@@ -15,6 +15,7 @@ from ..utils import check_task_frame_robot
 
 
 class ManipulationPrimitive(gymnasium.Env):
+    """Minimal gym env wiring robots, cameras, and task-frame commands."""
 
     def __init__(
         self,
@@ -23,6 +24,7 @@ class ManipulationPrimitive(gymnasium.Env):
         cameras: dict[str, Camera],
         display_cameras: bool = False
     ):
+        """Initialize robot/camera handles and action slicing metadata."""
         self.robot_dict = robot_dict
         self.task_frame = task_frame
         self.cameras = cameras
@@ -37,6 +39,7 @@ class ManipulationPrimitive(gymnasium.Env):
             self._action_length[name] = len(robot.action_features)
 
     def step(self, action: np.ndarray | torch.Tensor) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+        """Apply an action slice per robot and return fresh observations."""
         if isinstance(action, torch.Tensor):
             action = action.detach().cpu().numpy()
 
@@ -67,6 +70,7 @@ class ManipulationPrimitive(gymnasium.Env):
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[ObsType, dict[str, Any]]:
+        """Reset counters and resend configured task frames when supported."""
         super().reset(seed=seed, options=options)
 
         # Manipulation primitives do not execute an autonomous reset trajectory by default.
@@ -80,6 +84,7 @@ class ManipulationPrimitive(gymnasium.Env):
         return obs, self._get_info()
 
     def render(self) -> None:
+        """Display camera observations using OpenCV windows."""
         import cv2
         current_observation = self._get_observation()
         if current_observation is not None and "pixels" in current_observation:
@@ -88,11 +93,13 @@ class ManipulationPrimitive(gymnasium.Env):
             cv2.waitKey(1)
 
     def close(self) -> None:
+        """Disconnect any connected robots."""
         for robot_dict in self.robot_dict.values():
             if robot_dict.is_connected:
                 robot_dict.disconnect()
 
     def _get_observation(self):
+        """Collect camera pixels and robot observations into one dict."""
         obs_dict = {}
 
         for cam_key, cam in self.cameras.items():
@@ -106,4 +113,5 @@ class ManipulationPrimitive(gymnasium.Env):
 
     @staticmethod
     def _get_info():
+        """Return default per-step info payload."""
         return {TeleopEvents.IS_INTERVENTION: False}
