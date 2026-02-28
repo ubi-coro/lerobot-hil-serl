@@ -8,8 +8,8 @@ from share.envs.manipulation_primitive_net.config_manipulation_primitive_net imp
 from share.envs.manipulation_primitive_net.transitions import ObservationThresholdTransition
 
 
-def _transition():
-    return ObservationThresholdTransition(obs_key="x", threshold=0.0)
+def _transition(*, next_primitive=None):
+    return ObservationThresholdTransition(obs_key="x", threshold=0.0, next_primitive=next_primitive)
 
 
 def test_mp_net_config_rejects_unknown_primitive_in_transition():
@@ -54,7 +54,101 @@ def test_mp_net_config_allows_terminal_transition_to_reset_primitive():
             "terminal": SimpleNamespace(is_terminal_primitive=True),
             "reset": SimpleNamespace(),
         },
-        transitions=[("terminal", "reset", _transition())],
+        transitions=[("pick", "terminal", _transition()), ("terminal", "reset", _transition())],
+        reset_primitives=["reset"],
+    )
+
+    assert config.start_primitive == "pick"
+
+
+def test_mp_net_config_rejects_non_terminal_dead_end():
+    with pytest.raises(ValueError, match="non-terminal dead-end primitive"):
+        ManipulationPrimitiveNetConfig(
+            start_primitive="pick",
+            primitives={
+                "pick": SimpleNamespace(),
+                "place": SimpleNamespace(),
+                "terminal": SimpleNamespace(is_terminal_primitive=True),
+                "reset": SimpleNamespace(),
+            },
+            transitions=[
+                ("pick", "terminal", _transition()),
+                ("terminal", "reset", _transition()),
+                ("reset", "pick", _transition()),
+            ],
+            reset_primitives=["reset"],
+        )
+
+
+def test_mp_net_config_rejects_unreachable_terminal():
+    with pytest.raises(ValueError, match="unreachable from start_primitive"):
+        ManipulationPrimitiveNetConfig(
+            start_primitive="pick",
+            primitives={
+                "pick": SimpleNamespace(),
+                "place": SimpleNamespace(),
+                "terminal": SimpleNamespace(is_terminal_primitive=True),
+                "reset": SimpleNamespace(),
+            },
+            transitions=[
+                ("pick", "place", _transition()),
+                ("place", "pick", _transition()),
+                ("terminal", "reset", _transition()),
+                ("reset", "pick", _transition()),
+            ],
+            reset_primitives=["reset"],
+        )
+
+
+def test_mp_net_config_rejects_reset_without_path_to_start():
+    with pytest.raises(ValueError, match="Reset primitive has no transition path to start_primitive"):
+        ManipulationPrimitiveNetConfig(
+            start_primitive="pick",
+            primitives={
+                "pick": SimpleNamespace(),
+                "terminal": SimpleNamespace(is_terminal_primitive=True),
+                "reset": SimpleNamespace(),
+            },
+            transitions=[
+                ("pick", "terminal", _transition()),
+                ("terminal", "reset", _transition()),
+                ("reset", "terminal", _transition()),
+            ],
+            reset_primitives=["reset"],
+        )
+
+
+def test_mp_net_config_rejects_unknown_next_primitive_override():
+    with pytest.raises(ValueError, match="Transition resolver points to unknown primitive"):
+        ManipulationPrimitiveNetConfig(
+            start_primitive="pick",
+            primitives={
+                "pick": SimpleNamespace(),
+                "terminal": SimpleNamespace(is_terminal_primitive=True),
+                "reset": SimpleNamespace(),
+            },
+            transitions=[
+                ("pick", "terminal", _transition(next_primitive="terminal")),
+                ("terminal", "reset", _transition(next_primitive="bogus")),
+                ("reset", "pick", _transition(next_primitive="pick")),
+            ],
+            reset_primitives=["reset"],
+        )
+
+
+def test_mp_net_config_allows_intentional_terminal_dead_end():
+    config = ManipulationPrimitiveNetConfig(
+        start_primitive="pick",
+        primitives={
+            "pick": SimpleNamespace(),
+            "terminal": SimpleNamespace(is_terminal_primitive=True),
+            "reset": SimpleNamespace(),
+        },
+        transitions=[
+            ("pick", "terminal", _transition()),
+            ("terminal", "reset", _transition()),
+            ("reset", "pick", _transition()),
+        ],
         reset_primitives=["reset"],
     )
 
