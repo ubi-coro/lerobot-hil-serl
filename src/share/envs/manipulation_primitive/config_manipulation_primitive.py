@@ -39,7 +39,10 @@ from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeatur
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 from share.envs.manipulation_primitive.env_manipulation_primitive import ManipulationPrimitive
 from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, TaskFrame
-from share.envs.manipulation_primitive.processor_steps import MatchTeleopToPolicyActionProcessorStep
+from share.envs.manipulation_primitive.processor_steps import (
+    InterventionActionProcessorStep,
+    MatchTeleopToPolicyActionProcessorStep,
+)
 from share.envs.utils import check_task_frame_robot, check_delta_teleoperator
 from share.utils.kinematics import get_kinematics
 

@@ -10,6 +10,7 @@ from lerobot.configs.types import PipelineFeatureType, PolicyFeature
 from lerobot.processor.core import EnvTransition, TransitionKey
 from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
 from lerobot.processor.pipeline import ProcessorStep, ProcessorStepRegistry
+from lerobot.teleoperators import TeleopEvents
 from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, PolicyMode, TaskFrame
 from share.envs.utils import check_delta_teleoperator
 
@@ -188,3 +189,190 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         return features
+
+
+@dataclass
+@ProcessorStepRegistry.register("task_frame_intervention_action_processor")
+class InterventionActionProcessorStep(ProcessorStep):
+    """Project learning-space actions into full task-frame targets with intervention override."""
+
+    teleoperators: dict[str, Any] = field(default_factory=dict)
+    task_frame: dict[str, TaskFrame] = field(default_factory=dict)
+
+    _intervention_occurred: bool = field(default=False, init=False)
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        action = transition.get(TransitionKey.ACTION)
+        if not isinstance(action, torch.Tensor):
+            raise TypeError(f"Action should be a torch.Tensor, got {type(action)}")
+
+        new_transition = transition.copy()
+        info = dict(new_transition.get(TransitionKey.INFO) or {})
+        complementary_data = dict(new_transition.get(TransitionKey.COMPLEMENTARY_DATA) or {})
+
+        teleop_action_dict = complementary_data.get(TELEOP_ACTION_KEY)
+        is_intervention = bool(info.get(TeleopEvents.IS_INTERVENTION, False))
+
+        self._intervention_occurred = self._intervention_occurred | is_intervention
+        if self._intervention_occurred and not is_intervention:
+            info[TeleopEvents.INTERVENTION_COMPLETED] = True
+
+        if is_intervention and isinstance(teleop_action_dict, dict):
+            source_actions = teleop_action_dict
+        else:
+            source_actions = self._split_policy_action(action)
+
+        full_action: dict[str, torch.Tensor] = {}
+        for name, frame in self.task_frame.items():
+            encoded_action = source_actions.get(name)
+            if encoded_action is None:
+                full_action[name] = torch.tensor(frame.target, dtype=action.dtype, device=action.device)
+                continue
+
+            projected = self._project_learning_action(frame, encoded_action)
+            full_action[name] = torch.tensor(projected, dtype=action.dtype, device=action.device)
+
+        new_transition[TransitionKey.ACTION] = full_action
+        complementary_data[TELEOP_ACTION_KEY] = full_action
+        new_transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
+        new_transition[TransitionKey.INFO] = info
+        return new_transition
+
+    def _split_policy_action(self, action: torch.Tensor) -> dict[str, torch.Tensor]:
+        policy_by_robot: dict[str, torch.Tensor] = {}
+        idx = 0
+        for name, frame in self.task_frame.items():
+            dim = frame.policy_action_dim
+            policy_by_robot[name] = action[idx : idx + dim]
+            idx += dim
+        return policy_by_robot
+
+    def _project_learning_action(self, frame: TaskFrame, encoded_action: Any) -> list[float]:
+        raw = torch.as_tensor(encoded_action, dtype=torch.float32).flatten().tolist()
+
+        full_target = list(frame.target)
+        cursor = 0
+        absolute_rot_axes = [
+            axis
+            for axis in frame.learnable_axis_indices
+            if axis >= 3 and frame.control_mode[axis] == ControlMode.POS and frame.policy_mode[axis] == PolicyMode.ABSOLUTE
+        ]
+
+        for axis in frame.learnable_axis_indices:
+            if axis in absolute_rot_axes:
+                continue
+
+            if cursor >= len(raw):
+                raise ValueError("Encoded action is shorter than expected for task-frame projection")
+
+            value = raw[cursor]
+            cursor += 1
+            if frame.control_mode[axis] in {ControlMode.VEL, ControlMode.FORCE}:
+                value = self._bound_differential_axis(frame, axis, value)
+
+            full_target[axis] = float(value)
+
+        if absolute_rot_axes:
+            rotation_values, consumed = self._decode_absolute_rotation(absolute_rot_axes, raw[cursor:])
+            cursor += consumed
+            for axis in absolute_rot_axes:
+                full_target[axis] = float(rotation_values[axis - 3])
+
+        if cursor != len(raw):
+            raise ValueError("Encoded action has trailing values that do not match task-frame manifold layout")
+
+        return full_target
+
+    @staticmethod
+    def _bound_differential_axis(frame: TaskFrame, axis: int, value: float) -> float:
+        if frame.min_pose is not None and frame.max_pose is not None:
+            scale = max(abs(frame.min_pose[axis]), abs(frame.max_pose[axis]))
+            if scale > 0:
+                return math.tanh(value) * scale
+        return math.tanh(value)
+
+    def _decode_absolute_rotation(self, absolute_rot_axes: list[int], raw: list[float]) -> tuple[list[float], int]:
+        rot = [0.0, 0.0, 0.0]
+
+        if len(absolute_rot_axes) == 1:
+            if len(raw) < 2:
+                raise ValueError("S1 rotation representation requires 2 values")
+            rot[absolute_rot_axes[0] - 3] = math.atan2(raw[1], raw[0])
+            return rot, 2
+
+        if len(absolute_rot_axes) == 2:
+            if len(raw) < 3:
+                raise ValueError("S2 rotation representation requires 3 values")
+            x, y, z = raw[0], raw[1], raw[2]
+            norm = math.sqrt(x * x + y * y + z * z)
+            if norm < 1e-8:
+                x, y, z = 1.0, 0.0, 0.0
+                norm = 1.0
+            x, y, z = x / norm, y / norm, z / norm
+
+            # First SO(3) column parameterization -> recover (ry, rz), leave rx at zero.
+            rot[1] = math.asin(max(-1.0, min(1.0, -z)))
+            rot[2] = math.atan2(y, x)
+            return rot, 3
+
+        if len(absolute_rot_axes) == 3:
+            if len(raw) < 6:
+                raise ValueError("SO(3) 6D representation requires 6 values")
+            matrix = self._rotation_6d_to_matrix(raw[:6])
+            return self._matrix_to_euler_xyz(matrix), 6
+
+        raise ValueError(f"Expected 1..3 absolute rotation axes, got {len(absolute_rot_axes)}")
+
+    @staticmethod
+    def _rotation_6d_to_matrix(raw: list[float]) -> list[list[float]]:
+        a1 = [raw[0], raw[1], raw[2]]
+        a2 = [raw[3], raw[4], raw[5]]
+
+        def normalize(v: list[float]) -> list[float]:
+            n = math.sqrt(sum(x * x for x in v))
+            if n < 1e-8:
+                return [1.0, 0.0, 0.0]
+            return [x / n for x in v]
+
+        b1 = normalize(a1)
+        dot = sum(a2[i] * b1[i] for i in range(3))
+        u2 = [a2[i] - dot * b1[i] for i in range(3)]
+        if math.sqrt(sum(x * x for x in u2)) < 1e-8:
+            fallback = [0.0, 1.0, 0.0] if abs(b1[0]) > 0.9 else [1.0, 0.0, 0.0]
+            dot_fb = sum(fallback[i] * b1[i] for i in range(3))
+            u2 = [fallback[i] - dot_fb * b1[i] for i in range(3)]
+        b2 = normalize(u2)
+        b3 = [
+            b1[1] * b2[2] - b1[2] * b2[1],
+            b1[2] * b2[0] - b1[0] * b2[2],
+            b1[0] * b2[1] - b1[1] * b2[0],
+        ]
+
+        return [
+            [b1[0], b2[0], b3[0]],
+            [b1[1], b2[1], b3[1]],
+            [b1[2], b2[2], b3[2]],
+        ]
+
+    @staticmethod
+    def _matrix_to_euler_xyz(matrix: list[list[float]]) -> list[float]:
+        sy = max(-1.0, min(1.0, -matrix[2][0]))
+        ry = math.asin(sy)
+        cy = math.cos(ry)
+
+        if abs(cy) > 1e-6:
+            rx = math.atan2(matrix[2][1], matrix[2][2])
+            rz = math.atan2(matrix[1][0], matrix[0][0])
+        else:
+            rx = 0.0
+            rz = math.atan2(-matrix[0][1], matrix[1][1])
+
+        return [rx, ry, rz]
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+    def reset(self) -> None:
+        self._intervention_occurred = False
