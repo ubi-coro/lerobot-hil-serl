@@ -33,14 +33,68 @@ class ManipulationPrimitiveNet(gym.Env):
         self._last_reset_info: dict[str, Any] = {}
         self._episode_step_count = 0
 
+    @staticmethod
+    def _default_action_for_env(env: Any) -> Any:
+        action_space = getattr(env, "action_space", None)
+        if action_space is not None and hasattr(action_space, "sample"):
+            sampled_action = action_space.sample()
+            if isinstance(sampled_action, np.ndarray):
+                return np.zeros_like(sampled_action)
+            return sampled_action
+        return np.zeros((1,), dtype=np.float32)
+
+    def _step_reset_path_until_start(
+        self,
+        obs: dict[str, np.ndarray],
+        info: dict[str, Any],
+        *,
+        max_steps: int,
+    ) -> tuple[dict[str, np.ndarray], dict[str, Any], int]:
+        reset_steps = 0
+
+        while self._active_primitive != self.config.start_primitive:
+            if reset_steps >= max_steps:
+                raise RuntimeError(
+                    "Exceeded maximum reset transition steps while routing to start primitive. "
+                    f"Active='{self._active_primitive}', start='{self.config.start_primitive}'."
+                )
+
+            transitioned = False
+            for source, default_target, transition in self.config.transitions:
+                if source != self._active_primitive:
+                    continue
+
+                fired, transition_metadata = self._evaluate_transition(transition=transition, obs=obs, info=info)
+                if not fired:
+                    continue
+
+                self._active_primitive = transition_metadata.get("next_primitive", default_target)
+                transitioned = True
+                break
+
+            if not transitioned:
+                raise RuntimeError(
+                    "Failed to route reset path to start primitive: no transition fired from "
+                    f"primitive '{self._active_primitive}'."
+                )
+
+            if self._active_primitive != self.config.start_primitive:
+                action = self._default_action_for_env(self._envs[self._active_primitive])
+                obs, _, _, _, info = self._envs[self._active_primitive].step(action)
+                info = dict(info or {})
+            reset_steps += 1
+
+        return obs, info, reset_steps
+
 
     def _resolve_reset_start(self) -> str:
-        if self.config.start_primitive in self._envs:
-            return self.config.start_primitive
-
-        for reset_primitive in getattr(self.config, "reset_primitives", []):
+        configured_reset_primitives = getattr(self.config, "reset_primitives", [])
+        for reset_primitive in configured_reset_primitives:
             if reset_primitive in self._envs:
                 return reset_primitive
+
+        if self.config.start_primitive in self._envs:
+            return self.config.start_primitive
 
         raise KeyError(
             f"Unable to resolve reset start primitive: start_primitive='{self.config.start_primitive}' "
@@ -93,6 +147,19 @@ class ManipulationPrimitiveNet(gym.Env):
 
         if obs is None:
             raise RuntimeError(f"Failed to reset active primitive '{self._active_primitive}'.")
+
+        reset_steps = 0
+        if self._active_primitive != self.config.start_primitive:
+            max_steps = max(1, len(self.config.transitions) + len(self._envs))
+            primitive_reset_info = dict(reset_info.get("primitive_reset_info") or {})
+            obs, primitive_reset_info, reset_steps = self._step_reset_path_until_start(
+                obs=obs,
+                info=primitive_reset_info,
+                max_steps=max_steps,
+            )
+            reset_info["primitive_reset_info"] = primitive_reset_info
+            reset_info["active_primitive"] = self._active_primitive
+            reset_info["reset_transition_steps"] = reset_steps
 
         self._last_reset_info = reset_info
         return obs, reset_info
@@ -194,7 +261,5 @@ class ManipulationPrimitiveNet(gym.Env):
             cameras[name].connect()
 
         return robot_dict, teleop_dict, cameras
-
-
 
 
