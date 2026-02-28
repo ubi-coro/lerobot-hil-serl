@@ -9,6 +9,7 @@ from share.envs.manipulation_primitive.processor_steps import (
     RelativeFrameActionProcessor,
     RelativeFrameObservationProcessor,
     RobotActionToPolicyActionProcessorStep,
+    VanillaMPObservationProcessorStep,
 )
 from tests.share.envs.mock_pipeline_entities import MockComplexKinematicsSolver
 
@@ -176,3 +177,78 @@ def test_robot_action_to_policy_action_processor_extra_joint_key_error():
     step = RobotActionToPolicyActionProcessorStep(motor_names={"arm": ["joint_1"]})
     with pytest.raises(ValueError, match="unexpected keys"):
         step(_transition(action={"joint_1.pos": 1.0, "joint_2.pos": 2.0}))
+
+
+def test_vanilla_mp_observation_processor_collects_modalities_and_images():
+    step = VanillaMPObservationProcessorStep(
+        gripper_enable={"arm": True},
+        add_joint_position_to_observation={"arm": True},
+        add_joint_velocity_to_observation={"arm": True},
+        add_current_to_observation={"arm": True},
+        add_ee_pos_to_observation={"arm": True},
+        add_ee_velocity_to_observation={"arm": True},
+        add_ee_wrench_to_observation={"arm": True},
+    )
+
+    observation = {
+        "arm.joint_1.pos": 1.0,
+        "arm.joint_2.pos": 2.0,
+        "arm.joint_1.current": 0.1,
+        "arm.joint_2.current": 0.2,
+        "arm.x.ee_pos": 0.01,
+        "arm.y.ee_pos": 0.02,
+        "arm.z.ee_pos": 0.03,
+        "arm.wx.ee_pos": 0.04,
+        "arm.wy.ee_pos": 0.05,
+        "arm.wz.ee_pos": 0.06,
+        "arm.x.ee_wrench": 1.0,
+        "arm.y.ee_wrench": 2.0,
+        "arm.z.ee_wrench": 3.0,
+        "arm.wx.ee_wrench": 4.0,
+        "arm.wy.ee_wrench": 5.0,
+        "arm.wz.ee_wrench": 6.0,
+        "arm.gripper.pos": 0.9,
+        "observation.images.cam": torch.full((8, 8, 3), 255, dtype=torch.uint8),
+    }
+
+    first = step(_transition(observation=observation))[TransitionKey.OBSERVATION]
+    assert first["observation.images.cam"].shape == (3, 8, 8)
+    assert first["observation.images.cam"].dtype == torch.float32
+
+    state = first["observation.state"]
+    # joint pos(2) + joint vel(differentiated -> 2 zeros) + current(2) + ee_pos(6) + ee_vel(diff -> 6 zeros) + ee_wrench(6) + gripper(1)
+    assert state.shape == (25,)
+    torch.testing.assert_close(state[2:4], torch.zeros(2))
+    torch.testing.assert_close(state[12:18], torch.zeros(6))
+
+
+def test_vanilla_mp_observation_processor_transform_features_counts_enabled_modalities():
+    step = VanillaMPObservationProcessorStep(
+        gripper_enable={"arm": True},
+        add_joint_position_to_observation={"arm": True},
+        add_joint_velocity_to_observation={"arm": True},
+        add_current_to_observation={"arm": False},
+        add_ee_pos_to_observation={"arm": True},
+        add_ee_velocity_to_observation={"arm": True},
+        add_ee_wrench_to_observation={"arm": False},
+    )
+
+    from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
+
+    features = {
+        PipelineFeatureType.OBSERVATION: {
+            "arm.joint_1.pos": PolicyFeature(type=FeatureType.STATE, shape=(1,)),
+            "arm.joint_2.pos": PolicyFeature(type=FeatureType.STATE, shape=(1,)),
+            "arm.x.ee_pos": PolicyFeature(type=FeatureType.STATE, shape=(1,)),
+            "arm.y.ee_pos": PolicyFeature(type=FeatureType.STATE, shape=(1,)),
+            "arm.z.ee_pos": PolicyFeature(type=FeatureType.STATE, shape=(1,)),
+            "arm.wx.ee_pos": PolicyFeature(type=FeatureType.STATE, shape=(1,)),
+            "arm.wy.ee_pos": PolicyFeature(type=FeatureType.STATE, shape=(1,)),
+            "arm.wz.ee_pos": PolicyFeature(type=FeatureType.STATE, shape=(1,)),
+            "arm.gripper.pos": PolicyFeature(type=FeatureType.STATE, shape=(1,)),
+        },
+        PipelineFeatureType.ACTION: {},
+    }
+
+    out = step.transform_features(features)
+    assert out[PipelineFeatureType.OBSERVATION]["observation.state"].shape == (15,)

@@ -8,11 +8,12 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
 
-from lerobot.configs.types import PipelineFeatureType, PolicyFeature
+from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
 from lerobot.processor.core import EnvTransition, TransitionKey
 from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
 from lerobot.processor.pipeline import ProcessorStep, ProcessorStepRegistry
 from lerobot.teleoperators import TeleopEvents
+from lerobot.utils.constants import OBS_IMAGES, OBS_STATE
 from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, PolicyMode, TaskFrame
 from share.envs.utils import check_delta_teleoperator
 
@@ -520,6 +521,204 @@ class ToJointActionProcessorStep(ProcessorStep):
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         """Leave feature specs unchanged."""
         return features
+
+
+@dataclass
+@ProcessorStepRegistry.register("mp_vanilla_observation_processor")
+class VanillaMPObservationProcessorStep(ProcessorStep):
+    """Build ``observation.state`` from configured robot modalities and normalize images."""
+
+    device: str = "cpu"
+    gripper_enable: bool | dict[str, bool] = False
+    add_joint_position_to_observation: bool | dict[str, bool] = True
+    add_joint_velocity_to_observation: bool | dict[str, bool] = False
+    add_current_to_observation: bool | dict[str, bool] = False
+    add_ee_pos_to_observation: bool | dict[str, bool] = False
+    add_ee_velocity_to_observation: bool | dict[str, bool] = False
+    add_ee_wrench_to_observation: bool | dict[str, bool] = False
+
+    _prev_obs: dict[str, dict[str, float]] = field(default_factory=dict, init=False)
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        observation = transition.get(TransitionKey.OBSERVATION)
+        if not isinstance(observation, dict):
+            return transition
+
+        new_transition = transition.copy()
+        new_observation = dict(observation)
+
+        state_values = self._collect_state_values(observation)
+        if state_values:
+            new_observation[OBS_STATE] = torch.tensor(state_values, dtype=torch.float32)
+
+        for key, value in observation.items():
+            if "image" not in key:
+                continue
+            new_observation[key] = self._process_image(value)
+
+        new_transition[TransitionKey.OBSERVATION] = new_observation
+        return new_transition
+
+    def _collect_state_values(self, observation: dict[str, Any]) -> list[float]:
+        values: list[float] = []
+        robot_names = self._robot_names(observation)
+        axis_names = ["x", "y", "z", "wx", "wy", "wz"]
+
+        for name in sorted(robot_names):
+            if self._enabled(self.add_joint_position_to_observation, name):
+                values.extend(self._collect_joint_channel(observation, name, "pos"))
+
+            if self._enabled(self.add_joint_velocity_to_observation, name):
+                joint_vel = self._collect_joint_channel(observation, name, "vel")
+                if not joint_vel:
+                    pos_keys = self._joint_keys(observation, name, "pos")
+                    joint_vel = self._differentiate(name, observation, pos_keys)
+                values.extend(joint_vel)
+
+            if self._enabled(self.add_current_to_observation, name):
+                values.extend(self._collect_joint_channel(observation, name, "current"))
+
+            if self._enabled(self.add_ee_pos_to_observation, name):
+                values.extend(self._collect_ee_channel(observation, name, axis_names, "ee_pos"))
+
+            if self._enabled(self.add_ee_velocity_to_observation, name):
+                ee_vel = self._collect_ee_channel(observation, name, axis_names, "ee_vel")
+                if not ee_vel:
+                    ee_pos_keys = [f"{name}.{axis}.ee_pos" for axis in axis_names]
+                    ee_vel = self._differentiate(name, observation, ee_pos_keys)
+                values.extend(ee_vel)
+
+            if self._enabled(self.add_ee_wrench_to_observation, name):
+                values.extend(self._collect_ee_channel(observation, name, axis_names, "ee_wrench"))
+
+            if self._enabled(self.gripper_enable, name):
+                gripper_key = f"{name}.gripper.pos"
+                if gripper_key in observation:
+                    values.append(self._to_float(observation[gripper_key]))
+
+        self._update_prev_obs(observation)
+        return values
+
+    def _process_image(self, image: Any) -> torch.Tensor:
+        if isinstance(image, torch.Tensor):
+            img = image
+        else:
+            img = torch.from_numpy(np.asarray(image))
+
+        if img.ndim == 3:
+            img = img.permute(2, 0, 1)
+        elif img.ndim == 4:
+            img = img.permute(0, 3, 1, 2)
+        else:
+            raise ValueError(f"Expected image tensor with 3 or 4 dimensions, got shape {tuple(img.shape)}")
+
+        if img.dtype != torch.float32:
+            img = img.to(torch.float32)
+        return img / 255.0 if img.max() > 1.0 else img
+
+    @staticmethod
+    def _robot_names(observation: dict[str, Any]) -> set[str]:
+        names: set[str] = set()
+        for key in observation:
+            if key.startswith(OBS_IMAGES):
+                continue
+            if "." in key:
+                names.add(key.split(".", 1)[0])
+        return names
+
+    @staticmethod
+    def _enabled(flag: bool | dict[str, bool], name: str) -> bool:
+        if isinstance(flag, dict):
+            return bool(flag.get(name, False))
+        return bool(flag)
+
+    @staticmethod
+    def _to_float(value: Any) -> float:
+        if isinstance(value, torch.Tensor):
+            return float(value.item()) if value.ndim == 0 else float(value.flatten()[0].item())
+        return float(value)
+
+    def _joint_keys(self, observation: dict[str, Any], robot_name: str, suffix: str) -> list[str]:
+        prefix = f"{robot_name}."
+        return sorted(
+            key
+            for key in observation
+            if key.startswith(prefix)
+            and key.endswith(f".{suffix}")
+            and ".ee_" not in key
+            and ".gripper." not in key
+        )
+
+    def _collect_joint_channel(self, observation: dict[str, Any], robot_name: str, suffix: str) -> list[float]:
+        return [self._to_float(observation[key]) for key in self._joint_keys(observation, robot_name, suffix)]
+
+    def _collect_ee_channel(
+        self,
+        observation: dict[str, Any],
+        robot_name: str,
+        axis_names: list[str],
+        suffix: str,
+    ) -> list[float]:
+        values: list[float] = []
+        for axis in axis_names:
+            key = f"{robot_name}.{axis}.{suffix}"
+            if key in observation:
+                values.append(self._to_float(observation[key]))
+        return values
+
+    def _differentiate(self, robot_name: str, observation: dict[str, Any], keys: list[str]) -> list[float]:
+        if not keys:
+            return []
+        prev = self._prev_obs.get(robot_name, {})
+        return [self._to_float(observation[key]) - prev.get(key, self._to_float(observation[key])) for key in keys if key in observation]
+
+    def _update_prev_obs(self, observation: dict[str, Any]) -> None:
+        robot_names = self._robot_names(observation)
+        for name in robot_names:
+            self._prev_obs[name] = {
+                key: self._to_float(value)
+                for key, value in observation.items()
+                if key.startswith(f"{name}.") and "image" not in key
+            }
+
+    def reset(self) -> None:
+        self._prev_obs.clear()
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        new_features = {ft: dict(bucket) for ft, bucket in features.items()}
+        obs_features = new_features.get(PipelineFeatureType.OBSERVATION, {})
+
+        state_dim = 0
+        robot_names = self._robot_names(obs_features)
+        for name in sorted(robot_names):
+            if self._enabled(self.add_joint_position_to_observation, name):
+                state_dim += len(self._joint_keys(obs_features, name, "pos"))
+            if self._enabled(self.add_joint_velocity_to_observation, name):
+                joint_vel_keys = self._joint_keys(obs_features, name, "vel")
+                state_dim += len(joint_vel_keys) if joint_vel_keys else len(self._joint_keys(obs_features, name, "pos"))
+            if self._enabled(self.add_current_to_observation, name):
+                state_dim += len(self._joint_keys(obs_features, name, "current"))
+            if self._enabled(self.add_ee_pos_to_observation, name):
+                state_dim += len(self._collect_ee_feature_keys(obs_features, name, "ee_pos"))
+            if self._enabled(self.add_ee_velocity_to_observation, name):
+                ee_vel_keys = self._collect_ee_feature_keys(obs_features, name, "ee_vel")
+                state_dim += len(ee_vel_keys) if ee_vel_keys else len(self._collect_ee_feature_keys(obs_features, name, "ee_pos"))
+            if self._enabled(self.add_ee_wrench_to_observation, name):
+                state_dim += len(self._collect_ee_feature_keys(obs_features, name, "ee_wrench"))
+            if self._enabled(self.gripper_enable, name) and f"{name}.gripper.pos" in obs_features:
+                state_dim += 1
+
+        if state_dim > 0:
+            obs_features[OBS_STATE] = PolicyFeature(type=FeatureType.STATE, shape=(state_dim,))
+
+        return new_features
+
+    @staticmethod
+    def _collect_ee_feature_keys(observation: dict[str, Any], robot_name: str, suffix: str) -> list[str]:
+        axis_names = ["x", "y", "z", "wx", "wy", "wz"]
+        return [f"{robot_name}.{axis}.{suffix}" for axis in axis_names if f"{robot_name}.{axis}.{suffix}" in observation]
 
 
 @dataclass

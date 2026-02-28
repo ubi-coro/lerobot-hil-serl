@@ -23,7 +23,7 @@ from lerobot.processor import (
     GripperPenaltyProcessorStep,
     ImageCropResizeProcessorStep,
     RewardClassifierProcessorStep,
-    TimeLimitProcessorStep, VanillaObservationProcessorStep
+    TimeLimitProcessorStep
 )
 from lerobot.processor.converters import identity_transition
 from lerobot.processor.hil_processor import (
@@ -48,6 +48,7 @@ from share.envs.manipulation_primitive.processor_steps import (
     RelativeFrameObservationProcessor,
     RobotActionToPolicyActionProcessorStep,
     ToJointActionProcessorStep,
+    VanillaMPObservationProcessorStep,
 )
 from share.envs.utils import check_task_frame_robot, check_delta_teleoperator
 from share.utils.kinematics import get_kinematics
@@ -310,7 +311,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
             # builds OBS_STATE based on what we want to have in there
             # if obs has no joint vel and we want it, compute numerically
             # same for ee_vel
-            VanillaObservationProcessorStep(
+            VanillaMPObservationProcessorStep(
                 device=device,
                 gripper_enable=self.processor.gripper.enable,
                 add_joint_position_to_observation=self.processor.observation.add_joint_position_to_observation,
