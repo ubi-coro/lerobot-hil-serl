@@ -413,7 +413,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
     def infer_features(self, robot_dict):
         # process features with respective pipeline
         # get initial obs features from robot_dict instead
-        env_processor = self.make_env_processor(device="cpu", env=None)
+        env_processor = self.make_env_processor(device="cpu")
         pipeline_features = env_processor.transform_features(self.initial_features)
         obs_features = pipeline_features[PipelineFeatureType.OBSERVATION]
 

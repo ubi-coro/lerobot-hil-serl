@@ -57,7 +57,8 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
                 continue
 
             if self._is_delta_teleoperator.get(name, False):
-                converted_actions[name] = self._map_delta_teleop(name, frame, teleop_action)
+                # FIX: Pass the transition down to extract physical state
+                converted_actions[name] = self._map_delta_teleop(name, frame, teleop_action, transition)
             else:
                 converted_actions[name] = self._map_absolute_joint_teleop(name, frame, teleop_action)
 
@@ -65,12 +66,13 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
         new_transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
         return new_transition
 
-    def _map_delta_teleop(self, name: str, frame: TaskFrame, teleop_action: Any) -> torch.Tensor:
+    def _map_delta_teleop(self, name: str, frame: TaskFrame, teleop_action: Any, transition: EnvTransition) -> torch.Tensor:
         deltas = self._extract_delta_action(teleop_action)
 
         if frame.space == ControlSpace.JOINT:
             solver = self._require_solver(name)
-            base_pose = self._integration_base_pose(name, frame)
+            # FIX: Pass transition
+            base_pose = self._integration_base_pose(name, frame, transition)
             pose_target = [base_pose[i] + deltas[i] for i in range(6)]
             joint_target = solver.inverse_kinematics(pose_target)
             values = [joint_target.get(f"joint_{axis + 1}", 0.0) for axis in frame.learnable_axis_indices]
@@ -81,7 +83,8 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
             frame.control_mode[axis] == ControlMode.POS and frame.policy_mode[axis] == PolicyMode.ABSOLUTE
             for axis in frame.learnable_axis_indices
         ):
-            base_pose = self._integration_base_pose(name, frame)
+            # FIX: Pass transition
+            base_pose = self._integration_base_pose(name, frame, transition)
             source_pose = [base_pose[i] + deltas[i] for i in range(6)]
             self._virtual_task_pose[name] = source_pose
 
@@ -150,10 +153,30 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
 
         return torch.tensor(values, dtype=torch.float32)
 
-    def _integration_base_pose(self, name: str, frame: TaskFrame) -> list[float]:
+    def _integration_base_pose(self, name: str, frame: TaskFrame, transition: EnvTransition) -> list[float]:
         use_virtual = self.use_virtual_reference[name] if isinstance(self.use_virtual_reference, dict) else self.use_virtual_reference
+
+        # 1. Primary: Use the virtual reference if enabled and populated
         if use_virtual and name in self._virtual_task_pose:
             return self._virtual_task_pose[name]
+
+        # 2. Secondary: Fall back to the actual physical observation
+        observation = transition.get(TransitionKey.OBSERVATION)
+        if isinstance(observation, dict):
+            axis_names = ["x", "y", "z", "wx", "wy", "wz"]
+            obs_pose = []
+            for axis_name in axis_names:
+                key = f"{name}.{axis_name}.ee_pos"
+                if key not in observation:
+                    obs_pose = []
+                    break
+                value = observation[key]
+                obs_pose.append(float(value.item()) if isinstance(value, torch.Tensor) else float(value))
+
+            if len(obs_pose) == 6:
+                return obs_pose
+
+        # 3. Ultimate Fallback: The static target configuration
         return list(frame.target)
 
     def _require_solver(self, name: str) -> Any:
