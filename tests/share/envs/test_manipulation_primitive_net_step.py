@@ -32,6 +32,17 @@ class StaticBoolTransition:
         return self.should_fire
 
 
+class SequencedTransition:
+    def __init__(self, outcomes):
+        self._outcomes = list(outcomes)
+
+    def evaluate(self, obs, info):
+        if self._outcomes:
+            fired, metadata = self._outcomes.pop(0)
+            return fired, metadata
+        return False, {}
+
+
 class RichTransition:
     def evaluate(self, obs, info):
         return True, {
@@ -140,10 +151,11 @@ def test_mp_net_reset_starts_from_start_primitive():
 
 def test_mp_net_reset_path_via_reset_primitives():
     reset_env = DummyEnv(obs={"obs": np.array([9.0])})
+    pick_env = DummyEnv(obs={"obs": np.array([3.0])})
     place_env = DummyEnv(obs={"obs": np.array([2.0])})
     net = _make_net(
-        envs={"reset": reset_env, "place": place_env},
-        transitions=[],
+        envs={"reset": reset_env, "pick": pick_env, "place": place_env},
+        transitions=[("reset", "pick", StaticBoolTransition(True))],
         active="place",
     )
     net.config.start_primitive = "pick"
@@ -152,8 +164,34 @@ def test_mp_net_reset_path_via_reset_primitives():
     obs, info = net.reset()
 
     assert np.allclose(obs["obs"], np.array([9.0]))
-    assert net._active_primitive == "reset"
-    assert info["active_primitive"] == "reset"
+    assert net._active_primitive == "pick"
+    assert info["active_primitive"] == "pick"
     assert info["reset_reason"] == "reset_primitive_fallback"
+    assert info["reset_transition_steps"] == 1
     assert len(reset_env.reset_calls) == 1
+    assert len(pick_env.reset_calls) == 1
     assert len(place_env.reset_calls) == 1
+
+
+def test_mp_net_reset_path_steps_intermediate_primitives_until_start():
+    reset_env = DummyEnv(obs={"obs": np.array([9.0])})
+    stage_env = DummyEnv(obs={"obs": np.array([7.0])})
+    start_env = DummyEnv(obs={"obs": np.array([5.0])})
+
+    net = _make_net(
+        envs={"reset": reset_env, "stage": stage_env, "start": start_env},
+        transitions=[
+            ("reset", "stage", SequencedTransition([(True, {})])),
+            ("stage", "start", SequencedTransition([(True, {})])),
+        ],
+        active="stage",
+    )
+    net.config.start_primitive = "start"
+    net.config.reset_primitives = ["reset"]
+
+    _, info = net.reset()
+
+    assert net._active_primitive == "start"
+    assert info["active_primitive"] == "start"
+    assert info["reset_transition_steps"] == 2
+    assert stage_env.last_action is not None
