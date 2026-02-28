@@ -6,6 +6,8 @@ from share.envs.manipulation_primitive.processor_steps import MatchTeleopToPolic
 from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, PolicyMode, TaskFrame
 from tests.share.envs.mock_pipeline_entities import (
     MockAbsoluteJointTeleoperator,
+    MockComplexKinematicsSolver,
+    MockComplexObservationRobot,
     MockDeltaTeleoperator,
     MockKinematicsSolver,
 )
@@ -106,3 +108,39 @@ def test_absolute_joint_teleop_uses_fk_and_relative_modes():
 
     assert torch.allclose(first_val, torch.tensor([0.0]))
     assert torch.allclose(second_val, torch.tensor([0.5]))
+
+
+def test_match_step_uses_complex_fk_for_relative_kinematic_channels():
+    robot = MockComplexObservationRobot()
+    obs = robot.get_observation(prefix="arm")
+
+    step = MatchTeleopToPolicyActionProcessorStep(
+        teleoperators={"arm": MockAbsoluteJointTeleoperator()},
+        task_frame={
+            "arm": TaskFrame(
+                policy_mode=[PolicyMode.RELATIVE, PolicyMode.RELATIVE, None, None, None, None],
+                control_mode=[ControlMode.POS] * 6,
+                target=[0.0] * 6,
+                space=ControlSpace.TASK,
+            )
+        },
+        kinematics={"arm": MockComplexKinematicsSolver()},
+    )
+
+    joint_action_1 = {"joint_1.pos": obs["arm.joint_1.pos"], "joint_2.pos": obs["arm.joint_2.pos"], "joint_3.pos": obs["arm.joint_3.pos"]}
+    out1 = step(_transition_with_teleop_action("arm", joint_action_1))
+    val1 = out1[TransitionKey.COMPLEMENTARY_DATA][TELEOP_ACTION_KEY]["arm"]
+    assert torch.allclose(val1, torch.tensor([0.0, 0.0]))
+
+    joint_action_2 = {
+        "joint_1.pos": joint_action_1["joint_1.pos"] + 0.1,
+        "joint_2.pos": joint_action_1["joint_2.pos"] - 0.05,
+        "joint_3.pos": joint_action_1["joint_3.pos"] + 0.02,
+    }
+    out2 = step(_transition_with_teleop_action("arm", joint_action_2))
+    val2 = out2[TransitionKey.COMPLEMENTARY_DATA][TELEOP_ACTION_KEY]["arm"]
+
+    # Expected deltas under MockComplexKinematicsSolver.forward_kinematics.
+    expected_dx = 0.5 * 0.1 + 0.2 * (-0.05) - 0.1 * 0.02
+    expected_dy = -0.3 * 0.1 + 0.4 * (-0.05) + 0.2 * 0.02
+    assert torch.allclose(val2, torch.tensor([expected_dx, expected_dy], dtype=torch.float32), atol=1e-6)

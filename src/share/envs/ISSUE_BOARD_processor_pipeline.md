@@ -318,3 +318,136 @@ Upcoming processor-step tests require a deterministic and invertible kinematics 
 - Unit tests green for validation + manifold projections + conversion steps.
 - One end-to-end smoke test green.
 - Documentation and config naming aligned.
+
+## EPIC G — Missing Env Processor Implementations (Manipulation Primitive)
+
+### Gap Snapshot
+The current manipulation-primitive pipeline references several processor steps in `config_manipulation_primitive.py` that are not yet implemented in `src/share/envs/manipulation_primitive` and/or not wired through explicit imports. This epic tracks closing that gap end-to-end:
+- `JointsToEEObservation`
+- `RelativeFrameObservationProcessor`
+- `RelativeFrameActionProcessor`
+- `RobotActionToPolicyActionProcessorStep`
+- `VanillaObservationProcessorStep` wiring consistency
+
+---
+
+### ENV-701: Implement `JointsToEEObservation` for manipulation-primitive env pipeline
+**Priority:** P0  
+**Status:** Todo  
+**Owner:** Unassigned
+
+#### Scope
+- Add a processor step that reads robot joint observations and appends `{robot}.{x,y,z,wx,wy,wz}.ee_pos`.
+- Support multi-robot dict input and configured joint name ordering.
+- Use deterministic FK from configured kinematics solver.
+
+#### Acceptance Criteria
+- For a fixed joint vector, generated EE observation is deterministic.
+- Missing joint keys fail with descriptive errors.
+- Works with batched and non-batched transition dicts.
+
+#### Tests
+- `test_joints_to_ee_observation_adds_expected_ee_pose_keys`
+- `test_joints_to_ee_observation_raises_on_missing_joint_key`
+
+---
+
+### ENV-702: Implement `RelativeFrameObservationProcessor`
+**Priority:** P0  
+**Status:** Todo  
+**Owner:** Unassigned
+
+#### Scope
+- Convert absolute EE observations into frame-relative values using a per-episode reference frame.
+- Reset reference frame on processor reset.
+- Support per-robot enable flags.
+
+#### Acceptance Criteria
+- First frame defines reference origin.
+- Subsequent frames produce consistent relative offsets for translational + rotational channels.
+- Disabled robots pass through unchanged.
+
+#### Tests
+- `test_relative_frame_observation_processor_tracks_per_robot_reference`
+- `test_relative_frame_observation_processor_reset_reinitializes_reference`
+
+---
+
+### ENV-703: Implement `RelativeFrameActionProcessor`
+**Priority:** P0  
+**Status:** Todo  
+**Owner:** Unassigned
+
+#### Scope
+- Transform action targets between world-frame and task-relative frame as configured.
+- Ensure compatibility with intervention-generated full task-frame actions.
+- Preserve non-EE and gripper channels.
+
+#### Acceptance Criteria
+- Relative-frame transform is invertible for deterministic fixtures.
+- Axis ordering remains consistent with task-frame definition.
+
+#### Tests
+- `test_relative_frame_action_processor_transforms_kinematic_axes_only`
+- `test_relative_frame_action_processor_is_noop_when_disabled`
+
+---
+
+### ENV-704: Implement/confirm `RobotActionToPolicyActionProcessorStep` bridge wiring
+**Priority:** P0  
+**Status:** Todo  
+**Owner:** Unassigned
+
+#### Scope
+- Ensure final action dict -> tensor conversion in manipulation primitive uses stable motor ordering.
+- Validate mismatch handling for missing/extra keys.
+- Ensure compatibility with `ToJointActionProcessorStep` outputs.
+
+#### Acceptance Criteria
+- Output tensor shape/order deterministic across runs.
+- Errors identify robot and key mismatch clearly.
+
+#### Tests
+- `test_robot_action_to_policy_action_processor_stable_joint_order`
+- `test_robot_action_to_policy_action_processor_missing_joint_key_error`
+
+---
+
+### ENV-705: Resolve `VanillaObservationProcessorStep` source-of-truth + import contract
+**Priority:** P1  
+**Status:** Todo  
+**Owner:** Unassigned
+
+#### Scope
+- Decide canonical implementation path (existing lerobot processor vs share wrapper).
+- Remove ambiguous/implicit imports in manipulation-primitive config.
+- Add explicit typing and transition contracts.
+
+#### Acceptance Criteria
+- `ManipulationPrimitiveConfig.make_env_processor` constructs without unresolved processor symbols.
+- Observation feature transform remains backward compatible.
+
+#### Tests
+- `test_make_env_processor_constructs_with_all_required_processors`
+- `test_vanilla_observation_processor_feature_contract_regression`
+
+---
+
+### ENV-706: End-to-end kinematic observation transformation regression suite
+**Priority:** P0  
+**Status:** Todo  
+**Owner:** Unassigned
+
+#### Scope
+- Add a richer mock robot fixture with joint, velocity, current, and EE channels.
+- Add deterministic complex FK/IK mock to validate transforms.
+- Cover both direct FK observation generation and downstream action integration consumers.
+
+#### Acceptance Criteria
+- Kinematic observation transformation tests run fully offline.
+- FK/IK round-trip checks remain numerically stable.
+
+#### Tests
+- `test_complex_mock_robot_observation_matches_complex_fk_mapping`
+- `test_match_step_uses_complex_fk_for_relative_kinematic_channels`
+- `test_to_joint_step_consumes_ee_observation_for_relative_integration`
