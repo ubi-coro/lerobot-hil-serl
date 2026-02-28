@@ -114,23 +114,44 @@ class TaskFrame:
             "space": int(self.space),
             "origin": self.origin,
             "target": self.target,
-            "policy_mode": [int(policy_mode) for policy_mode in self.policy_mode],
+            "policy_mode": [int(policy_mode) if policy_mode is not None else None for policy_mode in self.policy_mode],
             "control_mode": [int(control_mode) for control_mode in self.control_mode],
-            "min_pose": self.min_pose,
-            "max_pose": self.max_pose,
+            "min_target": self.min_pose,
+            "max_target": self.max_pose,
         }
 
     @classmethod
     def from_dict(cls, raw: dict) -> TaskFrame:
+        min_target = raw.get("min_target", raw.get("min_pose"))
+        max_target = raw.get("max_target", raw.get("max_pose"))
         return cls(
             space=ControlSpace(raw["space"]),
             origin=raw.get("origin"),
             target=list(raw["target"]),
-            policy_mode=[PolicyMode(item) for item in raw["policy_mode"]],
+            policy_mode=[PolicyMode(item) if item is not None else None for item in raw["policy_mode"]],
             control_mode=[ControlMode(item) for item in raw["control_mode"]],
-            min_pose=list(raw["min_pose"]),
-            max_pose=list(raw["max_pose"]),
+            min_pose=list(min_target) if min_target is not None else None,
+            max_pose=list(max_target) if max_target is not None else None,
         )
+
+    @property
+    def min_target(self) -> list[float] | None:
+        """Canonical alias used by processor/docs for lower task-frame bounds."""
+        return self.min_pose
+
+    @min_target.setter
+    def min_target(self, value: list[float] | None) -> None:
+        self.min_pose = value
+
+    @property
+    def max_target(self) -> list[float] | None:
+        """Canonical alias used by processor/docs for upper task-frame bounds."""
+        return self.max_pose
+
+    @max_target.setter
+    def max_target(self, value: list[float] | None) -> None:
+        self.max_pose = value
+
 
 @dataclass(slots=True)
 class PrimitiveGraphConfig:
