@@ -14,6 +14,8 @@ from ..manipulation_primitive.config_manipulation_primitive import ManipulationP
 
 @dataclass
 class ManipulationPrimitiveNetConfig(draccus.ChoiceRegistry):
+    """Serializable config for chaining manipulation primitives with transitions."""
+
     start_primitive: str
     primitives: dict[str, ManipulationPrimitiveConfig]
     transitions: list[tuple[str, str, MP_Transition]]
@@ -25,6 +27,7 @@ class ManipulationPrimitiveNetConfig(draccus.ChoiceRegistry):
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
 
     def __post_init__(self):
+        """Validate primitive roles and transition graph semantics for MP-Net."""
         # Handle multi robot configuration
         self.robot = self.robot if isinstance(self.robot, dict) else {DEFAULT_ROBOT_NAME: self.robot}
         self.teleop = self.teleop if isinstance(self.teleop, dict) else {DEFAULT_ROBOT_NAME: self.teleop}
@@ -36,7 +39,14 @@ class ManipulationPrimitiveNetConfig(draccus.ChoiceRegistry):
         if self.start_primitive not in primitive_names:
             raise ValueError(f"start_primitive '{self.start_primitive}' is not present in primitives.")
 
-        reset_primitive_set = set(self.reset_primitives)
+        metadata_reset_primitives = {
+            name
+            for name, primitive_cfg in self.primitives.items()
+            if bool(getattr(primitive_cfg, "is_reset_primitive", False))
+        }
+        reset_primitive_set = set(self.reset_primitives) | metadata_reset_primitives
+        self.reset_primitives = sorted(reset_primitive_set)
+
         unknown_reset_primitives = reset_primitive_set - primitive_names
         if unknown_reset_primitives:
             unknown = ", ".join(sorted(unknown_reset_primitives))
@@ -69,6 +79,12 @@ class ManipulationPrimitiveNetConfig(draccus.ChoiceRegistry):
                     f"Invalid edge: {source} -> {resolved_target}."
                 )
 
+            if bool(getattr(source_config, "is_reset_primitive", False)) and resolved_target not in primitive_names:
+                raise ValueError(
+                    "Reset primitive transition points to unknown primitive. "
+                    f"Invalid edge: {source} -> {resolved_target}."
+                )
+
         def _reachable_from(start: str) -> set[str]:
             visited = {start}
             frontier = [start]
@@ -82,6 +98,14 @@ class ManipulationPrimitiveNetConfig(draccus.ChoiceRegistry):
                     frontier.append(nxt)
 
             return visited
+
+        for reset_name in sorted(reset_primitive_set):
+            primitive_cfg = self.primitives[reset_name]
+            if not bool(getattr(primitive_cfg, "is_reset_primitive", False)):
+                raise ValueError(
+                    "reset_primitives entries must set is_reset_primitive=True. "
+                    f"Invalid primitive: '{reset_name}'."
+                )
 
         for primitive_name, primitive_cfg in self.primitives.items():
             is_terminal = bool(getattr(primitive_cfg, "is_terminal_primitive", False))

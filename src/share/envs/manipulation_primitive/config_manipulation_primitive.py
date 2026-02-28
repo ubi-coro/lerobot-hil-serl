@@ -138,9 +138,11 @@ class ManipulationPrimitiveProcessorConfig:
 
 @dataclass
 class ManipulationPrimitiveConfig(EnvConfig):
-    """Configuration for the HILSerlRobotEnv environment."""
+    """Configuration for one manipulation primitive in a primitive net."""
     task_frame: dict[str, TaskFrame] = field(default_factory=dict)
     processor: ManipulationPrimitiveProcessorConfig = field(default_factory=ManipulationPrimitiveProcessorConfig)
+    is_terminal_primitive: bool = False
+    is_reset_primitive: bool = False
 
     _kinematics_solver: dict = field(default_factory=dict)
     _joint_names: dict = field(default_factory=dict)
@@ -457,5 +459,4 @@ class ManipulationPrimitiveConfig(EnvConfig):
             if ft.type == FeatureType.VISUAL:
                 key = strip_prefix(key, PREFIXES_TO_STRIP)
                 self.features[f"{OBS_IMAGES}.{key}"] = PolicyFeature(type=FeatureType.VISUAL, shape=ft.shape)
-
 
