@@ -50,6 +50,8 @@ from share.utils.kinematics import get_kinematics
 
 @dataclass
 class ImagePreprocessingConfig:
+    """Camera crop/resize options applied inside the env processor."""
+
     crop_params_dict: dict[str, tuple[int, int, int, int]] | None = None  # cam_name -> (top, left, height, width)
     resize_size: tuple[int, int] | None = None
     filter_keys: list[str] | None = None
@@ -96,12 +98,16 @@ class GripperConfig:
 
 @dataclass
 class EventConfig:
+    """Mappings from teleop inputs to structured intervention events."""
+
     key_mapping: dict[TeleopEvents, dict] = field(default_factory=lambda: {})
     foot_switch_mapping: dict[tuple[TeleopEvents], dict] = field(default_factory=lambda: {})
 
 
 @dataclass
 class HookConfig:
+    """Optional processor timing hook configuration."""
+
     time_env_processor: bool = False
     time_action_processor: bool = False
     log_every: int = 10
@@ -109,6 +115,8 @@ class HookConfig:
 
 @dataclass
 class ManipulationPrimitiveProcessorConfig:
+    """Top-level processor settings shared across robots and per robot."""
+
     # for all arms
     control_time_s: float = 10.0
     fps: float = 10.0
@@ -133,6 +141,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
 
     @property
     def gym_kwargs(self) -> dict:
+        """Extra kwargs forwarded to gym environment creation."""
         return {}
 
     def make(
@@ -142,6 +151,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
         cameras: dict[str, Camera],
         device: str = "cpu"
     ):
+        """Build the env and both processing pipelines."""
         self.validate(robot_dict, teleop_dict)
         self.infer_features(robot_dict)
 
@@ -153,6 +163,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
         return env, env_processor, action_processor
 
     def make_action_processor(self, robot_dict, teleop_dict, device) -> DataProcessorPipeline:
+        """Create the action-side processing pipeline."""
         action_pipeline_steps = []
 
         # events
@@ -249,6 +260,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
         )
 
     def make_env_processor(self, device) -> DataProcessorPipeline:
+        """Create the observation/reward-side processing pipeline."""
         env_pipeline_steps = []
 
         # obs is dict with keys {robot_name}.{axis/joint}.{pos/vel/ee_pos/ee_vel/ee_wrench} | {OBS_IMAGES}{camera_name}
@@ -333,6 +345,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
         )
 
     def validate(self, robot_dict, teleop_dict):
+        """Validate modality compatibility and initialize kinematics state."""
         is_task_frame_robot = check_task_frame_robot(robot_dict)
         is_delta_teleoperator = check_delta_teleoperator(teleop_dict)
 
@@ -411,6 +424,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
         # if gripper.enable but the robot has no GRIPPER_KEY action feature, disable
 
     def infer_features(self, robot_dict):
+        """Infer policy-visible feature specs from configured processors."""
         # process features with respective pipeline
         # get initial obs features from robot_dict instead
         env_processor = self.make_env_processor(device="cpu")
@@ -431,6 +445,5 @@ class ManipulationPrimitiveConfig(EnvConfig):
             if ft.type == FeatureType.VISUAL:
                 key = strip_prefix(key, PREFIXES_TO_STRIP)
                 self.features[f"{OBS_IMAGES}.{key}"] = PolicyFeature(type=FeatureType.VISUAL, shape=ft.shape)
-
 
 
