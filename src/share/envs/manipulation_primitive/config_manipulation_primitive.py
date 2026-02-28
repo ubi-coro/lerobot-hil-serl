@@ -23,7 +23,7 @@ from lerobot.processor import (
     GripperPenaltyProcessorStep,
     ImageCropResizeProcessorStep,
     RewardClassifierProcessorStep,
-    TimeLimitProcessorStep, VanillaObservationProcessorStep
+    TimeLimitProcessorStep
 )
 from lerobot.processor.converters import identity_transition
 from lerobot.processor.hil_processor import (
@@ -307,19 +307,8 @@ class ManipulationPrimitiveConfig(EnvConfig):
         #)
 
         env_pipeline_steps.extend([
-            # builds OBS_STATE based on what we want to have in there
-            # if obs has no joint vel and we want it, compute numerically
-            # same for ee_vel
-            VanillaObservationProcessorStep(
-                device=device,
-                gripper_enable=self.processor.gripper.enable,
-                add_joint_position_to_observation=self.processor.observation.add_joint_position_to_observation,
-                add_joint_velocity_to_observation=self.processor.observation.add_joint_velocity_to_observation,
-                add_current_to_observation=self.processor.observation.add_current_to_observation,
-                add_ee_pos_to_observation=self.processor.observation.add_ee_pos_to_observation,
-                add_ee_velocity_to_observation=self.processor.observation.add_ee_velocity_to_observation,
-                add_ee_wrench_to_observation=self.processor.observation.add_ee_wrench_to_observation,
-            ),
+            # Normalize the multi-robot task-frame observation dict into LeRobot OBS_STATE / OBS_IMAGES.
+            self._make_vanilla_observation_processor(device=device),
             AddBatchDimensionProcessorStep(),
             DeviceProcessorStep(device=device)
         ])
@@ -347,6 +336,28 @@ class ManipulationPrimitiveConfig(EnvConfig):
         if isinstance(value, dict):
             return any(bool(v) for v in value.values())
         return bool(value)
+
+    def _make_vanilla_observation_processor(self, device: str):
+        """Build the canonical task-frame observation processor for manipulation primitives."""
+
+        def _to_robot_bool_map(value: bool | dict[str, bool]) -> dict[str, bool]:
+            if isinstance(value, dict):
+                return {name: bool(value.get(name, False)) for name in self.task_frame}
+            return {name: bool(value) for name in self.task_frame}
+
+        add_ee_pos = _to_robot_bool_map(self.processor.observation.add_ee_pos_to_observation)
+        ee_pos_mask = {
+            name: [1, 1, 1, 1, 1, 1] if add_ee_pos[name] else [0, 0, 0, 0, 0, 0]
+            for name in self.task_frame
+        }
+
+        return VanillaTFFProcessorStep(
+            device=device,
+            ee_pos_mask=ee_pos_mask,
+            use_gripper=_to_robot_bool_map(self.processor.gripper.enable),
+            add_ee_velocity_to_observation=_to_robot_bool_map(self.processor.observation.add_ee_velocity_to_observation),
+            add_ee_wrench_to_observation=_to_robot_bool_map(self.processor.observation.add_ee_wrench_to_observation),
+        )
 
     def validate(self, robot_dict, teleop_dict):
         """Validate modality compatibility and initialize kinematics state."""
