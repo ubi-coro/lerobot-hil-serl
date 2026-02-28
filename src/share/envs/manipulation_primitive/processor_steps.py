@@ -4,7 +4,9 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import torch
+from scipy.spatial.transform import Rotation
 
 from lerobot.configs.types import PipelineFeatureType, PolicyFeature
 from lerobot.processor.core import EnvTransition, TransitionKey
@@ -15,19 +17,21 @@ from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpa
 from share.envs.utils import check_delta_teleoperator
 
 
-def _euler_xyz_to_matrix(rx: float, ry: float, rz: float) -> list[list[float]]:
-    """Convert extrinsic XYZ Euler angles to a rotation matrix."""
+def _rotation_from_extrinsic_xyz(rx: float, ry: float, rz: float) -> Rotation:
+    """Build a rotation from extrinsic XYZ angles using explicit axis composition."""
 
-    cx, sx = math.cos(rx), math.sin(rx)
-    cy, sy = math.cos(ry), math.sin(ry)
-    cz, sz = math.cos(rz), math.sin(rz)
+    # Extrinsic XYZ composition applies X then Y then Z in the world frame.
+    # Rotation multiplication order in scipy is right-to-left application.
+    rot_x = Rotation.from_rotvec([rx, 0.0, 0.0])
+    rot_y = Rotation.from_rotvec([0.0, ry, 0.0])
+    rot_z = Rotation.from_rotvec([0.0, 0.0, rz])
+    return rot_z * rot_y * rot_x
 
-    # Extrinsic XYZ == Rz @ Ry @ Rx.
-    return [
-        [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
-        [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
-        [-sy, cy * sx, cy * cx],
-    ]
+
+def _euler_xyz_from_rotation(rotation: Rotation) -> list[float]:
+    """Convert a ``Rotation`` back to XYZ Euler angles in radians."""
+
+    return rotation.as_euler("xyz", degrees=False).tolist()
 
 
 @dataclass
@@ -145,20 +149,11 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
                 angle = rot[absolute_rot_axes[0] - 3]
                 values.extend([math.cos(angle), math.sin(angle)])
             elif len(absolute_rot_axes) == 2:
-                matrix = _euler_xyz_to_matrix(*rot)
-                values.extend([matrix[0][0], matrix[1][0], matrix[2][0]])
+                matrix = _rotation_from_extrinsic_xyz(*rot).as_matrix()
+                values.extend(matrix[:, 0].tolist())
             else:
-                matrix = _euler_xyz_to_matrix(*rot)
-                values.extend(
-                    [
-                        matrix[0][0],
-                        matrix[1][0],
-                        matrix[2][0],
-                        matrix[0][1],
-                        matrix[1][1],
-                        matrix[2][1],
-                    ]
-                )
+                matrix = _rotation_from_extrinsic_xyz(*rot).as_matrix()
+                values.extend(np.concatenate([matrix[:, 0], matrix[:, 1]]).tolist())
 
         return torch.tensor(values, dtype=torch.float32)
 
@@ -345,73 +340,60 @@ class InterventionActionProcessorStep(ProcessorStep):
         if len(absolute_rot_axes) == 2:
             if len(raw) < 3:
                 raise ValueError("S2 rotation representation requires 3 values")
-            x, y, z = raw[0], raw[1], raw[2]
-            norm = math.sqrt(x * x + y * y + z * z)
+            direction = np.asarray(raw[:3], dtype=float)
+            norm = np.linalg.norm(direction)
             if norm < 1e-8:
-                x, y, z = 1.0, 0.0, 0.0
-                norm = 1.0
-            x, y, z = x / norm, y / norm, z / norm
+                direction = np.array([1.0, 0.0, 0.0], dtype=float)
+            else:
+                direction = direction / norm
 
-            # First SO(3) column parameterization -> recover (ry, rz), leave rx at zero.
-            rot[1] = math.asin(max(-1.0, min(1.0, -z)))
-            rot[2] = math.atan2(y, x)
+            # Complete the first-axis direction into a full orthonormal frame, then
+            # decode through scipy Rotation so all matrix->Euler handling is consistent.
+            reference = np.array([0.0, 0.0, 1.0], dtype=float)
+            if abs(float(np.dot(reference, direction))) > 0.95:
+                reference = np.array([0.0, 1.0, 0.0], dtype=float)
+
+            col1 = direction
+            col2 = np.cross(reference, col1)
+            col2_norm = np.linalg.norm(col2)
+            if col2_norm < 1e-8:
+                col2 = np.array([0.0, 1.0, 0.0], dtype=float)
+            else:
+                col2 = col2 / col2_norm
+            col3 = np.cross(col1, col2)
+            matrix = np.column_stack([col1, col2, col3])
+            rx, ry, rz = Rotation.from_matrix(matrix).as_euler("xyz", degrees=False)
+            rot = [float(rx), float(ry), float(rz)]
             return rot, 3
 
         if len(absolute_rot_axes) == 3:
             if len(raw) < 6:
                 raise ValueError("SO(3) 6D representation requires 6 values")
             matrix = self._rotation_6d_to_matrix(raw[:6])
-            return self._matrix_to_euler_xyz(matrix), 6
+            euler = Rotation.from_matrix(matrix).as_euler("xyz", degrees=False)
+            return euler.tolist(), 6
 
         raise ValueError(f"Expected 1..3 absolute rotation axes, got {len(absolute_rot_axes)}")
 
     @staticmethod
     def _rotation_6d_to_matrix(raw: list[float]) -> list[list[float]]:
-        """Convert 6D continuous rotation representation into a 3x3 matrix."""
-        a1 = [raw[0], raw[1], raw[2]]
-        a2 = [raw[3], raw[4], raw[5]]
+        """Convert 6D continuous rotation representation into a numerically stable matrix."""
+        a1 = np.asarray(raw[:3], dtype=float)
+        a2 = np.asarray(raw[3:6], dtype=float)
 
-        def normalize(v: list[float]) -> list[float]:
-            n = math.sqrt(sum(x * x for x in v))
+        def normalize(v: np.ndarray, fallback: np.ndarray) -> np.ndarray:
+            n = float(np.linalg.norm(v))
             if n < 1e-8:
-                return [1.0, 0.0, 0.0]
-            return [x / n for x in v]
+                return fallback
+            return v / n
 
-        b1 = normalize(a1)
-        dot = sum(a2[i] * b1[i] for i in range(3))
-        u2 = [a2[i] - dot * b1[i] for i in range(3)]
-        if math.sqrt(sum(x * x for x in u2)) < 1e-8:
-            fallback = [0.0, 1.0, 0.0] if abs(b1[0]) > 0.9 else [1.0, 0.0, 0.0]
-            dot_fb = sum(fallback[i] * b1[i] for i in range(3))
-            u2 = [fallback[i] - dot_fb * b1[i] for i in range(3)]
-        b2 = normalize(u2)
-        b3 = [
-            b1[1] * b2[2] - b1[2] * b2[1],
-            b1[2] * b2[0] - b1[0] * b2[2],
-            b1[0] * b2[1] - b1[1] * b2[0],
-        ]
-
-        return [
-            [b1[0], b2[0], b3[0]],
-            [b1[1], b2[1], b3[1]],
-            [b1[2], b2[2], b3[2]],
-        ]
-
-    @staticmethod
-    def _matrix_to_euler_xyz(matrix: list[list[float]]) -> list[float]:
-        """Convert a rotation matrix into extrinsic XYZ Euler angles."""
-        sy = max(-1.0, min(1.0, -matrix[2][0]))
-        ry = math.asin(sy)
-        cy = math.cos(ry)
-
-        if abs(cy) > 1e-6:
-            rx = math.atan2(matrix[2][1], matrix[2][2])
-            rz = math.atan2(matrix[1][0], matrix[0][0])
-        else:
-            rx = 0.0
-            rz = math.atan2(-matrix[0][1], matrix[1][1])
-
-        return [rx, ry, rz]
+        b1 = normalize(a1, np.array([1.0, 0.0, 0.0], dtype=float))
+        u2 = a2 - float(np.dot(a2, b1)) * b1
+        fallback = np.array([0.0, 1.0, 0.0], dtype=float) if abs(float(b1[0])) > 0.9 else np.array([1.0, 0.0, 0.0], dtype=float)
+        b2 = normalize(u2, normalize(fallback - float(np.dot(fallback, b1)) * b1, np.array([0.0, 1.0, 0.0], dtype=float)))
+        b3 = np.cross(b1, b2)
+        matrix = np.column_stack([b1, b2, b3])
+        return matrix.tolist()
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
@@ -591,6 +573,7 @@ class JointsToEEObservation(ProcessorStep):
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        """Leave feature specs unchanged."""
         return features
 
     @staticmethod
@@ -619,6 +602,8 @@ class JointsToEEObservation(ProcessorStep):
 @dataclass
 @ProcessorStepRegistry.register("relative_frame_observation")
 class RelativeFrameObservationProcessor(ProcessorStep):
+    """Re-express absolute EE pose channels relative to a per-episode reference pose."""
+
     enable: bool | dict[str, bool] = True
 
     _reference_pose: dict[str, list[float]] = field(default_factory=dict, init=False)
@@ -640,8 +625,16 @@ class RelativeFrameObservationProcessor(ProcessorStep):
             if pose is None:
                 continue
             reference = self._reference_pose.setdefault(name, pose)
+
+            # Positions are simple vector offsets; orientations are composed on SO(3).
+            relative_position = [pose[i] - reference[i] for i in range(3)]
+            pose_rot = _rotation_from_extrinsic_xyz(*pose[3:6])
+            ref_rot = _rotation_from_extrinsic_xyz(*reference[3:6])
+            relative_orientation = _euler_xyz_from_rotation(pose_rot * ref_rot.inv())
+
+            relative_pose = relative_position + relative_orientation
             for axis, axis_name in enumerate(axis_names):
-                new_observation[f"{name}.{axis_name}.ee_pos"] = pose[axis] - reference[axis]
+                new_observation[f"{name}.{axis_name}.ee_pos"] = relative_pose[axis]
 
         new_transition[TransitionKey.OBSERVATION] = new_observation
         return new_transition
@@ -682,6 +675,8 @@ class RelativeFrameObservationProcessor(ProcessorStep):
 @dataclass
 @ProcessorStepRegistry.register("relative_frame_action")
 class RelativeFrameActionProcessor(ProcessorStep):
+    """Pass-through placeholder for relative action transforms (currently identity)."""
+
     enable: bool | dict[str, bool] = True
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
@@ -700,6 +695,7 @@ class RelativeFrameActionProcessor(ProcessorStep):
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        """Leave feature specs unchanged."""
         return features
 
     def _enabled(self, name: str) -> bool:
