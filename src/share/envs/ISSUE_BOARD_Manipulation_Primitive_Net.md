@@ -2,6 +2,9 @@
 
 This board translates the current implementation gaps and requested MP-Net capabilities into concrete, sequenced work items.
 
+## General
+Leave brief docstrings and keep them updated in all files you touch.
+
 ## Milestone Goal
 Ship a minimal but production-usable `ManipulationPrimitiveNet` that:
 - exposes a clean gym-like interface over chained primitives,
@@ -25,7 +28,7 @@ Ship a minimal but production-usable `ManipulationPrimitiveNet` that:
 
 ### MPN-101: Implement `ManipulationPrimitiveNet.step`
 **Priority:** P0  
-**Status:** Todo  
+**Status:** Done  
 **Owner:** Unassigned
 
 #### Problem
@@ -52,7 +55,7 @@ Ship a minimal but production-usable `ManipulationPrimitiveNet` that:
 
 ### MPN-102: Implement coherent reset semantics across primitive chains
 **Priority:** P0  
-**Status:** Todo  
+**Status:** Done  
 **Owner:** Unassigned
 
 #### Problem
@@ -79,7 +82,7 @@ Reset behavior is unclear when terminal primitives and reset primitives are intr
 
 ### MPN-201: Replace bare `MP_Transition` with typed transition dataclasses
 **Priority:** P0  
-**Status:** Todo  
+**Status:** Done  
 **Owner:** Unassigned
 
 #### Problem

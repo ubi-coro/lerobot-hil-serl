@@ -263,10 +263,13 @@ class InterventionActionProcessorStep(ProcessorStep):
         full_action: dict[str, torch.Tensor] = {}
         for name, frame in self.task_frame.items():
             encoded_action = source_actions.get(name)
+
+            # task frame is the backup
             if encoded_action is None:
                 full_action[name] = torch.tensor(frame.target, dtype=action.dtype, device=action.device)
                 continue
 
+            # project partial action on all task frame targets
             projected = self._project_learning_action(frame, encoded_action)
             full_action[name] = torch.tensor(projected, dtype=action.dtype, device=action.device)
 

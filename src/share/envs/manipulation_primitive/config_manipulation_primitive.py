@@ -15,7 +15,6 @@ from lerobot.envs.factory import RobotEnvInterface
 from lerobot.envs.robot_env.configuration_robot_env import RobotEnvConfig, is_union_with_dict
 from lerobot.envs.tf_env import TaskFrameEnv
 from lerobot.processor import (
-    VanillaObservationProcessorStep,
     AddBatchDimensionProcessorStep,
     AddTeleopActionAsComplimentaryDataStep,
     AddTeleopEventsAsInfoStep,
@@ -24,7 +23,7 @@ from lerobot.processor import (
     GripperPenaltyProcessorStep,
     ImageCropResizeProcessorStep,
     RewardClassifierProcessorStep,
-    TimeLimitProcessorStep
+    TimeLimitProcessorStep, VanillaObservationProcessorStep
 )
 from lerobot.processor.converters import identity_transition
 from lerobot.processor.hil_processor import (
@@ -217,11 +216,11 @@ class ManipulationPrimitiveConfig(EnvConfig):
                 task_frame=self.task_frame,
             ),
 
-            DiscretizeGripperProcessorStep(
-                gripper_idc=self.gripper_idc,
-                min_pos=self.processor.gripper.min_pos,
-                max_pos=self.processor.gripper.max_pos
-            ),
+            #DiscretizeGripperProcessorStep(
+            #    gripper_idc=self.gripper_idc,
+            #    min_pos=self.processor.gripper.min_pos,
+            #    max_pos=self.processor.gripper.max_pos
+            #),
         ])
 
         # action in ee frame instead of in world frame
@@ -300,14 +299,14 @@ class ManipulationPrimitiveConfig(EnvConfig):
                 )
             )
 
-        env_pipeline_steps.append(
-            GripperPenaltyProcessorStep(
-                max_gripper_pos=self.processor.gripper.max_pos,
-                penalty=self.processor.gripper.penalty,
-            )
-        )
+        #env_pipeline_steps.append(
+        #    GripperPenaltyProcessorStep(
+        #        max_gripper_pos=self.processor.gripper.max_pos,
+        #        penalty=self.processor.gripper.penalty,
+        #    )
+        #)
 
-        env_pipeline_steps.append(
+        env_pipeline_steps.extend([
             # builds OBS_STATE based on what we want to have in there
             # if obs has no joint vel and we want it, compute numerically
             # same for ee_vel
@@ -320,17 +319,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
                 add_ee_pos_to_observation=self.processor.observation.add_ee_pos_to_observation,
                 add_ee_velocity_to_observation=self.processor.observation.add_ee_velocity_to_observation,
                 add_ee_wrench_to_observation=self.processor.observation.add_ee_wrench_to_observation,
-            )
-        )
-
-        if self.processor.control_time_s:
-            env_pipeline_steps.append(
-                TimeLimitProcessorStep(
-                    max_episode_steps=int(self.processor.control_time_s * self.fps)
-                )
-            )
-
-        env_pipeline_steps.extend([
+            ),
             AddBatchDimensionProcessorStep(),
             DeviceProcessorStep(device=device)
         ])
