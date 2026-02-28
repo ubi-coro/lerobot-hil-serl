@@ -1,11 +1,17 @@
+from io import StringIO
 from types import SimpleNamespace
 
+import draccus
 import pytest
 
 from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import (
     ManipulationPrimitiveNetConfig,
 )
-from share.envs.manipulation_primitive_net.transitions import ObservationThresholdTransition
+from share.envs.manipulation_primitive_net.transitions import (
+    ObservationThresholdTransition,
+    RewardClassifierTransition,
+    TimeLimitTransition,
+)
 
 
 def _transition(*, next_primitive=None):
@@ -190,3 +196,88 @@ def test_mp_net_config_rejects_reset_list_entry_without_metadata_flag():
             ],
             reset_primitives=["reset"],
         )
+
+
+def test_mp_net_config_dict_of_typed_primitives():
+    config_dict = {
+        "start_primitive": "pick",
+        "primitives": {
+            "pick": {"type": "manipulation_primitive", "is_terminal_primitive": False},
+            "reset": {"type": "manipulation_primitive", "is_reset_primitive": True},
+        },
+        "transitions": [
+            [
+                "pick",
+                "reset",
+                {
+                    "type": "observation_threshold",
+                    "obs_key": "score",
+                    "threshold": 1.0,
+                    "next_primitive": "reset",
+                },
+            ],
+            [
+                "reset",
+                "pick",
+                {
+                    "type": "time_limit",
+                    "max_steps": 1,
+                    "next_primitive": "pick",
+                },
+            ],
+        ],
+    }
+
+    cfg = draccus.decode(ManipulationPrimitiveNetConfig, config_dict)
+
+    assert cfg.primitives["pick"].type == "manipulation_primitive"
+    assert cfg.primitives["reset"].is_reset_primitive is True
+
+
+def test_mp_net_config_dict_of_typed_transitions():
+    config_dict = {
+        "start_primitive": "pick",
+        "primitives": {
+            "pick": {"type": "manipulation_primitive"},
+            "reset": {"type": "manipulation_primitive", "is_reset_primitive": True},
+        },
+        "transitions": [
+            ["pick", "reset", {"type": "observation_threshold", "obs_key": "reward", "threshold": 1.5}],
+            ["reset", "pick", {"type": "time_limit", "max_steps": 3, "next_primitive": "pick"}],
+        ],
+    }
+
+    cfg = draccus.decode(ManipulationPrimitiveNetConfig, config_dict)
+
+    assert isinstance(cfg.transitions[0][2], ObservationThresholdTransition)
+    assert isinstance(cfg.transitions[1][2], TimeLimitTransition)
+
+
+def test_mp_net_config_roundtrip_serialization():
+    raw_yaml = """
+start_primitive: pick
+primitives:
+  pick:
+    type: manipulation_primitive
+  terminal:
+    type: manipulation_primitive
+    is_terminal_primitive: true
+  reset:
+    type: manipulation_primitive
+    is_reset_primitive: true
+transitions:
+  - [pick, terminal, {type: observation_threshold, obs_key: score, threshold: 0.9}]
+  - [terminal, reset, {type: reward_classifier, metric_key: success, threshold: 0.5, additional_reward: 2.0}]
+  - [reset, pick, {type: time_limit, max_steps: 1, next_primitive: pick}]
+"""
+
+    cfg = draccus.load(ManipulationPrimitiveNetConfig, StringIO(raw_yaml))
+    dumped_yaml = draccus.dump(cfg)
+    roundtrip_cfg = draccus.load(ManipulationPrimitiveNetConfig, StringIO(dumped_yaml))
+
+    assert isinstance(roundtrip_cfg.transitions[0][2], ObservationThresholdTransition)
+    assert isinstance(roundtrip_cfg.transitions[1][2], RewardClassifierTransition)
+    assert isinstance(roundtrip_cfg.transitions[2][2], TimeLimitTransition)
+    assert roundtrip_cfg.transitions[1][2].additional_reward == pytest.approx(2.0)
+    assert roundtrip_cfg.primitives["terminal"].is_terminal_primitive is True
+    assert roundtrip_cfg.primitives["reset"].is_reset_primitive is True

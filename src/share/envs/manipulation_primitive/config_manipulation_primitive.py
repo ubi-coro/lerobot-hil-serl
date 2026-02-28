@@ -136,6 +136,7 @@ class ManipulationPrimitiveProcessorConfig:
     kinematics: KinematicsConfig = field(default_factory=KinematicsConfig)
 
 
+@EnvConfig.register_subclass(name="manipulation_primitive")
 @dataclass
 class ManipulationPrimitiveConfig(EnvConfig):
     """Configuration for one manipulation primitive in a primitive net."""
@@ -459,4 +460,3 @@ class ManipulationPrimitiveConfig(EnvConfig):
             if ft.type == FeatureType.VISUAL:
                 key = strip_prefix(key, PREFIXES_TO_STRIP)
                 self.features[f"{OBS_IMAGES}.{key}"] = PolicyFeature(type=FeatureType.VISUAL, shape=ft.shape)
-
