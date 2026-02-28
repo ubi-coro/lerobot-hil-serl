@@ -15,6 +15,7 @@ from lerobot.envs.factory import RobotEnvInterface
 from lerobot.envs.robot_env.configuration_robot_env import RobotEnvConfig, is_union_with_dict
 from lerobot.envs.tf_env import TaskFrameEnv
 from lerobot.processor import (
+    VanillaObservationProcessorStep,
     AddBatchDimensionProcessorStep,
     AddTeleopActionAsComplimentaryDataStep,
     AddTeleopEventsAsInfoStep,
@@ -36,12 +37,17 @@ from lerobot.processor.tf_processor import (
     SixDofVelocityInterventionActionProcessorStep
 )
 from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
+from lerobot.datasets.pipeline_features import PREFIXES_TO_STRIP, strip_prefix
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 from share.envs.manipulation_primitive.env_manipulation_primitive import ManipulationPrimitive
 from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, TaskFrame
 from share.envs.manipulation_primitive.processor_steps import (
     InterventionActionProcessorStep,
+    JointsToEEObservation,
     MatchTeleopToPolicyActionProcessorStep,
+    RelativeFrameActionProcessor,
+    RelativeFrameObservationProcessor,
+    RobotActionToPolicyActionProcessorStep,
     ToJointActionProcessorStep,
 )
 from share.envs.utils import check_task_frame_robot, check_delta_teleoperator
@@ -205,7 +211,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
         ])
 
         # action in ee frame instead of in world frame
-        if any(self.processor.observation.relative_ee_pos):
+        if self._any_enabled(self.processor.observation.relative_ee_pos):
             action_pipeline_steps.append(
                 RelativeFrameActionProcessor(
                     enable=self.processor.observation.relative_ee_pos
@@ -263,7 +269,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
             )
 
         # action relative to starting pose
-        if any(self.processor.observation.relative_ee_pos):
+        if self._any_enabled(self.processor.observation.relative_ee_pos):
             env_pipeline_steps.append(
                 RelativeFrameObservationProcessor(
                     enable=self.processor.observation.relative_ee_pos
@@ -331,6 +337,12 @@ class ManipulationPrimitiveConfig(EnvConfig):
             steps=env_pipeline_steps, to_transition=identity_transition, to_output=identity_transition,
             before_step_hooks=env_before_hooks, after_step_hooks=env_after_hooks
         )
+
+    @staticmethod
+    def _any_enabled(value: bool | dict[str, bool]) -> bool:
+        if isinstance(value, dict):
+            return any(bool(v) for v in value.values())
+        return bool(value)
 
     def validate(self, robot_dict, teleop_dict):
         is_task_frame_robot = check_task_frame_robot(robot_dict)
