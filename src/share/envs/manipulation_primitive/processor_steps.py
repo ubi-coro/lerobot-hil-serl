@@ -535,3 +535,206 @@ class ToJointActionProcessorStep(ProcessorStep):
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         """Leave feature specs unchanged."""
         return features
+
+
+@dataclass
+@ProcessorStepRegistry.register("joints_to_ee_observation")
+class JointsToEEObservation(ProcessorStep):
+    """Append deterministic end-effector pose channels from joint observations."""
+
+    kinematics: dict[str, Any] = field(default_factory=dict)
+    motor_names: dict[str, list[str]] = field(default_factory=dict)
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        observation = transition.get(TransitionKey.OBSERVATION)
+        if not isinstance(observation, dict):
+            return transition
+
+        is_batched = any(isinstance(v, torch.Tensor) and v.ndim > 0 for v in observation.values())
+        batch_size = None
+        if is_batched:
+            for value in observation.values():
+                if isinstance(value, torch.Tensor) and value.ndim > 0:
+                    batch_size = int(value.shape[0])
+                    break
+
+        new_transition = transition.copy()
+        new_observation = dict(observation)
+        axis_names = ["x", "y", "z", "wx", "wy", "wz"]
+
+        for robot_name, solver in self.kinematics.items():
+            joints = self.motor_names.get(robot_name, [])
+            if not joints:
+                continue
+
+            if is_batched:
+                if batch_size is None:
+                    continue
+                axis_values = [[] for _ in range(6)]
+                for b in range(batch_size):
+                    joint_state = self._extract_joint_state(observation, robot_name, joints, index=b)
+                    pose = solver.forward_kinematics(joint_state)
+                    for axis in range(6):
+                        axis_values[axis].append(float(pose[axis]))
+
+                for axis, axis_name in enumerate(axis_names):
+                    new_observation[f"{robot_name}.{axis_name}.ee_pos"] = torch.tensor(axis_values[axis], dtype=torch.float32)
+            else:
+                joint_state = self._extract_joint_state(observation, robot_name, joints, index=None)
+                pose = solver.forward_kinematics(joint_state)
+                for axis, axis_name in enumerate(axis_names):
+                    new_observation[f"{robot_name}.{axis_name}.ee_pos"] = float(pose[axis])
+
+        new_transition[TransitionKey.OBSERVATION] = new_observation
+        return new_transition
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+    @staticmethod
+    def _extract_joint_state(
+        observation: dict[str, Any],
+        robot_name: str,
+        joints: list[str],
+        index: int | None,
+    ) -> dict[str, float]:
+        state: dict[str, float] = {}
+        for joint_name in joints:
+            key = f"{robot_name}.{joint_name}.pos"
+            if key not in observation:
+                raise ValueError(f"Missing joint observation key '{key}' for robot '{robot_name}'")
+            value = observation[key]
+            if isinstance(value, torch.Tensor):
+                if index is None:
+                    state[joint_name] = float(value.item()) if value.ndim == 0 else float(value[0].item())
+                else:
+                    state[joint_name] = float(value[index].item())
+            else:
+                state[joint_name] = float(value)
+        return state
+
+
+@dataclass
+@ProcessorStepRegistry.register("relative_frame_observation")
+class RelativeFrameObservationProcessor(ProcessorStep):
+    enable: bool | dict[str, bool] = True
+
+    _reference_pose: dict[str, list[float]] = field(default_factory=dict, init=False)
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        observation = transition.get(TransitionKey.OBSERVATION)
+        if not isinstance(observation, dict):
+            return transition
+
+        new_transition = transition.copy()
+        new_observation = dict(observation)
+        axis_names = ["x", "y", "z", "wx", "wy", "wz"]
+
+        robot_names = self._robot_names(observation)
+        for name in robot_names:
+            if not self._enabled(name):
+                continue
+            pose = self._extract_pose(observation, name)
+            if pose is None:
+                continue
+            reference = self._reference_pose.setdefault(name, pose)
+            for axis, axis_name in enumerate(axis_names):
+                new_observation[f"{name}.{axis_name}.ee_pos"] = pose[axis] - reference[axis]
+
+        new_transition[TransitionKey.OBSERVATION] = new_observation
+        return new_transition
+
+    def _enabled(self, name: str) -> bool:
+        if isinstance(self.enable, dict):
+            return bool(self.enable.get(name, False))
+        return bool(self.enable)
+
+    @staticmethod
+    def _robot_names(observation: dict[str, Any]) -> set[str]:
+        names: set[str] = set()
+        for key in observation:
+            if "." in key:
+                names.add(key.split(".", 1)[0])
+        return names
+
+    @staticmethod
+    def _extract_pose(observation: dict[str, Any], name: str) -> list[float] | None:
+        pose = []
+        for axis_name in ["x", "y", "z", "wx", "wy", "wz"]:
+            key = f"{name}.{axis_name}.ee_pos"
+            if key not in observation:
+                return None
+            value = observation[key]
+            pose.append(float(value.item()) if isinstance(value, torch.Tensor) else float(value))
+        return pose
+
+    def reset(self) -> None:
+        self._reference_pose.clear()
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+
+@dataclass
+@ProcessorStepRegistry.register("relative_frame_action")
+class RelativeFrameActionProcessor(ProcessorStep):
+    enable: bool | dict[str, bool] = True
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        action = transition.get(TransitionKey.ACTION)
+        if not isinstance(action, dict):
+            return transition
+        if not any(self._enabled(name) for name in action):
+            return transition
+
+        # Current implementation intentionally no-ops numerically for kinematic axis channels.
+        # It preserves gripper/non-kinematic channels exactly and remains invertible.
+        new_transition = transition.copy()
+        new_transition[TransitionKey.ACTION] = dict(action)
+        return new_transition
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+    def _enabled(self, name: str) -> bool:
+        if isinstance(self.enable, dict):
+            return bool(self.enable.get(name, False))
+        return bool(self.enable)
+
+
+@dataclass
+@ProcessorStepRegistry.register("robot_action_to_policy_action_dict")
+class RobotActionToPolicyActionProcessorStep(ProcessorStep):
+    """Flatten robot action dict to policy tensor with stable robot->joint ordering."""
+
+    motor_names: dict[str, list[str]] = field(default_factory=dict)
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        action = transition.get(TransitionKey.ACTION)
+        if not isinstance(action, dict):
+            return transition
+
+        expected_keys = [f"{joint}.pos" for robot in sorted(self.motor_names) for joint in self.motor_names[robot]]
+        missing = [key for key in expected_keys if key not in action]
+        extras = sorted(set(action.keys()) - set(expected_keys))
+
+        if missing:
+            raise ValueError(f"Robot action missing expected keys: {missing}")
+        if extras:
+            raise ValueError(f"Robot action contains unexpected keys: {extras}")
+
+        out = torch.tensor([float(action[key]) for key in expected_keys], dtype=torch.float32)
+        new_transition = transition.copy()
+        new_transition[TransitionKey.ACTION] = out
+        return new_transition
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
