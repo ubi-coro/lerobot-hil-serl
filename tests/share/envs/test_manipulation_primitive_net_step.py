@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import ManipulationPrimitiveNet
 
@@ -64,6 +65,7 @@ def _make_net(envs, transitions, active="pick", primitives=None):
     net.config = SimpleNamespace(transitions=transitions, start_primitive=active, reset_primitives=[], primitives=primitives)
     net._episode_step_count = 0
     net._last_reset_info = {}
+    net._needs_reset = False
     return net
 
 
@@ -87,6 +89,10 @@ def test_mp_net_step_executes_active_primitive():
     assert info["active_primitive"] == "pick"
     assert info["transition"]["from"] == "pick"
     assert info["transition"]["to"] == "pick"
+    assert info["primitive_done"] is False
+    assert info["primitive_terminated"] is False
+    assert info["primitive_truncated"] is False
+    assert info["segment_done"] is False
 
 
 def test_mp_net_step_switches_primitive_when_transition_fires():
@@ -106,6 +112,9 @@ def test_mp_net_step_switches_primitive_when_transition_fires():
     assert info["transition"]["from"] == "pick"
     assert info["transition"]["to"] == "place"
     assert info["transition"]["reason"] == "transition_fired"
+    assert info["segment_done"] is True
+    assert info["segment_from"] == "pick"
+    assert info["segment_to"] == "place"
 
 
 def test_mp_net_step_applies_transition_reward_and_done_flags():
@@ -126,6 +135,8 @@ def test_mp_net_step_applies_transition_reward_and_done_flags():
     assert info["transition"]["reason"] == "success"
     assert info["transition"]["transition_name"] == "success_edge"
     assert info["transition"]["transition_type"] == "threshold"
+    assert info["segment_done"] is True
+    assert info["segment_additional_reward"] == 1.75
 
 
 def test_mp_net_reset_starts_from_start_primitive():
@@ -253,3 +264,35 @@ def test_reset_primitive_routes_back_to_start_domain():
 
     assert net._active_primitive == "start"
     assert info["reset_transition_steps"] == 2
+
+
+def test_mp_net_step_marks_primitive_done_without_ending_episode():
+    pick_env = DummyEnv(obs={"obs": np.array([1.0])}, reward=0.1, terminated=True, info={"primitive_done_reason": "goal"})
+    net = _make_net(
+        envs={"pick": pick_env, "place": DummyEnv(obs={"obs": np.array([2.0])})},
+        transitions=[("pick", "place", StaticBoolTransition(False))],
+    )
+
+    _, _, terminated, truncated, info = net.step(np.array([0.0]))
+
+    assert not terminated
+    assert not truncated
+    assert info["primitive_done"] is True
+    assert info["primitive_terminated"] is True
+    assert info["primitive_truncated"] is False
+    assert info["primitive_done_reason"] == "goal"
+
+
+def test_mp_net_step_requires_reset_after_done():
+    pick_env = DummyEnv(obs={"obs": np.array([1.0])}, reward=0.5)
+    net = _make_net(
+        envs={"pick": pick_env, "place": DummyEnv(obs={"obs": np.array([2.0])})},
+        transitions=[("pick", "place", RichTransition())],
+    )
+    net._needs_reset = False
+
+    _, _, terminated, _, _ = net.step(np.array([0.0]))
+
+    assert terminated
+    with pytest.raises(RuntimeError, match="call reset"):
+        net.step(np.array([0.0]))

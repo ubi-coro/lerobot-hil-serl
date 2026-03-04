@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 
 class ManipulationPrimitiveNet(gym.Env):
-    """Gym wrapper that chains manipulation primitives using typed transitions."""
+    """Gym env that composes manipulation primitives with explicit transitions."""
 
     def __init__(self, config: "ManipulationPrimitiveNetConfig"):
 
@@ -34,6 +34,7 @@ class ManipulationPrimitiveNet(gym.Env):
         self._active_primitive = self.config.start_primitive
         self._last_reset_info: dict[str, Any] = {}
         self._episode_step_count = 0
+        self._needs_reset = False
 
     @staticmethod
     def _default_action_for_env(env: Any) -> Any:
@@ -104,6 +105,7 @@ class ManipulationPrimitiveNet(gym.Env):
         )
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+        """Reset all primitive envs and return an observation from the start primitive domain."""
         super().reset(seed=seed)
 
         options = options or {}
@@ -120,6 +122,7 @@ class ManipulationPrimitiveNet(gym.Env):
 
         self._active_primitive = next_active
         self._episode_step_count = 0
+        self._needs_reset = False
 
         reset_info: dict[str, Any] = {
             "active_primitive": self._active_primitive,
@@ -191,16 +194,30 @@ class ManipulationPrimitiveNet(gym.Env):
         raise TypeError(f"Unsupported transition evaluation output type: {type(result)!r}")
 
     def step(self, action: np.ndarray | torch.Tensor) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
-        """Step active primitive, then apply one matching transition if available."""
+        """Step active primitive once and evaluate at most one outgoing transition."""
+        if self._needs_reset:
+            raise RuntimeError("step() called after MP-Net episode finished; call reset() before stepping again.")
+
         active = self._active_primitive
         if active not in self._envs:
             raise KeyError(f"Unknown active primitive '{active}'.")
 
-        obs, reward, terminated, truncated, info = self._envs[active].step(action)
+        obs, reward, prim_terminated, prim_truncated, info = self._envs[active].step(action)
         self._episode_step_count += 1
 
-        info = dict(info)
+        info = dict(info or {})
         info.setdefault("episode_step_count", self._episode_step_count)
+        info["primitive_done"] = bool(prim_terminated or prim_truncated)
+        info["primitive_terminated"] = bool(prim_terminated)
+        info["primitive_truncated"] = bool(prim_truncated)
+        if "primitive_done_reason" not in info:
+            if prim_terminated:
+                info["primitive_done_reason"] = "primitive_terminated"
+            elif prim_truncated:
+                info["primitive_done_reason"] = "primitive_truncated"
+
+        terminated = False
+        truncated = False
 
         transition_info = {
             "from": active,
@@ -211,6 +228,7 @@ class ManipulationPrimitiveNet(gym.Env):
         }
 
         transition_fired = False
+        transition_additional_reward = 0.0
         for source, default_target, transition in self.config.transitions:
             if source != active:
                 continue
@@ -221,7 +239,8 @@ class ManipulationPrimitiveNet(gym.Env):
 
             transition_fired = True
             transition_target = transition_metadata.get("next_primitive", default_target)
-            reward += float(transition_metadata.get("additional_reward", 0.0))
+            transition_additional_reward = float(transition_metadata.get("additional_reward", 0.0))
+            reward += transition_additional_reward
             terminated = bool(terminated or transition_metadata.get("terminated", False))
             truncated = bool(truncated or transition_metadata.get("truncated", False))
 
@@ -248,6 +267,16 @@ class ManipulationPrimitiveNet(gym.Env):
 
         info["transition"] = transition_info
         info["active_primitive"] = self._active_primitive
+        info["segment_done"] = bool(transition_fired and transition_info["to"] != transition_info["from"])
+        if info["segment_done"]:
+            info["segment_from"] = transition_info["from"]
+            info["segment_to"] = transition_info["to"]
+            info["segment_reason"] = transition_info["reason"] or "transition_fired"
+            if transition_additional_reward != 0.0:
+                info["segment_additional_reward"] = transition_additional_reward
+
+        if terminated or truncated:
+            self._needs_reset = True
 
         return obs, reward, terminated, truncated, info
 
@@ -276,5 +305,4 @@ class ManipulationPrimitiveNet(gym.Env):
             cameras[name].connect()
 
         return robot_dict, teleop_dict, cameras
-
 
