@@ -135,6 +135,105 @@ Misconfigured transition graphs (dangling primitive names, unreachable terminals
 
 ## EPIC MPN-C — Primitive Lifecycle Semantics
 
+## MP-Net Reset + Done Semantics (API Contract)
+
+This project follows Gymnasium’s strict contract: if `step()` returns `terminated=True` or `truncated=True`, the caller MUST call `reset()` before calling `step()` again. We therefore separate **net-level episode termination** (Gym done flags) from **primitive-level segment boundaries** (reported via `info`).
+
+Terminology:
+- “MP-Net episode”: the Gymnasium episode of the `ManipulationPrimitiveNet` environment.
+- “Primitive segment”: the contiguous slice of steps during which one learnable primitive is active. Segments are the unit of storage for per-primitive datasets/policies.
+
+### Step signature and invariants
+
+`ManipulationPrimitiveNet.step(action) -> (obs, reward, terminated, truncated, info)`
+
+Hard invariants:
+1) `terminated/truncated` signal MP-Net episode end only (Gym semantics).
+   - If either is True, stepping again without `reset()` is invalid.
+2) Primitive transitions and primitive “segment done” MUST NOT set Gym done flags unless they intentionally end the MP-Net episode.
+3) Primitive segment boundaries are communicated via `info` only.
+
+### Transition evaluation contract
+
+Each configured transition is evaluated as:
+
+`t.evaluate(obs, info) -> TransitionOutcome`
+
+Where `TransitionOutcome` may contain:
+- `condition_fulfilled: bool`
+- `next_primitive: str | None`
+- `additional_reward: float`
+- `terminated: bool`  (net-level termination request)
+- `truncated: bool`   (net-level truncation request)
+- `reason: str | None`
+
+Important:
+- Transition `terminated/truncated` are **net-level** flags and are OR’ed into the MP-Net’s Gym done flags.
+- Transitions used only for routing between learnable primitives should keep these False.
+
+### Primitive env done handling
+
+The active primitive env’s own `step()` returns `(obs, reward, prim_terminated, prim_truncated, prim_info)`.
+
+Rules:
+- `prim_terminated/prim_truncated` do NOT directly imply MP-Net termination.
+- They are surfaced as *primitive-level* flags in `info`, and may optionally be mapped to MP-Net done flags by explicit transition logic (preferred) or by a deliberate policy.
+
+Required behavior in MP-Net:
+- Always expose primitive done flags in `info`:
+  - `info["primitive_done"] = prim_terminated or prim_truncated`
+  - `info["primitive_terminated"] = bool(prim_terminated)`
+  - `info["primitive_truncated"] = bool(prim_truncated)`
+  - `info["primitive_done_reason"]` (if available / derivable)
+- The MP-Net `terminated/truncated` must only become True when the MP-Net episode ends.
+
+### Primitive segment boundaries (data collection semantics)
+
+A primitive segment ends when the MP-Net switches from one learnable primitive to another learnable primitive, or when a learnable primitive decides to “cut” the segment (e.g. per-primitive time limit) while continuing the MP-Net episode.
+
+Segment boundary signals live in `info`:
+- `info["segment_done"] : bool`
+- `info["segment_from"] : str` (previous active primitive)
+- `info["segment_to"] : str` (new active primitive; may equal from if segment cut without switching)
+- `info["segment_reason"] : str` (e.g., `"transition_fired"`, `"primitive_time_limit"`, `"operator_abort"`)
+- Optional:
+  - `info["segment_additional_reward"]` (if you want to attribute shaping to segment boundary)
+
+Collector contract:
+- If `info["segment_done"]` is True, flush/save the segment buffer for `segment_from` under that primitive’s dataset/policy namespace.
+- If `terminated or truncated` is True, flush/save the final segment (if not already flushed) and then call `reset()`.
+
+### Terminal primitives (net-level episode end)
+
+A primitive can be marked `is_terminal_primitive=True`. Terminal semantics must be explicit and Gym-correct:
+
+- When the MP-Net is in a terminal primitive, the MP-Net episode is expected to end via either:
+  1) an explicit transition outcome setting `terminated=True` or `truncated=True`, or
+  2) a terminal-policy fallback rule (only if documented in code) that sets `terminated=True` when in a terminal primitive and no transition fires.
+
+Do NOT rely on external code to “keep stepping after done”. If the task should continue into reset primitives, that should be expressed as transitions without ending the MP-Net episode, or as a `reset()` path (see below).
+
+### Reset semantics
+
+`ManipulationPrimitiveNet.reset()` establishes a new MP-Net episode and returns `(obs, info)`.
+
+Rules:
+- `reset()` must clear MP-Net episode state (active primitive, episode counters, per-episode caches).
+- If configured, reset may start in a reset primitive and internally route back to `start_primitive` using the reset transition path, but this routing must occur inside `reset()` (or return once the start primitive is active). External callers should not need to call `step()` to complete reset.
+
+### Required `info` fields (minimum)
+
+Every MP-Net `step()` must include:
+- `info["active_primitive"] : str`
+- `info["transition"] : dict` with at least:
+  - `from`, `to`, `reason`, `transition_name`, `transition_type`
+- Primitive done flags:
+  - `primitive_done`, `primitive_terminated`, `primitive_truncated`
+- Segment boundary (when applicable):
+  - `segment_done` plus `segment_from/segment_to/segment_reason` when `segment_done=True`
+
+This contract is mandatory for any future refactor of `ManipulationPrimitiveNet.step`, transition types, and dataset/recording scripts.
+
 ### MPN-301: Formalize terminal and reset primitive roles
 **Priority:** P1  
 **Status:** Todo  
@@ -145,8 +244,8 @@ Terminal primitives and reset primitives are conceptually defined but not repres
 
 #### Scope
 - Add primitive metadata:
-  - `is_terminal_primitive: bool`
-  - `is_reset_primitive: bool`
+  - `is_terminal: bool`
+  - `is_reset: bool`
 - Decide and document whether terminal/reset outgoing transitions are:
   1. part of standard transition list, or
   2. represented as dedicated optional transition lists.
