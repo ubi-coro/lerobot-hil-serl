@@ -15,7 +15,7 @@ from ..manipulation_primitive.config_manipulation_primitive import ManipulationP
 @EnvConfig.register_subclass(name="manipulation_primitive_net")
 @dataclass
 class ManipulationPrimitiveNetConfig:
-    """Serializable config for chaining manipulation primitives with transitions."""
+    """Serializable config for MP-Net transition routing and reset/start semantics."""
 
     start_primitive: str
     primitives: dict[str, ManipulationPrimitiveConfig]

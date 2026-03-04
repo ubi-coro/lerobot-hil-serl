@@ -236,7 +236,7 @@ This contract is mandatory for any future refactor of `ManipulationPrimitiveNet.
 
 ### MPN-301: Formalize terminal and reset primitive roles
 **Priority:** P1  
-**Status:** Todo  
+**Status:** Partially Done  
 **Owner:** Unassigned
 
 #### Problem
@@ -264,7 +264,25 @@ Keep a **single transition list** for simplicity and serializability. Differenti
 
 ---
 
+### MPN-302: Enforce MP-Net step/reset API contract in runtime info
+**Priority:** P0  
+**Status:** Partially Done  
+**Owner:** Unassigned
+
+#### Progress update
+- Gym-level done semantics now require reset-before-next-step once the MP-Net episode ends.
+- Primitive-level done flags are surfaced in `info` without ending the MP-Net episode by default.
+- Segment boundary markers are emitted in `info` for primitive switches (`segment_done`, `segment_from`, `segment_to`, `segment_reason`).
+
+#### Remaining
+- Add explicit segment-cut support when segment ends without primitive switch.
+- Expand transition diagnostics with stricter validation for missing `next_primitive` on fired transitions.
+
+---
+
 ## EPIC MPN-D — Config & Serialization (Draccus-First)
+
+> Backlog note: Serialization-focused work is intentionally deprioritized for now while EPIC MPN-C runtime semantics are finalized.
 
 ### MPN-401: Make MP-Net fully serializable with typed primitive dictionaries
 **Priority:** P0  
