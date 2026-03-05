@@ -18,9 +18,9 @@ class ManipulationPrimitiveNetConfig:
     """Serializable config for MP-Net transition routing and reset/start semantics."""
 
     start_primitive: str
+    reset_primitive: str
     primitives: dict[str, ManipulationPrimitiveConfig]
     transitions: list[tuple[str, str, MP_Transition]]
-    reset_primitives: list[str] = field(default_factory=list)
 
     fps: int = 10
     robot: RobotConfig | dict[str, RobotConfig] | None = None
@@ -39,19 +39,6 @@ class ManipulationPrimitiveNetConfig:
         primitive_names = set(self.primitives)
         if self.start_primitive not in primitive_names:
             raise ValueError(f"start_primitive '{self.start_primitive}' is not present in primitives.")
-
-        metadata_reset_primitives = {
-            name
-            for name, primitive_cfg in self.primitives.items()
-            if bool(getattr(primitive_cfg, "is_reset_primitive", False))
-        }
-        reset_primitive_set = set(self.reset_primitives) | metadata_reset_primitives
-        self.reset_primitives = sorted(reset_primitive_set)
-
-        unknown_reset_primitives = reset_primitive_set - primitive_names
-        if unknown_reset_primitives:
-            unknown = ", ".join(sorted(unknown_reset_primitives))
-            raise ValueError(f"reset_primitives contain unknown primitive(s): {unknown}")
 
         outgoing_edges: dict[str, set[str]] = {name: set() for name in primitive_names}
 
@@ -74,12 +61,6 @@ class ManipulationPrimitiveNetConfig:
             outgoing_edges[source].add(resolved_target)
 
             source_config = self.primitives[source]
-            if getattr(source_config, "is_terminal_primitive", False) and resolved_target not in reset_primitive_set:
-                raise ValueError(
-                    "Terminal primitive transitions must target a reset primitive. "
-                    f"Invalid edge: {source} -> {resolved_target}."
-                )
-
             if bool(getattr(source_config, "is_reset_primitive", False)) and resolved_target not in primitive_names:
                 raise ValueError(
                     "Reset primitive transition points to unknown primitive. "
@@ -101,9 +82,8 @@ class ManipulationPrimitiveNetConfig:
             return visited
 
         for primitive_name, primitive_cfg in self.primitives.items():
-            is_terminal = bool(getattr(primitive_cfg, "is_terminal_primitive", False))
-            is_reset = primitive_name in reset_primitive_set
-            if not is_terminal and not is_reset and not outgoing_edges[primitive_name]:
+            is_terminal = bool(getattr(primitive_cfg, "is_terminal", False))
+            if not is_terminal and not outgoing_edges[primitive_name]:
                 raise ValueError(
                     "Detected non-terminal dead-end primitive without outgoing transitions: "
                     f"'{primitive_name}'. Mark it terminal or add an outgoing transition."
@@ -113,7 +93,7 @@ class ManipulationPrimitiveNetConfig:
         unreachable_terminals = sorted(
             name
             for name, primitive_cfg in self.primitives.items()
-            if bool(getattr(primitive_cfg, "is_terminal_primitive", False)) and name not in reachable_from_start
+            if bool(getattr(primitive_cfg, "is_terminal", False)) and name not in reachable_from_start
         )
         if unreachable_terminals:
             raise ValueError(
@@ -121,18 +101,6 @@ class ManipulationPrimitiveNetConfig:
                 f"'{self.start_primitive}': {', '.join(unreachable_terminals)}"
             )
 
-        if reset_primitive_set:
-            for reset_name in sorted(reset_primitive_set):
-                if self.start_primitive not in _reachable_from(reset_name):
-                    raise ValueError(
-                        "Reset primitive has no transition path to start_primitive: "
-                        f"'{reset_name}' -> '{self.start_primitive}'."
-                    )
-
-        for reset_name in sorted(reset_primitive_set):
-            primitive_cfg = self.primitives[reset_name]
-            if not bool(getattr(primitive_cfg, "is_reset_primitive", False)):
-                raise ValueError(
-                    "reset_primitives entries must set is_reset_primitive=True. "
-                    f"Invalid primitive: '{reset_name}'."
-                )
+    @property
+    def terminals(self):
+        return [k for k, v in self.primitives.items() if v.is_terminal]

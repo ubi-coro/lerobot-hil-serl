@@ -9,7 +9,6 @@ from draccus import ChoiceRegistry
 @dataclass
 class TransitionOutcome:
     condition_fulfilled: bool
-    next_primitive: str | None = None
     additional_reward: float = 0.0
     terminated: bool = False
     truncated: bool = False
@@ -23,7 +22,6 @@ class TransitionOutcome:
 
 @dataclass
 class MP_Transition(ChoiceRegistry):
-    next_primitive: str | None = None
     additional_reward: float = 0.0
     terminated: bool = False
     truncated: bool = False
@@ -38,11 +36,14 @@ class MP_Transition(ChoiceRegistry):
 
 def _resolve_value(source: dict[str, Any], key: str) -> Any:
     current: Any = source
+    if key in source:
+        return current[key]
+
     for piece in key.split("."):
-        if not isinstance(current, dict) or piece not in current:
-            raise KeyError(f"Key '{key}' not found in transition source.")
-        current = current[piece]
-    return current
+        if piece not in current:
+            return current[piece]
+
+    raise KeyError(f"Key '{key}' not found in transition source.")
 
 
 def _to_scalar(value: Any) -> float:
@@ -71,6 +72,18 @@ def _compare(lhs: float, rhs: float, operator: str) -> bool:
     raise ValueError(f"Unsupported comparison operator '{operator}'.")
 
 
+@MP_Transition.register_subclass("always")
+@dataclass
+class AlwaysTransition(MP_Transition):
+    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
+        return TransitionOutcome(
+            condition_fulfilled=True,
+            reason="always fire",
+            transition_name=self.__class__.__name__,
+            transition_type="always",
+        )
+
+
 @MP_Transition.register_subclass("observation_threshold")
 @dataclass
 class ObservationThresholdTransition(MP_Transition):
@@ -83,7 +96,6 @@ class ObservationThresholdTransition(MP_Transition):
         fired = _compare(value, self.threshold, self.operator)
         return TransitionOutcome(
             condition_fulfilled=fired,
-            next_primitive=self.next_primitive,
             additional_reward=self.additional_reward,
             terminated=self.terminated,
             truncated=self.truncated,
@@ -102,11 +114,10 @@ class TimeLimitTransition(MP_Transition):
     truncated: bool = True
 
     def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
-        current_steps = int(_to_scalar(_resolve_value(info, self.step_key)))
+        current_steps = int(_to_scalar(_resolve_value(info, "step")))
         fired = current_steps >= self.max_steps
         return TransitionOutcome(
             condition_fulfilled=fired,
-            next_primitive=self.next_primitive,
             additional_reward=self.additional_reward,
             terminated=self.terminated,
             truncated=self.truncated,
@@ -134,7 +145,6 @@ class RewardClassifierTransition(MP_Transition):
         fired = _compare(value, self.threshold, self.operator)
         return TransitionOutcome(
             condition_fulfilled=fired,
-            next_primitive=self.next_primitive,
             additional_reward=self.additional_reward,
             terminated=self.terminated,
             truncated=self.truncated,

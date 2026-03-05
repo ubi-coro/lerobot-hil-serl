@@ -918,16 +918,7 @@ class RobotActionToPolicyActionProcessorStep(ProcessorStep):
         if not isinstance(action, dict):
             return transition
 
-        expected_keys = [f"{joint}.pos" for robot in sorted(self.motor_names) for joint in self.motor_names[robot]]
-        missing = [key for key in expected_keys if key not in action]
-        extras = sorted(set(action.keys()) - set(expected_keys))
-
-        if missing:
-            raise ValueError(f"Robot action missing expected keys: {missing}")
-        if extras:
-            raise ValueError(f"Robot action contains unexpected keys: {extras}")
-
-        out = torch.tensor([float(action[key]) for key in expected_keys], dtype=torch.float32)
+        out = torch.concatenate([robot_action for robot_action in action.values()])
         new_transition = transition.copy()
         new_transition[TransitionKey.ACTION] = out
         return new_transition

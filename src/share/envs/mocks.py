@@ -31,6 +31,10 @@ class MockRobot(Robot):
         return {f"joint_{i+1}.pos": float for i in range(6)}
 
     @property
+    def _motors_ft(self):
+        return self.observation_features
+
+    @property
     def is_connected(self) -> bool: return True
     @property
     def is_calibrated(self) -> bool: return True

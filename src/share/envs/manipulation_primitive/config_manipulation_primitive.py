@@ -36,7 +36,7 @@ from lerobot.processor.tf_processor import (
     SixDofVelocityInterventionActionProcessorStep
 )
 from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
-from lerobot.datasets.pipeline_features import PREFIXES_TO_STRIP, strip_prefix
+from lerobot.datasets.pipeline_features import PREFIXES_TO_STRIP, strip_prefix, create_initial_features
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 from share.envs.manipulation_primitive.env_manipulation_primitive import ManipulationPrimitive
 from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, TaskFrame
@@ -142,8 +142,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
     """Configuration for one manipulation primitive in a primitive net."""
     task_frame: dict[str, TaskFrame] = field(default_factory=dict)
     processor: ManipulationPrimitiveProcessorConfig = field(default_factory=ManipulationPrimitiveProcessorConfig)
-    is_terminal_primitive: bool = False
-    is_reset_primitive: bool = False
+    is_terminal: bool = False
 
     _kinematics_solver: dict = field(default_factory=dict)
     _joint_names: dict = field(default_factory=dict)
@@ -162,7 +161,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
     ):
         """Build the env and both processing pipelines."""
         self.validate(robot_dict, teleop_dict)
-        self.infer_features(robot_dict)
+        self.infer_features(robot_dict, cameras)  # todo: fix initial_features
 
         display_cameras = self.processor.image_preprocessing is not None and self.processor.image_preprocessing.display_cameras
         env = ManipulationPrimitive(task_frame=self.task_frame, robot_dict=robot_dict, cameras=cameras, display_cameras=display_cameras)
@@ -268,7 +267,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
             before_step_hooks=action_before_hooks, after_step_hooks=action_after_hooks
         )
 
-    def make_env_processor(self, device) -> DataProcessorPipeline:
+    def make_env_processor(self, device: str = "cpu") -> DataProcessorPipeline:
         """Create the observation/reward-side processing pipeline."""
         env_pipeline_steps = []
 
@@ -428,12 +427,29 @@ class ManipulationPrimitiveConfig(EnvConfig):
 
         # if gripper.enable but the robot has no GRIPPER_KEY action feature, disable
 
-    def infer_features(self, robot_dict):
+    def infer_features(self, robot_dict, cameras):
         """Infer policy-visible feature specs from configured processors."""
         # process features with respective pipeline
         # get initial obs features from robot_dict instead
-        env_processor = self.make_env_processor(device="cpu")
-        pipeline_features = env_processor.transform_features(self.initial_features)
+        initial_features = {}
+        for cam_key, cam in cameras:
+            initial_features[f"{OBS_IMAGES}{cam_key}"] = PolicyFeature(type=FeatureType.VISUAL, shape=cam.async_read().shape)
+
+        for name in robot_dict:
+            for k, v in robot_dict[name].get_observation().items():
+                if isinstance(v, float):
+                    shape = (1, )
+                elif hasattr(v, "shape"):
+                    shape = v.shape
+                elif hasattr(v, "__iter__"):
+                    shape = (len(v), )
+                else:
+                    raise ValueError(f"Unknown type for observation {name}.{k}: {type(v)}")
+                initial_features[f"{name}.{k}"] = PolicyFeature(type=FeatureType.STATE, shape=shape)
+
+        initial_features = create_initial_features(observation=initial_features)
+        env_processor = self.make_env_processor()
+        pipeline_features = env_processor.transform_features(initial_features)
         obs_features = pipeline_features[PipelineFeatureType.OBSERVATION]
 
         action_dim = sum(frame.policy_action_dim for frame in self.task_frame.values())
@@ -443,9 +459,6 @@ class ManipulationPrimitiveConfig(EnvConfig):
             ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(action_dim,)),
             OBS_STATE: pipeline_features[PipelineFeatureType.OBSERVATION][OBS_STATE]
         }
-
-        # get action feature dim from task frames + gripper
-
         for key, ft in obs_features.items():
             if ft.type == FeatureType.VISUAL:
                 key = strip_prefix(key, PREFIXES_TO_STRIP)
