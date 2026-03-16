@@ -1,39 +1,27 @@
 from dataclasses import dataclass, field, fields
-from typing import Type
 
-from lerobot.model.kinematics import RobotKinematics
-
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.envs import EnvConfig
 
-from lerobot.cameras import CameraConfig, Camera
+from lerobot.cameras import Camera
 
-from lerobot.teleoperators import TeleoperatorConfig, Teleoperator, TeleopEvents
+from lerobot.teleoperators import Teleoperator, TeleopEvents
 
-from lerobot.robots import RobotConfig, Robot
+from lerobot.robots import Robot
 
-from lerobot.envs.factory import RobotEnvInterface
-from lerobot.envs.robot_env.configuration_robot_env import RobotEnvConfig, is_union_with_dict
-from lerobot.envs.tf_env import TaskFrameEnv
+from lerobot.envs.robot_env.configuration_robot_env import is_union_with_dict
 from lerobot.processor import (
     AddBatchDimensionProcessorStep,
     AddTeleopActionAsComplimentaryDataStep,
     AddTeleopEventsAsInfoStep,
     DataProcessorPipeline,
     DeviceProcessorStep,
-    GripperPenaltyProcessorStep,
     ImageCropResizeProcessorStep,
-    RewardClassifierProcessorStep,
-    TimeLimitProcessorStep
 )
 from lerobot.processor.converters import identity_transition
 from lerobot.processor.hil_processor import (
     AddFootswitchEventsAsInfoStep,
-    AddKeyboardEventsAsInfoStep,
-    DiscretizeGripperProcessorStep
-)
-from lerobot.processor.tf_processor import (
-    VanillaTFFProcessorStep,
-    SixDofVelocityInterventionActionProcessorStep
+    AddKeyboardEventsAsInfoStep
 )
 from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
 from lerobot.datasets.pipeline_features import PREFIXES_TO_STRIP, strip_prefix, create_initial_features
@@ -140,8 +128,9 @@ class ManipulationPrimitiveProcessorConfig:
 @dataclass
 class ManipulationPrimitiveConfig(EnvConfig):
     """Configuration for one manipulation primitive in a primitive net."""
-    task_frame: dict[str, TaskFrame] = field(default_factory=dict)
+    task_frame: TaskFrame | dict[str, TaskFrame] = field(default_factory=TaskFrame)
     processor: ManipulationPrimitiveProcessorConfig = field(default_factory=ManipulationPrimitiveProcessorConfig)
+    policy: PreTrainedConfig | None = None
     is_terminal: bool = False
 
     _kinematics_solver: dict = field(default_factory=dict)
@@ -151,6 +140,17 @@ class ManipulationPrimitiveConfig(EnvConfig):
     def gym_kwargs(self) -> dict:
         """Extra kwargs forwarded to gym environment creation."""
         return {}
+
+    @property
+    def is_adaptive(self) -> bool:
+        return any([tf.policy_action_dim > 0 for tf in self.task_frame.values()])
+
+    @property
+    def num_cameras(self) -> int:
+        if self.features is None:
+            return 0
+        else:
+            return len([ft for ft in self.features.values() if ft.type == FeatureType.VISUAL])
 
     def make(
         self,
@@ -342,16 +342,17 @@ class ManipulationPrimitiveConfig(EnvConfig):
             before_step_hooks=env_before_hooks, after_step_hooks=env_after_hooks
         )
 
-    @staticmethod
-    def _any_enabled(value: bool | dict[str, bool]) -> bool:
-        if isinstance(value, dict):
-            return any(bool(v) for v in value.values())
-        return bool(value)
-
     def validate(self, robot_dict, teleop_dict):
         """Validate modality compatibility and initialize kinematics state."""
+
         is_task_frame_robot = check_task_frame_robot(robot_dict)
         is_delta_teleoperator = check_delta_teleoperator(teleop_dict)
+
+        # check if we need a policy
+        if not isinstance(self.task_frame, dict):
+            self.task_frame = {name: self.task_frame for name in robot_dict}
+        if self.is_adaptive and self.policy is None:
+            print(f"Primitive {self.type} has adaptive axes but no policy config")
 
         # go through each processor and check if we need to turn scalar configs into configs for each robot
         for attr in ["observation", "gripper", "kinematics"]:
@@ -463,3 +464,9 @@ class ManipulationPrimitiveConfig(EnvConfig):
             if ft.type == FeatureType.VISUAL:
                 key = strip_prefix(key, PREFIXES_TO_STRIP)
                 self.features[f"{OBS_IMAGES}.{key}"] = PolicyFeature(type=FeatureType.VISUAL, shape=ft.shape)
+
+    @staticmethod
+    def _any_enabled(value: bool | dict[str, bool]) -> bool:
+        if isinstance(value, dict):
+            return any(bool(v) for v in value.values())
+        return bool(value)

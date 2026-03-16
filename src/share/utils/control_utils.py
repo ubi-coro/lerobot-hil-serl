@@ -2,6 +2,8 @@ import logging
 import time
 from typing import Sequence, Tuple
 
+from share.envs.manipulation_primitive.config_manipulation_primitive import ManipulationPrimitiveConfig
+
 
 def make_step_timing_hooks(
     pipeline_steps: Sequence["ProcessorStep"],
@@ -71,3 +73,34 @@ def make_step_timing_hooks(
                 _emit()
 
     return [before_hook], [after_hook]
+
+
+class MPNetStepCounter:
+    def __init__(self, primitives: dict[str, ManipulationPrimitiveConfig]):
+        # initialize per-primitive step budgets and counters
+        self._budget: dict[str, int] = {}
+        self._count: dict[str, int] = {}
+        self._last_finish_count: dict[str, int] = {}
+        for name, p in primitives.items():
+            self._last_finish_count[name] = 0
+            self._count[name] = 0
+
+    def __getitem__(self, item):
+        return self._count[item]
+
+    def increment(self, name: str, n: int = 1):
+        """Call this every time the given primitive takes n interaction steps."""
+        if name in self._count:
+            self._count[name] += n
+
+    def finish_episode(self, name: str):
+        """True if this primitive is non-adaptive or has reached its online_steps."""
+        if name in self._count:
+            self._last_finish_count[name] = self._count[name]
+
+    def episode_length(self, name: str) -> int:
+        return self._count.get(name, 0) - self._last_finish_count.get(name, 0)
+
+    @property
+    def global_step(self):
+        return sum(self._count.values())

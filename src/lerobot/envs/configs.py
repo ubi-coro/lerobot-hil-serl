@@ -555,21 +555,4 @@ class HILSerlProcessorConfig:
     task_frame: TaskFrameConfig = TaskFrameConfig()
 
 
-@EnvConfig.register_subclass(name="gym_manipulator")
-@dataclass
-class HILSerlRobotEnvConfig(EnvConfig):
-    """Configuration for the HILSerlRobotEnv environment."""
-
-    robot: RobotConfig | None = None
-    teleop: TeleoperatorConfig | None = None
-    processor: HILSerlProcessorConfig = field(default_factory=HILSerlProcessorConfig)
-
-    name: str = "real_robot"
-
-    @property
-    def gym_kwargs(self) -> dict:
-        return {}
-
-
-
 

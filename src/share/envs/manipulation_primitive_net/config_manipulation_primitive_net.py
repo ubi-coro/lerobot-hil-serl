@@ -1,12 +1,17 @@
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
 
 import draccus
 
+from lerobot.configs import parser
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.envs import EnvConfig
 from lerobot.cameras import CameraConfig
+from lerobot.policies.factory import make_policy
 from lerobot.teleoperators import TeleoperatorConfig
 from lerobot.robots import RobotConfig
-from lerobot.utils.constants import DEFAULT_ROBOT_NAME
+from lerobot.utils.constants import DEFAULT_ROBOT_NAME, CHECKPOINTS_DIR, LAST_CHECKPOINT_LINK
 
 from .transitions import MP_Transition
 from ..manipulation_primitive.config_manipulation_primitive import ManipulationPrimitiveConfig
@@ -100,6 +105,7 @@ class ManipulationPrimitiveNetConfig:
                 "Terminal primitive(s) are unreachable from start_primitive "
                 f"'{self.start_primitive}': {', '.join(unreachable_terminals)}"
             )
+
 
     @property
     def terminals(self):
