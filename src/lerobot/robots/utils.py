@@ -56,14 +56,22 @@ def get_robot_cls_from_config(config: RobotConfig) -> Type[Robot]:
         from .hope_jr import HopeJrArm
 
         return HopeJrArm
-    elif config.type == "bi_so100_follower":
-        from .bi_so100_follower import BiSO100Follower
+    elif config.type == "bi_so_follower":
+        from .bi_so_follower import BiSOFollower
 
-        return BiSO100Follower
+        return BiSOFollower
     elif config.type == "reachy2":
         from .reachy2 import Reachy2Robot
 
         return Reachy2Robot
+    elif config.type == "openarm_follower":
+        from .openarm_follower import OpenArmFollower
+
+        return OpenArmFollower
+    elif config.type == "bi_openarm_follower":
+        from .bi_openarm_follower import BiOpenArmFollower
+
+        return BiOpenArmFollower
     elif config.type == "viperx":
         from .viperx import ViperX
 

@@ -31,12 +31,12 @@ class TaskFrameEnv(RobotEnvInterface):
 
         self.task_frame = self.processor.task_frame.command
         self.control_mask = {name: np.asarray(msk).astype(bool) for name, msk in self.processor.task_frame.control_mask.items()}
-        self.use_gripper = self.processor.gripper.use_gripper
+        self.use_gripper = self.processor.gripper.enable
         self.reset_pose = self.processor.reset.fixed_reset_joint_positions
         self.reset_time_s = self.processor.reset.reset_time_s
         self.display_cameras = self.processor.display_cameras
 
-        assert all([self.robot_dict[name].config.use_gripper or not self.use_gripper[name] for name in self.robot_dict]), "To use a gripper, the robot must have one!"
+        assert all([self.robot_dict[name].config.enable or not self.use_gripper[name] for name in self.robot_dict]), "To use a gripper, the robot must have one!"
 
         # build reset task frame commands
         self.reset_task_frame: dict[str, TaskFrameCommand | None] = {}
@@ -76,7 +76,7 @@ class TaskFrameEnv(RobotEnvInterface):
     def get_features_from_cfg(cfg: 'TFRobotEnvConfig'):
         # action features
         masks = cfg.processor.task_frame.control_mask
-        gripper = cfg.processor.gripper.use_gripper
+        gripper = cfg.processor.gripper.enable
         action_dim = sum([sum(m) for m in masks.values()]) + sum(gripper.values())
         action_ft = {ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(action_dim,))}
 
@@ -91,7 +91,7 @@ class TaskFrameEnv(RobotEnvInterface):
             for i, joint_name in enumerate(TF_UR.joint_names):
                 obs_ft[f"{name}.{joint_name}.q_pos"] = PolicyFeature(type=FeatureType.STATE, shape=(1,))
 
-            if cfg.processor.gripper.use_gripper[name]:
+            if cfg.processor.gripper.enable[name]:
                 obs_ft[f"{name}.gripper.pos"] = PolicyFeature(type=FeatureType.STATE, shape=(1,))
 
         for cam_name, cam_cfg in cfg.cameras.items():

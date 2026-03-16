@@ -275,7 +275,7 @@ class MigrateInterventionActionProcessorStep(ProcessorStep):
             A dictionary containing the step's configuration attributes.
         """
         return {
-            "use_gripper": self.use_gripper,
+            "enable": self.use_gripper,
             "terminate_on_success": self.terminate_on_success,
         }
 

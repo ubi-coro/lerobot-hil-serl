@@ -16,6 +16,8 @@
 
 from dataclasses import dataclass, field
 
+from lerobot.cameras import CameraConfig
+
 from ..config import RobotConfig
 
 _GAINS: dict[str, dict[str, list[float]]] = {
@@ -60,3 +62,9 @@ class UnitreeG1Config(RobotConfig):
 
     # Socket config for ZMQ bridge
     robot_ip: str = "192.168.123.164"  # default G1 IP
+
+    # Cameras (ZMQ-based remote cameras)
+    cameras: dict[str, CameraConfig] = field(default_factory=dict)
+
+    # Compensates for gravity on the unitree's arms using the arm ik solver
+    gravity_compensation: bool = False

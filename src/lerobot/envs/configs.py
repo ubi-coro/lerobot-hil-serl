@@ -176,10 +176,93 @@ class PushtEnv(EnvConfig):
         }
 
 
+@dataclass
+class ImagePreprocessingConfig:
+    crop_params_dict: dict[str, tuple[int, int, int, int]] | None = None
+    resize_size: tuple[int, int] | None = None
+
+
+@dataclass
+class RewardClassifierConfig:
+    """Configuration for reward classification."""
+
+    pretrained_path: str | None = None
+    success_threshold: float = 0.5
+    success_reward: float = 1.0
+
+
+@dataclass
+class InverseKinematicsConfig:
+    """Configuration for inverse kinematics processing."""
+
+    urdf_path: str | None = None
+    target_frame_name: str | None = None
+    end_effector_bounds: dict[str, list[float]] | None = None
+    end_effector_step_sizes: dict[str, float] | None = None
+
+
+@dataclass
+class ObservationConfig:
+    """Configuration for observation processing."""
+
+    add_joint_velocity_to_observation: bool = False
+    add_current_to_observation: bool = False
+    display_cameras: bool = False
+
+
+@dataclass
+class GripperConfig:
+    """Configuration for gripper control and penalties."""
+
+    use_gripper: bool = True
+    gripper_penalty: float = 0.0
+
+
+@dataclass
+class ResetConfig:
+    """Configuration for environment reset behavior."""
+
+    fixed_reset_joint_positions: Any | None = None
+    reset_time_s: float = 5.0
+    control_time_s: float = 20.0
+    terminate_on_success: bool = True
+
+
+@dataclass
+class HILSerlProcessorConfig:
+    """Configuration for environment processing pipeline."""
+
+    control_mode: str = "gamepad"
+    observation: ObservationConfig | None = None
+    image_preprocessing: ImagePreprocessingConfig | None = None
+    gripper: GripperConfig | None = None
+    reset: ResetConfig | None = None
+    inverse_kinematics: InverseKinematicsConfig | None = None
+    reward_classifier: RewardClassifierConfig | None = None
+    max_gripper_pos: float | None = 100.0
+
+
+@EnvConfig.register_subclass(name="gym_manipulator")
+@dataclass
+class HILSerlRobotEnvConfig(EnvConfig):
+    """Configuration for the HILSerlRobotEnv environment."""
+
+    robot: RobotConfig | None = None
+    teleop: TeleoperatorConfig | None = None
+    processor: HILSerlProcessorConfig = field(default_factory=HILSerlProcessorConfig)
+
+    name: str = "real_robot"
+
+    @property
+    def gym_kwargs(self) -> dict:
+        return {}
+
+
 @EnvConfig.register_subclass("libero")
 @dataclass
 class LiberoEnv(EnvConfig):
     task: str = "libero_10"  # can also choose libero_spatial, libero_object, etc.
+    task_ids: list[int] | None = None
     fps: int = 30
     episode_length: int | None = None
     obs_type: str = "pixels_agent_pos"
@@ -258,10 +341,10 @@ class LiberoEnv(EnvConfig):
 
     @property
     def gym_kwargs(self) -> dict:
-        return {
-            "obs_type": self.obs_type,
-            "render_mode": self.render_mode,
-        }
+        kwargs: dict[str, Any] = {"obs_type": self.obs_type, "render_mode": self.render_mode}
+        if self.task_ids is not None:
+            kwargs["task_ids"] = self.task_ids
+        return kwargs
 
 
 @EnvConfig.register_subclass("metaworld")

@@ -27,13 +27,31 @@ from lerobot.cameras import opencv  # noqa: F401
 from lerobot.configs import parser
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.envs.configs import HILSerlRobotEnvConfig
+from lerobot.model.kinematics import RobotKinematics
 from lerobot.processor import (
+    AddBatchDimensionProcessorStep,
+    AddTeleopActionAsComplimentaryDataStep,
+    AddTeleopEventsAsInfoStep,
     DataProcessorPipeline,
+    DeviceProcessorStep,
     EnvTransition,
+    GripperPenaltyProcessorStep,
+    ImageCropResizeProcessorStep,
+    InterventionActionProcessorStep,
+    JointVelocityProcessorStep,
+    MapDeltaActionToRobotActionStep,
+    MapTensorToDeltaActionDictStep,
+    MotorCurrentProcessorStep,
+    Numpy2TorchActionProcessorStep,
+    RewardClassifierProcessorStep,
+    RobotActionToPolicyActionProcessorStep,
+    TimeLimitProcessorStep,
+    Torch2NumpyActionProcessorStep,
     TransitionKey,
-    create_transition, make_default_processors,
+    VanillaObservationProcessorStep,
+    create_transition,
 )
-from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
+from lerobot.processor.converters import identity_transition
 from lerobot.robots import (  # noqa: F401
     RobotConfig,
     make_robot_from_config,
@@ -58,6 +76,8 @@ from lerobot.teleoperators.utils import TeleopEvents
 from lerobot.utils.constants import ACTION, DONE, OBS_IMAGES, OBS_STATE, REWARD
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
+
+from .joint_observations_processor import JointVelocityProcessorStep, MotorCurrentProcessorStep
 
 logging.basicConfig(level=logging.INFO)
 
@@ -145,7 +165,7 @@ class RobotEnv(gym.Env):
 
         self._setup_spaces()
 
-    def _get_observation(self) -> dict[str, Any]:
+    def _get_observation(self) -> RobotObservation:
         """Get current robot observation including joint positions and camera images."""
         obs_dict = self.robot.get_observation()
         raw_joint_joint_position = {f"{name}.pos": obs_dict[f"{name}.pos"] for name in self._joint_names}
@@ -202,7 +222,7 @@ class RobotEnv(gym.Env):
 
     def reset(
         self, *, seed: int | None = None, options: dict[str, Any] | None = None
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    ) -> tuple[RobotObservation, dict[str, Any]]:
         """Reset environment to initial state.
 
         Args:
@@ -231,7 +251,7 @@ class RobotEnv(gym.Env):
         self._raw_joint_positions = {f"{key}.pos": obs[f"{key}.pos"] for key in self._joint_names}
         return obs, {TeleopEvents.IS_INTERVENTION: False}
 
-    def step(self, action) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+    def step(self, action) -> tuple[RobotObservation, float, bool, bool, dict[str, Any]]:
         """Execute one environment step with given action."""
         joint_targets_dict = {f"{key}.pos": action[i] for i, key in enumerate(self.robot.bus.motors.keys())}
 
@@ -393,7 +413,10 @@ def make_processors(
         if cfg.processor.observation.add_current_to_observation:
             env_pipeline_steps.append(MotorCurrentProcessorStep(robot=env.robot))
 
-    if kinematics_solver is not None:
+    add_ee_pose = (
+        cfg.processor.observation is not None and cfg.processor.observation.add_ee_pose_to_observation
+    )
+    if kinematics_solver is not None and add_ee_pose:
         env_pipeline_steps.append(
             ForwardKinematicsJointsToEEObservation(
                 kinematics=kinematics_solver,
@@ -416,7 +439,12 @@ def make_processors(
         )
 
     # Add gripper penalty processor if gripper config exists and enabled
-    if cfg.processor.gripper is not None and cfg.processor.gripper.use_gripper:
+    # Only add if max_gripper_pos is explicitly configured (required for normalization)
+    if (
+        cfg.processor.gripper is not None
+        and cfg.processor.gripper.use_gripper
+        and cfg.processor.max_gripper_pos is not None
+    ):
         env_pipeline_steps.append(
             GripperPenaltyProcessorStep(
                 penalty=cfg.processor.gripper.gripper_penalty,
@@ -739,7 +767,7 @@ def replay_trajectory(
 def main(cfg: GymManipulatorConfig) -> None:
     """Main entry point for gym manipulator script."""
     env, teleop_device = make_robot_env(cfg.env)
-    env_processor, action_processor = make_default_processors(env, teleop_device, cfg.env, cfg.device)
+    env_processor, action_processor = make_processors(env, teleop_device, cfg.env, cfg.device)
 
     print("Environment observation space:", env.observation_space)
     print("Environment action space:", env.action_space)

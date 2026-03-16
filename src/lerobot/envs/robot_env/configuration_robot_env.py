@@ -17,15 +17,14 @@ from lerobot.processor import (
     GripperPenaltyProcessorStep,
     ImageCropResizeProcessorStep,
     InterventionActionProcessorStep,
-    JointVelocityProcessorStep,
     MapDeltaActionToRobotActionStep,
     MapTensorToDeltaActionDictStep,
-    MotorCurrentProcessorStep,
     RewardClassifierProcessorStep,
     RobotActionToPolicyActionProcessorStep,
     TimeLimitProcessorStep,
-    VanillaObservationProcessorStep,
+    VanillaObservationProcessorStep
 )
+from lerobot.rl.joint_observations_processor import JointVelocityProcessorStep, MotorCurrentProcessorStep
 from lerobot.robots.so_follower.robot_kinematic_processor import (
     EEBoundsAndSafety,
     EEReferenceAndDelta,
