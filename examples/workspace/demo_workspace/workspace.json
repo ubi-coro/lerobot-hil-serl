@@ -1,0 +1,8 @@
+{
+  "created_at": "2026-03-18T00:00:00+00:00",
+  "current_project": "pick_and_place",
+  "current_task": "block_pick",
+  "name": "demo-mpnet-workspace",
+  "schema_version": 1,
+  "updated_at": "2026-03-18T00:00:00+00:00"
+}

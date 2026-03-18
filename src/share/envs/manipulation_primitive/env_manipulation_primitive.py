@@ -35,6 +35,8 @@ class ManipulationPrimitive(gymnasium.Env):
         self._action_length: dict[str, int] = {}
         self._is_task_frame_robot: dict[str, bool] = check_task_frame_robot(robot_dict)
         for name, robot in self.robot_dict.items():
+            if self._is_task_frame_robot[name]:
+                robot.set_task_frame(self.task_frame[name])
             self._motor_keys.update([f"{name}.{key}" for key in robot._motors_ft])
             self._action_length[name] = len(robot.action_features)
 
@@ -49,9 +51,8 @@ class ManipulationPrimitive(gymnasium.Env):
 
             if self._is_task_frame_robot[name]:
                 robot.set_task_frame(self.task_frame[name])
-                action_to_send = action[start:start + offset]
-            else:
-                action_to_send = {key: action[start + i] for i, key in enumerate(robot.action_features.keys())}
+            action_keys = list(robot.action_features.keys())
+            action_to_send = {key: float(action[start + i]) for i, key in enumerate(action_keys)}
 
             robot.send_action(action_to_send)
             start += offset

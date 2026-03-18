@@ -1,6 +1,12 @@
 from dataclasses import dataclass, field, fields
 
-from pynput import keyboard
+try:
+    from pynput import keyboard
+except ImportError:
+    class _KeyboardFallback:
+        Key = str
+
+    keyboard = _KeyboardFallback()
 
 from lerobot.cameras import Camera
 from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
@@ -69,8 +75,11 @@ class ObservationConfig:
     add_joint_velocity_to_observation: bool | dict[str, bool] = False
     add_current_to_observation: bool | dict[str, bool] = False
     add_ee_pos_to_observation: bool | dict[str, bool] = False
+    ee_pos_axes: list[str] | dict[str, list[str]] | None = None
     add_ee_velocity_to_observation: bool | dict[str, bool] = False
+    ee_velocity_axes: list[str] | dict[str, list[str]] | None = None
     add_ee_wrench_to_observation: bool | dict[str, bool] = False
+    ee_wrench_axes: list[str] | dict[str, list[str]] | None = None
     stack_frames: int | dict[str, int] = 0
     relative_ee_pos: bool | dict[str, bool] = True
 
@@ -128,6 +137,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
     processor: ManipulationPrimitiveProcessorConfig = field(default_factory=ManipulationPrimitiveProcessorConfig)
     policy: PreTrainedConfig | None = None
     policy_overwrites: dict = field(default_factory=dict)
+    notes: str | None = None
     is_terminal: bool = False
 
     def __post_init__(self):
@@ -316,8 +326,12 @@ class ManipulationPrimitiveConfig(EnvConfig):
                 add_joint_velocity_to_observation=self.processor.observation.add_joint_velocity_to_observation,
                 add_current_to_observation=self.processor.observation.add_current_to_observation,
                 add_ee_pos_to_observation=self.processor.observation.add_ee_pos_to_observation,
+                ee_pos_axes=self.processor.observation.ee_pos_axes,
                 add_ee_velocity_to_observation=self.processor.observation.add_ee_velocity_to_observation,
+                ee_velocity_axes=self.processor.observation.ee_velocity_axes,
                 add_ee_wrench_to_observation=self.processor.observation.add_ee_wrench_to_observation,
+                ee_wrench_axes=self.processor.observation.ee_wrench_axes,
+                stack_frames=self.processor.observation.stack_frames,
             ),
             DeviceProcessorStep(device=device)
         ])

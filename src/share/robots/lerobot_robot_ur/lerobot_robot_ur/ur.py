@@ -29,6 +29,7 @@ from share.grippers.robotiq_controller import RTDERobotiqController
 from lerobot.robots.ur.tf_controller import TaskFrameCommand, RTDETFFController, AxisMode
 from lerobot.robots.ur.tf_mock_controller import RTDETFFMockController
 from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnectedError
+from share.envs.manipulation_primitive.task_frame import TaskFrame
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ class UR(Robot):
 
         Note: this property should be able to be called regardless of whether the robot is connected or not.
         """
-        ft = self.task_frame.to_robot_action()
+        ft = {key: float for key in self.task_frame.to_robot_action()}
 
         if self.gripper is not None:
             ft["gripper.pos"] = float
@@ -250,7 +251,10 @@ class UR(Robot):
     def send_gripper_action(self, gripper_action: float):
         self.gripper.move(gripper_action, vel=self.config.gripper_vel, force=self.config.gripper_force)
 
-    def set_task_frame(self, new_task_frame: TaskFrameCommand):
+    def set_task_frame(self, new_task_frame: TaskFrameCommand | TaskFrame):
+        if isinstance(new_task_frame, TaskFrame):
+            self.task_frame = new_task_frame.to_task_frame_command()
+            return
         self.task_frame = new_task_frame
 
     def disconnect(self):

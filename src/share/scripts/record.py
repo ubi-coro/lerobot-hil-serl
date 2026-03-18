@@ -30,7 +30,7 @@ from lerobot.processor import (
 )
 from lerobot.processor.rename_processor import rename_stats
 from lerobot.rl.gym_manipulator import step_env_and_process_transition
-from lerobot.share.configs import RecordConfig
+from share.configs.record import RecordConfig
 from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.constants import ACTION, REWARD, DONE, CHECKPOINTS_DIR, LAST_CHECKPOINT_LINK
 from lerobot.utils.control_utils import (

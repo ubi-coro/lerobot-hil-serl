@@ -27,7 +27,7 @@ import mock_pipeline_entities as mocks
 
 @dataclass
 class _DummyRobot:
-    action_features: dict[str, type] = field(
+    _action_features: dict[str, type] = field(
         default_factory=lambda: {
             "joint_1.pos": float,
             "joint_2.pos": float,
@@ -37,6 +37,10 @@ class _DummyRobot:
     _motors_ft: dict[str, type] = field(default_factory=lambda: {"joint_1.pos": float, "joint_2.pos": float, "joint_3.pos": float})
     is_connected: bool = False
     last_action: np.ndarray | dict | None = None
+
+    @property
+    def action_features(self) -> dict[str, type]:
+        return self._action_features
 
     def send_action(self, action):
         self.last_action = action
@@ -58,6 +62,12 @@ class _DummyRobot:
 @dataclass
 class _DummyTaskFrameRobot(_DummyRobot):
     last_task_frame: TaskFrame | None = None
+    current_frame: TaskFrame = field(default_factory=lambda: TaskFrame(control_mode=[ControlMode.VEL] * 6))
+
+    @property
+    def action_features(self) -> dict[str, type]:
+        frame = self.last_task_frame or self.current_frame
+        return {key: float for key in frame.action_feature_keys().keys()}
 
     def set_task_frame(self, command: TaskFrame):
         self.last_task_frame = command
@@ -89,19 +99,31 @@ def test_env_reset_returns_obs_info():
 
 
 def test_env_step_after_reset_smoke():
-    frame = TaskFrame(target=[0.0] * 6, control_mode=[ControlMode.POS] * 6)
+    frame = TaskFrame(
+        target=[0.0] * 6,
+        control_mode=[ControlMode.VEL, ControlMode.POS, ControlMode.FORCE, ControlMode.POS, ControlMode.POS, ControlMode.VEL],
+    )
     robot = _DummyTaskFrameRobot()
     env = ManipulationPrimitive(task_frame={"arm": frame}, robot_dict={"arm": robot}, cameras={})
 
     env.reset()
-    obs, reward, terminated, truncated, info = env.step(np.array([0.1, 0.2, 0.3], dtype=np.float32))
+    obs, reward, terminated, truncated, info = env.step(
+        np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=np.float32)
+    )
 
     assert isinstance(obs, dict)
     assert reward == 0.0
     assert terminated is False
     assert truncated is False
     assert info == {TeleopEvents.IS_INTERVENTION: False}
-    assert np.allclose(robot.last_action, np.array([0.1, 0.2, 0.3], dtype=np.float32))
+    assert robot.last_action == {
+        "x.vel": pytest.approx(0.1),
+        "y.pos": pytest.approx(0.2),
+        "z.wrench": pytest.approx(0.3),
+        "wx.pos": pytest.approx(0.4),
+        "wy.pos": pytest.approx(0.5),
+        "wz.vel": pytest.approx(0.6),
+    }
 
 
 def test_task_frame_serialization_deserialization_compatibility_for_target_limits():

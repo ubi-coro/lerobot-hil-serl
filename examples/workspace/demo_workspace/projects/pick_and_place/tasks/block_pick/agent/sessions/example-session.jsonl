@@ -1,0 +1,4 @@
+{"content":"what is the current task state?","metadata":{},"role":"user","timestamp":"2026-03-18T00:00:00+00:00"}
+{"content":"{\"tool_calls\": [{\"arguments\": {}, \"name\": \"status\"}]}","metadata":{"tool_calls":[{"arguments":{},"name":"status"}]},"role":"assistant","timestamp":"2026-03-18T00:00:01+00:00"}
+{"content":"{\"content\": \"Current task status\", \"data\": {\"active_mp_net\": \"pick_block_v1\"}, \"status\": \"ok\"}","metadata":{"tool_name":"status"},"role":"tool","timestamp":"2026-03-18T00:00:01+00:00"}
+{"content":"The task is using MP-Net `pick_block_v1`. The next useful step is to inspect the primitive targets or collect a first demo batch.","metadata":{},"role":"assistant","timestamp":"2026-03-18T00:00:02+00:00"}

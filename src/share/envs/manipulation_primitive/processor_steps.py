@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import math
 from dataclasses import dataclass, field
 from typing import Any
@@ -574,10 +575,18 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
     add_joint_velocity_to_observation: bool | dict[str, bool] = False
     add_current_to_observation: bool | dict[str, bool] = False
     add_ee_pos_to_observation: bool | dict[str, bool] = False
+    ee_pos_axes: list[str] | dict[str, list[str]] | None = None
     add_ee_velocity_to_observation: bool | dict[str, bool] = False
+    ee_velocity_axes: list[str] | dict[str, list[str]] | None = None
     add_ee_wrench_to_observation: bool | dict[str, bool] = False
+    ee_wrench_axes: list[str] | dict[str, list[str]] | None = None
+    stack_frames: int | dict[str, int] = 0
 
     _prev_obs: dict[str, dict[str, float]] = field(default_factory=dict, init=False)
+    _state_buffer: deque[torch.Tensor] = field(init=False)
+
+    def __post_init__(self):
+        self._state_buffer = deque(maxlen=self._resolved_stack_frames())
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         observation = transition.get(TransitionKey.OBSERVATION)
@@ -589,7 +598,16 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
 
         state_values = self._collect_state_values(observation)
         if state_values:
-            new_observation[OBS_STATE] = torch.tensor(state_values, dtype=torch.float32)
+            state_tensor = torch.tensor(state_values, dtype=torch.float32)
+            stack_frames = self._resolved_stack_frames()
+            if stack_frames > 1:
+                if not self._state_buffer:
+                    for _ in range(stack_frames):
+                        self._state_buffer.append(state_tensor)
+                else:
+                    self._state_buffer.append(state_tensor)
+                state_tensor = torch.cat(list(self._state_buffer), dim=-1)
+            new_observation[OBS_STATE] = state_tensor
 
         for key, value in observation.items():
             if "image" not in key:
@@ -619,17 +637,32 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
                 values.extend(self._collect_joint_channel(observation, name, "current"))
 
             if self._enabled(self.add_ee_pos_to_observation, name):
-                values.extend(self._collect_ee_channel(observation, name, axis_names, "ee_pos"))
+                values.extend(
+                    self._collect_ee_channel(
+                        observation,
+                        name,
+                        self._selected_axes(self.ee_pos_axes, name, axis_names),
+                        "ee_pos",
+                    )
+                )
 
             if self._enabled(self.add_ee_velocity_to_observation, name):
-                ee_vel = self._collect_ee_channel(observation, name, axis_names, "ee_vel")
+                selected_axes = self._selected_axes(self.ee_velocity_axes, name, axis_names)
+                ee_vel = self._collect_ee_channel(observation, name, selected_axes, "ee_vel")
                 if not ee_vel:
-                    ee_pos_keys = [f"{name}.{axis}.ee_pos" for axis in axis_names]
+                    ee_pos_keys = [f"{name}.{axis}.ee_pos" for axis in selected_axes]
                     ee_vel = self._differentiate(name, observation, ee_pos_keys)
                 values.extend(ee_vel)
 
             if self._enabled(self.add_ee_wrench_to_observation, name):
-                values.extend(self._collect_ee_channel(observation, name, axis_names, "ee_wrench"))
+                values.extend(
+                    self._collect_ee_channel(
+                        observation,
+                        name,
+                        self._selected_axes(self.ee_wrench_axes, name, axis_names),
+                        "ee_wrench",
+                    )
+                )
 
             if self._enabled(self.gripper_enable, name):
                 gripper_key = f"{name}.gripper.pos"
@@ -675,6 +708,18 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
         if isinstance(flag, dict):
             return bool(flag.get(name, False))
         return bool(flag)
+
+    @staticmethod
+    def _selected_axes(
+        axes: list[str] | dict[str, list[str]] | None,
+        name: str,
+        default_axes: list[str],
+    ) -> list[str]:
+        if axes is None:
+            return list(default_axes)
+        if isinstance(axes, dict):
+            return list(axes.get(name, default_axes))
+        return list(axes)
 
     @staticmethod
     def _to_float(value: Any) -> float:
@@ -727,6 +772,7 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
 
     def reset(self) -> None:
         self._prev_obs.clear()
+        self._state_buffer = deque(maxlen=self._resolved_stack_frames())
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
@@ -736,6 +782,7 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
 
         state_dim = 0
         robot_names = self._robot_names(obs_features)
+        axis_names = ["x", "y", "z", "wx", "wy", "wz"]
         for name in sorted(robot_names):
             if self._enabled(self.add_joint_position_to_observation, name):
                 state_dim += len(self._joint_keys(obs_features, name, "pos"))
@@ -745,17 +792,37 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
             if self._enabled(self.add_current_to_observation, name):
                 state_dim += len(self._joint_keys(obs_features, name, "current"))
             if self._enabled(self.add_ee_pos_to_observation, name):
-                state_dim += len(self._collect_ee_feature_keys(obs_features, name, "ee_pos"))
+                state_dim += len(
+                    self._collect_ee_feature_keys(
+                        obs_features,
+                        name,
+                        "ee_pos",
+                        self._selected_axes(self.ee_pos_axes, name, axis_names),
+                    )
+                )
             if self._enabled(self.add_ee_velocity_to_observation, name):
-                ee_vel_keys = self._collect_ee_feature_keys(obs_features, name, "ee_vel")
-                state_dim += len(ee_vel_keys) if ee_vel_keys else len(self._collect_ee_feature_keys(obs_features, name, "ee_pos"))
+                selected_axes = self._selected_axes(self.ee_velocity_axes, name, axis_names)
+                ee_vel_keys = self._collect_ee_feature_keys(obs_features, name, "ee_vel", selected_axes)
+                state_dim += len(ee_vel_keys) if ee_vel_keys else len(
+                    self._collect_ee_feature_keys(obs_features, name, "ee_pos", selected_axes)
+                )
             if self._enabled(self.add_ee_wrench_to_observation, name):
-                state_dim += len(self._collect_ee_feature_keys(obs_features, name, "ee_wrench"))
+                state_dim += len(
+                    self._collect_ee_feature_keys(
+                        obs_features,
+                        name,
+                        "ee_wrench",
+                        self._selected_axes(self.ee_wrench_axes, name, axis_names),
+                    )
+                )
             if self._enabled(self.gripper_enable, name) and f"{name}.gripper.pos" in obs_features:
                 state_dim += 1
 
         if state_dim > 0:
-            obs_features[OBS_STATE] = PolicyFeature(type=FeatureType.STATE, shape=(state_dim,))
+            obs_features[OBS_STATE] = PolicyFeature(
+                type=FeatureType.STATE,
+                shape=(state_dim * self._resolved_stack_frames(),),
+            )
 
         # transform to channel first images
         for name, feature in obs_features.items():
@@ -767,9 +834,23 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
         return new_features
 
     @staticmethod
-    def _collect_ee_feature_keys(observation: dict[str, Any], robot_name: str, suffix: str) -> list[str]:
-        axis_names = ["x", "y", "z", "wx", "wy", "wz"]
+    def _collect_ee_feature_keys(
+        observation: dict[str, Any],
+        robot_name: str,
+        suffix: str,
+        axis_names: list[str],
+    ) -> list[str]:
         return [f"{robot_name}.{axis}.{suffix}" for axis in axis_names if f"{robot_name}.{axis}.{suffix}" in observation]
+
+    def _resolved_stack_frames(self) -> int:
+        if isinstance(self.stack_frames, dict):
+            unique = {int(v) for v in self.stack_frames.values()}
+            if not unique:
+                return 1
+            if len(unique) > 1:
+                raise ValueError("VanillaMPObservationProcessorStep requires uniform stack_frames across robots.")
+            return max(1, unique.pop())
+        return max(1, int(self.stack_frames))
 
 
 @dataclass

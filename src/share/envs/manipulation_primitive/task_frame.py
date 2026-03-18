@@ -25,6 +25,9 @@ class ControlMode(IntEnum):
     VEL = 1
     FORCE = 2
 
+
+TASK_FRAME_AXIS_NAMES = ["x", "y", "z", "wx", "wy", "wz"]
+
 @dataclass(slots=True)
 class TaskFrame:
     """Serializable task-frame command shared by policy, processors, and robots."""
@@ -33,6 +36,8 @@ class TaskFrame:
     policy_mode: list[PolicyMode | None] = field(default_factory=lambda: 6 * [None])
     control_mode: list[ControlMode] = field(default_factory=lambda: 6 * [ControlMode.VEL])
     origin: list[float] | None = None
+    kp: list[float] | None = None
+    kd: list[float] | None = None
     min_pose: list[float] | None = None  # 6-vector: min xyz (m), min extrinsic euler (rad)
     max_pose: list[float] | None = None  # 6-vector: max xyz (m), max extrinsic euler (rad)
 
@@ -45,8 +50,18 @@ class TaskFrame:
             raise ValueError("policy_mode must have the same length as target")
         if len(self.control_mode) != width:
             raise ValueError("control_mode must have the same length as target")
+        if self.kp is not None and len(self.kp) != width:
+            raise ValueError("kp must have the same length as target")
+        if self.kd is not None and len(self.kd) != width:
+            raise ValueError("kd must have the same length as target")
+        if self.min_pose is not None and len(self.min_pose) != width:
+            raise ValueError("min_pose must have the same length as target")
+        if self.max_pose is not None and len(self.max_pose) != width:
+            raise ValueError("max_pose must have the same length as target")
 
         if self.space == ControlSpace.TASK:
+            if width != len(TASK_FRAME_AXIS_NAMES):
+                raise ValueError("space == TASK requires a 6D target")
             if self.origin is None:
                 self.origin = 6 * [0.0]
             if len(self.origin) != 6:
@@ -118,12 +133,80 @@ class TaskFrame:
                 self.space == ControlSpace.TASK
         )
 
+    def action_feature_keys(self) -> dict[str, type]:
+        """Return the keyed low-level action schema implied by this task frame."""
+        if self.space == ControlSpace.JOINT:
+            return {f"joint_{i + 1}.pos": float for i in range(len(self.target))}
+
+        feature_keys: dict[str, type] = {}
+        for axis_name, control_mode in zip(TASK_FRAME_AXIS_NAMES, self.control_mode, strict=True):
+            suffix = {
+                ControlMode.POS: "pos",
+                ControlMode.VEL: "vel",
+                ControlMode.FORCE: "wrench",
+            }[control_mode]
+            feature_keys[f"{axis_name}.{suffix}"] = float
+        return feature_keys
+
+    def to_task_frame_command(self):
+        """Convert the shared task frame into the UR controller command format."""
+        from lerobot.robots.ur.tf_controller import AxisMode, TaskFrameCommand
+
+        if self.space != ControlSpace.TASK:
+            raise ValueError("Only TASK-space frames can be converted to a UR task-frame command")
+
+        default = TaskFrameCommand.make_default_cmd()
+        return TaskFrameCommand(
+            cmd=default.cmd,
+            T_WF=list(self.origin) if self.origin is not None else list(default.T_WF),
+            mode=[
+                {
+                    ControlMode.POS: AxisMode.POS,
+                    ControlMode.VEL: AxisMode.PURE_VEL,
+                    ControlMode.FORCE: AxisMode.FORCE,
+                }[mode]
+                for mode in self.control_mode
+            ],
+            target=list(self.target),
+            kp=list(self.kp) if self.kp is not None else list(default.kp),
+            kd=list(self.kd) if self.kd is not None else list(default.kd),
+            max_pose_rpy=list(self.max_pose) if self.max_pose is not None else list(default.max_pose_rpy),
+            min_pose_rpy=list(self.min_pose) if self.min_pose is not None else list(default.min_pose_rpy),
+        )
+
+    @classmethod
+    def from_task_frame_command(cls, command) -> TaskFrame:
+        """Convert a UR controller command into the shared task-frame representation."""
+        from lerobot.robots.ur.tf_controller import AxisMode
+
+        return cls(
+            space=ControlSpace.TASK,
+            origin=list(command.T_WF) if command.T_WF is not None else None,
+            target=list(command.target) if command.target is not None else 6 * [0.0],
+            policy_mode=6 * [None],
+            control_mode=[
+                {
+                    AxisMode.POS: ControlMode.POS,
+                    AxisMode.IMPEDANCE_VEL: ControlMode.VEL,
+                    AxisMode.PURE_VEL: ControlMode.VEL,
+                    AxisMode.FORCE: ControlMode.FORCE,
+                }[mode]
+                for mode in command.mode
+            ] if command.mode is not None else 6 * [ControlMode.VEL],
+            kp=list(command.kp) if command.kp is not None else None,
+            kd=list(command.kd) if command.kd is not None else None,
+            min_pose=list(command.min_pose_rpy) if command.min_pose_rpy is not None else None,
+            max_pose=list(command.max_pose_rpy) if command.max_pose_rpy is not None else None,
+        )
+
     def to_dict(self) -> dict:
         """Serialize to a JSON-friendly dictionary."""
         return {
             "space": int(self.space),
             "origin": self.origin,
             "target": self.target,
+            "kp": self.kp,
+            "kd": self.kd,
             "policy_mode": [int(policy_mode) if policy_mode is not None else None for policy_mode in self.policy_mode],
             "control_mode": [int(control_mode) for control_mode in self.control_mode],
             "min_target": self.min_pose,
@@ -139,6 +222,8 @@ class TaskFrame:
             space=ControlSpace(raw["space"]),
             origin=raw.get("origin"),
             target=list(raw["target"]),
+            kp=list(raw["kp"]) if raw.get("kp") is not None else None,
+            kd=list(raw["kd"]) if raw.get("kd") is not None else None,
             policy_mode=[PolicyMode(item) if item is not None else None for item in raw["policy_mode"]],
             control_mode=[ControlMode(item) for item in raw["control_mode"]],
             min_pose=list(min_target) if min_target is not None else None,

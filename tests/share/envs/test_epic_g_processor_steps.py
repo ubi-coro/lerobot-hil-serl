@@ -266,3 +266,41 @@ def test_vanilla_mp_observation_processor_transform_features_counts_enabled_moda
 
     out = step.transform_features(features)
     assert out[PipelineFeatureType.OBSERVATION]["observation.state"].shape == (17,)
+
+
+def test_vanilla_mp_observation_processor_supports_axis_selection_and_frame_stacking():
+    """Observation assembly: selected EE axes should be kept and stacked inside the shared vanilla processor."""
+
+    step = VanillaMPObservationProcessorStep(
+        add_joint_position_to_observation={"arm": False},
+        add_joint_velocity_to_observation={"arm": False},
+        add_current_to_observation={"arm": False},
+        add_ee_pos_to_observation={"arm": True},
+        ee_pos_axes={"arm": ["z"]},
+        add_ee_velocity_to_observation={"arm": True},
+        ee_velocity_axes={"arm": ["x", "y", "z", "wx", "wy", "wz"]},
+        add_ee_wrench_to_observation={"arm": True},
+        ee_wrench_axes={"arm": ["x", "y", "z"]},
+        stack_frames=2,
+    )
+
+    observation = {
+        "arm.x.ee_pos": 0.01,
+        "arm.y.ee_pos": 0.02,
+        "arm.z.ee_pos": 0.03,
+        "arm.wx.ee_pos": 0.04,
+        "arm.wy.ee_pos": 0.05,
+        "arm.wz.ee_pos": 0.06,
+        "arm.x.ee_wrench": 1.0,
+        "arm.y.ee_wrench": 2.0,
+        "arm.z.ee_wrench": 3.0,
+    }
+
+    first = step(_transition(observation=observation))[TransitionKey.OBSERVATION]["observation.state"]
+    second_obs = dict(observation)
+    second_obs["arm.z.ee_pos"] = 0.05
+    second = step(_transition(observation=second_obs))[TransitionKey.OBSERVATION]["observation.state"]
+
+    assert first.shape == (20,)
+    torch.testing.assert_close(first[:10], first[10:])
+    torch.testing.assert_close(second[-10:], torch.tensor([0.05, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0]))
