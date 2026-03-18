@@ -175,7 +175,6 @@ class ManipulationPrimitiveNet(gym.Env):
         )
         processed_transition = self._env_processors[active](transition)
         obs = processed_transition[TransitionKey.OBSERVATION]
-        reward = processed_transition[TransitionKey.REWARD]
 
         # 5) Build info
         info = processed_transition.get(TransitionKey.INFO, {})
@@ -195,14 +194,13 @@ class ManipulationPrimitiveNet(gym.Env):
             self._primitive_step_count = 0
             self._active = transition.target
 
-            reward += result.reward
+            processed_transition[TransitionKey.REWARD] += result.reward
             processed_transition[TransitionKey.DONE] |= result.terminated
             processed_transition[TransitionKey.TRUNCATED] |= result.truncated
             info["transition_to"] = transition.target
             info["transition_reason"] = result.reason
             break
 
-        processed_transition[TransitionKey.REWARD] = reward
         processed_transition[TransitionKey.INFO] = info
         return processed_transition
 
