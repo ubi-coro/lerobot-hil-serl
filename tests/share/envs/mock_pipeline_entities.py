@@ -71,6 +71,62 @@ class MockDeltaTeleoperator:
 
 
 @dataclass
+class MockVelocityDeltaTeleoperator:
+    """Delta teleoperator stub exposing Cartesian velocity keys directly."""
+
+    action_features: dict[str, type] = field(
+        default_factory=lambda: {
+            "x.vel": float,
+            "y.vel": float,
+            "z.vel": float,
+            "wx.vel": float,
+            "wy.vel": float,
+            "wz.vel": float,
+        }
+    )
+
+
+@dataclass
+class MockKeyboardStyleDeltaTeleoperator:
+    """Delta teleoperator stub exposing metadata-style action names."""
+
+    action_features: dict = field(
+        default_factory=lambda: {
+            "dtype": "float32",
+            "shape": (4,),
+            "names": {"x.vel": 0, "y.vel": 1, "z.vel": 2, "gripper": 3},
+        }
+    )
+
+
+@dataclass
+class MockGamepadStyleDeltaTeleoperator:
+    """Delta teleoperator stub exposing legacy metadata-style delta names."""
+
+    action_features: dict = field(
+        default_factory=lambda: {
+            "dtype": "float32",
+            "shape": (4,),
+            "names": {"delta_x": 0, "delta_y": 1, "delta_z": 2, "gripper": 3},
+        }
+    )
+
+
+@dataclass
+class MockPhoneLikeTeleoperator:
+    """Special-schema teleoperator stub that should not be treated as delta-like."""
+
+    action_features: dict[str, type] = field(
+        default_factory=lambda: {
+            "phone.pos": object,
+            "phone.rot": object,
+            "phone.raw_inputs": dict,
+            "phone.enabled": bool,
+        }
+    )
+
+
+@dataclass
 class MockAbsoluteJointTeleoperator:
     """Absolute-joint teleoperator stub (leader-arm style)."""
 

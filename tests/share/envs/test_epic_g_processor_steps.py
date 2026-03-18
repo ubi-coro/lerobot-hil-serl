@@ -1,3 +1,9 @@
+"""Focused tests for observation-side processor steps.
+
+This file covers FK observation enrichment, relative EE-frame transforms,
+action flattening, and observation-state feature inference.
+"""
+
 from __future__ import annotations
 
 import pytest
@@ -10,6 +16,8 @@ from share.envs.manipulation_primitive.processor_steps import (
     RelativeFrameObservationProcessor,
     RobotActionToPolicyActionProcessorStep,
     VanillaMPObservationProcessorStep,
+    _euler_xyz_from_rotation,
+    _rotation_from_extrinsic_xyz,
 )
 from tests.share.envs.mock_pipeline_entities import MockComplexKinematicsSolver
 
@@ -27,6 +35,7 @@ def _transition(action=None, observation=None):
 
 
 def test_joints_to_ee_observation_adds_expected_ee_pose_keys():
+    """Observation enrichment: FK should append deterministic EE pose channels."""
     solver = MockComplexKinematicsSolver(joint_names=["joint_1", "joint_2", "joint_3"])
     step = JointsToEEObservation(kinematics={"arm": solver}, motor_names={"arm": ["joint_1", "joint_2", "joint_3"]})
 
@@ -48,6 +57,7 @@ def test_joints_to_ee_observation_adds_expected_ee_pose_keys():
 
 
 def test_joints_to_ee_observation_raises_on_missing_joint_key():
+    """Observation enrichment: missing joint inputs should fail with a clear error."""
     step = JointsToEEObservation(
         kinematics={"arm": MockComplexKinematicsSolver()},
         motor_names={"arm": ["joint_1", "joint_2", "joint_3"]},
@@ -58,6 +68,7 @@ def test_joints_to_ee_observation_raises_on_missing_joint_key():
 
 
 def test_relative_frame_observation_processor_tracks_per_robot_reference():
+    """Relative observation frame: positions subtract and orientations compose on SO(3)."""
     step = RelativeFrameObservationProcessor(enable={"arm": True, "other": False})
 
     first = _transition(
@@ -95,12 +106,17 @@ def test_relative_frame_observation_processor_tracks_per_robot_reference():
     assert out2["arm.x.ee_pos"] == pytest.approx(0.5)
     assert out2["arm.y.ee_pos"] == pytest.approx(-1.0)
     assert out2["arm.z.ee_pos"] == pytest.approx(1.0)
-    assert out2["arm.wx.ee_pos"] == pytest.approx(0.1)
-    assert out2["arm.wy.ee_pos"] == pytest.approx(-0.4)
-    assert out2["arm.wz.ee_pos"] == pytest.approx(0.1)
+    expected_orientation = _euler_xyz_from_rotation(
+        _rotation_from_extrinsic_xyz(0.2, -0.2, 0.4) *
+        _rotation_from_extrinsic_xyz(0.1, 0.2, 0.3).inv()
+    )
+    assert out2["arm.wx.ee_pos"] == pytest.approx(expected_orientation[0])
+    assert out2["arm.wy.ee_pos"] == pytest.approx(expected_orientation[1])
+    assert out2["arm.wz.ee_pos"] == pytest.approx(expected_orientation[2])
 
 
 def test_relative_frame_observation_processor_reset_reinitializes_reference():
+    """Relative observation frame: reset should clear the stored per-episode reference pose."""
     step = RelativeFrameObservationProcessor(enable=True)
 
     step(
@@ -134,6 +150,7 @@ def test_relative_frame_observation_processor_reset_reinitializes_reference():
 
 
 def test_relative_frame_action_processor_transforms_kinematic_axes_only():
+    """Relative action frame: the current implementation is an identity on numeric values."""
     step = RelativeFrameActionProcessor(enable={"arm": True})
     action = {
         "joint_1.pos": 0.1,
@@ -147,6 +164,7 @@ def test_relative_frame_action_processor_transforms_kinematic_axes_only():
 
 
 def test_relative_frame_action_processor_is_noop_when_disabled():
+    """Relative action frame: disabling the step should leave actions untouched."""
     step = RelativeFrameActionProcessor(enable=False)
     action = {"joint_1.pos": 0.2}
     out = step(_transition(action=action))[TransitionKey.ACTION]
@@ -154,32 +172,27 @@ def test_relative_frame_action_processor_is_noop_when_disabled():
 
 
 def test_robot_action_to_policy_action_processor_stable_joint_order():
-    step = RobotActionToPolicyActionProcessorStep(
-        motor_names={"arm": ["joint_1", "joint_2"], "wrist": ["joint_3"]}
-    )
+    """Action flattening: per-robot action tensors should flatten in insertion order."""
+    step = RobotActionToPolicyActionProcessorStep()
     action = {
-        "joint_3.pos": 3.0,
-        "joint_2.pos": 2.0,
-        "joint_1.pos": 1.0,
+        "arm": torch.tensor([1.0, 2.0]),
+        "wrist": torch.tensor([3.0]),
     }
     out = step(_transition(action=action))[TransitionKey.ACTION]
     assert isinstance(out, torch.Tensor)
     torch.testing.assert_close(out, torch.tensor([1.0, 2.0, 3.0]))
 
 
-def test_robot_action_to_policy_action_processor_missing_joint_key_error():
-    step = RobotActionToPolicyActionProcessorStep(motor_names={"arm": ["joint_1", "joint_2"]})
-    with pytest.raises(ValueError, match="missing expected keys"):
-        step(_transition(action={"joint_1.pos": 1.0}))
-
-
-def test_robot_action_to_policy_action_processor_extra_joint_key_error():
-    step = RobotActionToPolicyActionProcessorStep(motor_names={"arm": ["joint_1"]})
-    with pytest.raises(ValueError, match="unexpected keys"):
-        step(_transition(action={"joint_1.pos": 1.0, "joint_2.pos": 2.0}))
+def test_robot_action_to_policy_action_processor_passes_non_dict_actions_through():
+    """Action flattening: non-dict inputs should be returned unchanged."""
+    step = RobotActionToPolicyActionProcessorStep()
+    action = torch.tensor([1.0, 2.0])
+    out = step(_transition(action=action))[TransitionKey.ACTION]
+    torch.testing.assert_close(out, action)
 
 
 def test_vanilla_mp_observation_processor_collects_modalities_and_images():
+    """Observation assembly: enabled modalities should populate state and normalize images."""
     step = VanillaMPObservationProcessorStep(
         gripper_enable={"arm": True},
         add_joint_position_to_observation={"arm": True},
@@ -223,6 +236,7 @@ def test_vanilla_mp_observation_processor_collects_modalities_and_images():
 
 
 def test_vanilla_mp_observation_processor_transform_features_counts_enabled_modalities():
+    """Feature inference: state width should include fallback velocity channels when direct ones are absent."""
     step = VanillaMPObservationProcessorStep(
         gripper_enable={"arm": True},
         add_joint_position_to_observation={"arm": True},
@@ -251,4 +265,4 @@ def test_vanilla_mp_observation_processor_transform_features_counts_enabled_moda
     }
 
     out = step.transform_features(features)
-    assert out[PipelineFeatureType.OBSERVATION]["observation.state"].shape == (15,)
+    assert out[PipelineFeatureType.OBSERVATION]["observation.state"].shape == (17,)

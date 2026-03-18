@@ -1,11 +1,9 @@
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import numpy as np
 
 from draccus import ChoiceRegistry
-
-from lerobot.teleoperators import TeleopEvents
 
 
 @dataclass
@@ -36,9 +34,10 @@ def _resolve_value(source: dict[str, Any], key: str) -> Any:
 
     for piece in key.split("."):
         if piece not in current:
-            return current[piece]
+            raise KeyError(f"Key '{key}' not found in transition source.")
+        current = current[piece]
 
-    raise KeyError(f"Key '{key}' not found in transition source.")
+    return current
 
 
 def _to_scalar(value: Any) -> float:
@@ -80,7 +79,7 @@ class Always(Transition):
 @Transition.register_subclass("on_success")
 @dataclass
 class OnSuccess(Transition):
-    success_key: str = TeleopEvents.SUCCESS
+    success_key: str = "success"
 
     def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
         return TransitionOutcome(
@@ -141,11 +140,8 @@ class RewardClassifierTransition(Transition):
         value = _to_scalar(metric)
         fired = _compare(value, self.threshold, self.operator)
         return TransitionOutcome(
-            condition_fulfilled=fired,
-            additional_reward=self.additional_reward,
-            terminated=True,
+            reward=self.additional_reward if fired else 0.0,
+            terminated=fired,
             truncated=False,
-            reason="reward_classifier",
-            transition_name=self.__class__.__name__,
-            transition_type="reward_classifier",
+            reason="reward_classifier" if fired else None,
         )

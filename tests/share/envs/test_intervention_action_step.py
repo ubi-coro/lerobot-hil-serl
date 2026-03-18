@@ -1,3 +1,9 @@
+"""Focused tests for intervention-side action projection.
+
+Each test covers one part of the teleop/policy merge logic used in the action
+pipeline.
+"""
+
 import math
 
 import torch
@@ -7,7 +13,7 @@ from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
 from lerobot.teleoperators import TeleopEvents
 from share.envs.manipulation_primitive.processor_steps import (
     InterventionActionProcessorStep,
-    _euler_xyz_to_matrix,
+    _rotation_from_extrinsic_xyz,
 )
 from share.envs.manipulation_primitive.task_frame import ControlMode, PolicyMode, TaskFrame
 
@@ -25,6 +31,7 @@ def _base_transition(action: torch.Tensor, info: dict | None = None, complementa
 
 
 def test_intervention_action_processor_projects_and_merges_task_frame_targets():
+    """Projection: learnable axes should be projected while static axes keep configured targets."""
     frame = TaskFrame(
         target=[1.0, 2.0, 3.0, 0.1, 0.2, 0.3],
         policy_mode=[PolicyMode.ABSOLUTE, None, PolicyMode.RELATIVE, PolicyMode.ABSOLUTE, None, None],
@@ -47,6 +54,7 @@ def test_intervention_action_processor_projects_and_merges_task_frame_targets():
 
 
 def test_intervention_action_processor_prefers_teleop_during_intervention_and_marks_completion():
+    """Teleop override: intervention actions should win and then emit a completion marker on release."""
     frame = TaskFrame(
         target=[0.0] * 6,
         policy_mode=[PolicyMode.ABSOLUTE, None, None, None, None, None],
@@ -74,8 +82,9 @@ def test_intervention_action_processor_prefers_teleop_during_intervention_and_ma
 
 
 def test_intervention_action_processor_decodes_so3_6d_representation():
+    """Rotation manifold decoding: SO(3) 6D actions should decode back to Euler task-frame targets."""
     expected_euler = [0.2, -0.3, 0.4]
-    matrix = _euler_xyz_to_matrix(*expected_euler)
+    matrix = _rotation_from_extrinsic_xyz(*expected_euler).as_matrix()
     encoded = torch.tensor(
         [matrix[0][0], matrix[1][0], matrix[2][0], matrix[0][1], matrix[1][1], matrix[2][1]],
         dtype=torch.float32,

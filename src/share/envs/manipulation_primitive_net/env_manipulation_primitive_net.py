@@ -202,6 +202,8 @@ class ManipulationPrimitiveNet(gym.Env):
             info["transition_reason"] = result.reason
             break
 
+        processed_transition[TransitionKey.REWARD] = reward
+        processed_transition[TransitionKey.INFO] = info
         return processed_transition
 
     def _step_reset_path_until_start(self, obs: dict[str, np.ndarray], info: dict[str, Any]) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
@@ -220,5 +222,4 @@ class ManipulationPrimitiveNet(gym.Env):
     def _sample_action(self, current_primitive: str) -> Any:
         ft = self.config.primitives[current_primitive].features[ACTION]
         return 2 * torch.rand(size=ft.shape) - 1
-
 

@@ -7,9 +7,13 @@ from tests.share.envs.mock_pipeline_entities import (
     MockComplexKinematicsSolver,
     MockComplexObservationRobot,
     MockDeltaTeleoperator,
+    MockGamepadStyleDeltaTeleoperator,
     MockJointOnlyRobot,
+    MockKeyboardStyleDeltaTeleoperator,
     MockKinematicsSolver,
+    MockPhoneLikeTeleoperator,
     MockTaskFrameRobot,
+    MockVelocityDeltaTeleoperator,
 )
 
 
@@ -27,12 +31,23 @@ def test_mock_robots_cover_task_frame_and_joint_only_modalities():
 def test_mock_teleoperators_cover_delta_and_absolute_joint_modalities():
     teleop_dict = {
         "delta": MockDeltaTeleoperator(),
+        "keyboard": MockKeyboardStyleDeltaTeleoperator(),
+        "gamepad": MockGamepadStyleDeltaTeleoperator(),
+        "spacemouse": MockVelocityDeltaTeleoperator(),
         "absolute": MockAbsoluteJointTeleoperator(),
+        "phone": MockPhoneLikeTeleoperator(),
     }
 
     result = check_delta_teleoperator(teleop_dict)
 
-    assert result == {"delta": True, "absolute": False}
+    assert result == {
+        "delta": True,
+        "keyboard": True,
+        "gamepad": True,
+        "spacemouse": True,
+        "absolute": False,
+        "phone": False,
+    }
 
 
 def test_mock_kinematics_solver_is_deterministic_for_fk_and_ik():

@@ -266,7 +266,7 @@ Keep a **single transition list** for simplicity and serializability. Differenti
 
 ### MPN-302: Enforce MP-Net step/reset API contract in runtime info
 **Priority:** P0  
-**Status:** Partially Done  
+**Status:** Done  
 **Owner:** Unassigned
 
 #### Progress update

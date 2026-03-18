@@ -1,3 +1,9 @@
+"""Focused tests for task-frame to joint-space conversion.
+
+Each test covers one stage of ``ToJointActionProcessorStep`` or its nearby
+processor-chain integration.
+"""
+
 import pytest
 import torch
 
@@ -31,6 +37,7 @@ def _transition(action, observation=None, info=None, complementary_data=None):
 
 
 def test_to_joint_integrates_relative_task_frame_action_and_clamps_limits():
+    """Joint conversion: relative Cartesian targets should integrate and clamp before IK."""
     frame = TaskFrame(
         target=[0.0] * 6,
         policy_mode=[PolicyMode.RELATIVE, None, None, None, None, None],
@@ -66,6 +73,7 @@ def test_to_joint_integrates_relative_task_frame_action_and_clamps_limits():
 
 
 def test_processor_chain_teleop_to_task_frame_to_joint_action():
+    """Processor chain: teleop deltas should survive match/intervention/to-joint conversion end to end."""
     frame = TaskFrame(
         target=[0.0] * 6,
         policy_mode=[PolicyMode.RELATIVE, None, None, None, None, None],
@@ -109,6 +117,7 @@ def test_processor_chain_teleop_to_task_frame_to_joint_action():
 
 
 def test_to_joint_step_consumes_ee_observation_for_relative_integration():
+    """Joint conversion: observed EE pose should be the integration base when virtual reference is disabled."""
     robot = MockComplexObservationRobot()
     obs = robot.get_observation(prefix="arm")
 

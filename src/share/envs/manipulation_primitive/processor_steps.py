@@ -199,12 +199,12 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
         """Normalize teleop delta input into a 6-value Cartesian delta list."""
         if isinstance(teleop_action, dict):
             return [
-                float(teleop_action.get("delta_x", 0.0)),
-                float(teleop_action.get("delta_y", 0.0)),
-                float(teleop_action.get("delta_z", 0.0)),
-                float(teleop_action.get("delta_rx", 0.0)),
-                float(teleop_action.get("delta_ry", 0.0)),
-                float(teleop_action.get("delta_rz", 0.0)),
+                float(teleop_action.get("delta_x", teleop_action.get("x.vel", 0.0))),
+                float(teleop_action.get("delta_y", teleop_action.get("y.vel", 0.0))),
+                float(teleop_action.get("delta_z", teleop_action.get("z.vel", 0.0))),
+                float(teleop_action.get("delta_rx", teleop_action.get("wx.vel", 0.0))),
+                float(teleop_action.get("delta_ry", teleop_action.get("wy.vel", 0.0))),
+                float(teleop_action.get("delta_rz", teleop_action.get("wz.vel", 0.0))),
             ]
         return [float(v) for v in teleop_action][:6]
 
@@ -212,7 +212,15 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
     def _extract_joint_action(teleop_action: Any) -> dict[str, float]:
         """Normalize teleop joint input into ``joint_name -> position``."""
         if isinstance(teleop_action, dict):
-            return teleop_action
+            joint_state: dict[str, float] = {}
+            for key, value in teleop_action.items():
+                if key.endswith(".pos"):
+                    joint_state[key.removesuffix(".pos")] = float(value)
+                elif key.endswith(".q"):
+                    joint_state[key.removesuffix(".q")] = float(value)
+                elif "." not in key:
+                    joint_state[key] = float(value)
+            return joint_state
         else:
             return {f"joint_{i + 1}": float(v) for i, v in enumerate(teleop_action)}
 
@@ -258,7 +266,7 @@ class InterventionActionProcessorStep(ProcessorStep):
 
             # torque leaders off during teleop
             for name, teleop_action in teleop_action_dict.items():
-                if self._disable_torque_on_intervention[name]:
+                if self._disable_torque_on_intervention.get(name, False):
                     self.teleoperators[name].disable_torque()
 
         else:

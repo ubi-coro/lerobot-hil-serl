@@ -1,3 +1,10 @@
+"""Broad release-readiness smoke coverage for the share env stack.
+
+Redundancy note: parts of this file overlap with newer focused unit tests in
+the same directory. The overlapping smoke checks are intentionally skipped and
+should be considered candidates for manual deletion later.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -16,12 +23,7 @@ from share.envs.manipulation_primitive.processor_steps import (
     ToJointActionProcessorStep,
 )
 from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, PolicyMode, TaskFrame
-from tests.share.envs.mock_pipeline_entities import (
-    MockAbsoluteJointTeleoperator,
-    MockDeltaTeleoperator,
-    MockKinematicsSolver,
-)
-
+import mock_pipeline_entities as mocks
 
 @dataclass
 class _DummyRobot:
@@ -132,11 +134,12 @@ def test_task_frame_serialization_deserialization_compatibility_for_target_limit
 @pytest.mark.parametrize(
     "teleop,space,policy_mode,requires_kinematics",
     [
-        (MockDeltaTeleoperator(), ControlSpace.TASK, PolicyMode.RELATIVE, False),
-        (MockAbsoluteJointTeleoperator(), ControlSpace.TASK, PolicyMode.ABSOLUTE, True),
-        (MockDeltaTeleoperator(), ControlSpace.JOINT, PolicyMode.ABSOLUTE, True),
+        (mocks.MockDeltaTeleoperator(), ControlSpace.TASK, PolicyMode.RELATIVE, False),
+        (mocks.MockAbsoluteJointTeleoperator(), ControlSpace.TASK, PolicyMode.ABSOLUTE, True),
+        (mocks.MockDeltaTeleoperator(), ControlSpace.JOINT, PolicyMode.ABSOLUTE, True),
     ],
 )
+@pytest.mark.skip(reason="Redundant with focused MatchTeleopToPolicyActionProcessorStep tests; manual deletion candidate.")
 def test_compatibility_matrix_pipeline_branching(teleop, space, policy_mode, requires_kinematics):
     frame = TaskFrame(
         target=[0.0] * 6,
@@ -148,10 +151,10 @@ def test_compatibility_matrix_pipeline_branching(teleop, space, policy_mode, req
     match_step = MatchTeleopToPolicyActionProcessorStep(
         teleoperators={"arm": teleop},
         task_frame={"arm": frame},
-        kinematics={"arm": MockKinematicsSolver()} if requires_kinematics else {},
+        kinematics={"arm": mocks.MockKinematicsSolver()} if requires_kinematics else {},
     )
 
-    teleop_action = {"delta_x": 0.1} if isinstance(teleop, MockDeltaTeleoperator) else {"joint_1.pos": 1.0, "joint_2.pos": 2.0, "joint_3.pos": 3.0}
+    teleop_action = {"delta_x": 0.1} if isinstance(teleop, mocks.MockDeltaTeleoperator) else {"joint_1.pos": 1.0, "joint_2.pos": 2.0, "joint_3.pos": 3.0}
 
     tr = _transition(
         torch.tensor([0.0]),
@@ -163,6 +166,7 @@ def test_compatibility_matrix_pipeline_branching(teleop, space, policy_mode, req
     assert converted.numel() == frame.policy_action_dim
 
 
+@pytest.mark.skip(reason="Redundant end-to-end smoke coverage; superseded by focused intervention/to-joint tests.")
 def test_end_to_end_pipeline_smoke_with_single_step_call():
     frame = TaskFrame(
         target=[0.0] * 6,
@@ -176,14 +180,14 @@ def test_end_to_end_pipeline_smoke_with_single_step_call():
     env.reset()
 
     match = MatchTeleopToPolicyActionProcessorStep(
-        teleoperators={"arm": MockDeltaTeleoperator()},
+        teleoperators={"arm": mocks.MockDeltaTeleoperator()},
         task_frame={"arm": frame},
     )
     intervention = InterventionActionProcessorStep(task_frame={"arm": frame})
     to_joint = ToJointActionProcessorStep(
         is_task_frame_robot={"arm": False},
         task_frame={"arm": frame},
-        kinematics={"arm": MockKinematicsSolver()},
+        kinematics={"arm": mocks.MockKinematicsSolver()},
         joint_names={"arm": ["joint_1", "joint_2", "joint_3"]},
     )
 

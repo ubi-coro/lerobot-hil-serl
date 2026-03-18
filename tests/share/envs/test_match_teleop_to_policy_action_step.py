@@ -1,3 +1,8 @@
+"""Focused tests for teleop-to-policy action normalization.
+
+Each test documents one mapping rule in ``MatchTeleopToPolicyActionProcessorStep``.
+"""
+
 import torch
 
 from lerobot.processor.core import TransitionKey
@@ -10,6 +15,7 @@ from tests.share.envs.mock_pipeline_entities import (
     MockComplexObservationRobot,
     MockDeltaTeleoperator,
     MockKinematicsSolver,
+    MockVelocityDeltaTeleoperator,
 )
 
 
@@ -26,6 +32,7 @@ def _transition_with_teleop_action(robot_name: str, action: dict[str, float]):
 
 
 def test_delta_teleop_maps_differential_targets_directly():
+    """Delta teleop mapping: differential task-frame axes should pass through directly."""
     step = MatchTeleopToPolicyActionProcessorStep(
         teleoperators={"arm": MockDeltaTeleoperator()},
         task_frame={
@@ -44,7 +51,36 @@ def test_delta_teleop_maps_differential_targets_directly():
     assert torch.allclose(converted, torch.tensor([0.4, -0.2]))
 
 
+def test_extract_delta_action_accepts_velocity_style_keys():
+    """Delta extraction: SpaceMouse-style Cartesian velocity keys should map to the 6D delta vector."""
+    deltas = MatchTeleopToPolicyActionProcessorStep._extract_delta_action(
+        {
+            "x.vel": 0.1,
+            "y.vel": -0.2,
+            "z.vel": 0.3,
+            "wx.vel": -0.4,
+            "wy.vel": 0.5,
+            "wz.vel": -0.6,
+        }
+    )
+
+    assert deltas == [0.1, -0.2, 0.3, -0.4, 0.5, -0.6]
+
+
+def test_extract_delta_action_defaults_missing_axes_to_zero_for_velocity_keys():
+    """Delta extraction: missing Cartesian velocity axes should default to zero."""
+    deltas = MatchTeleopToPolicyActionProcessorStep._extract_delta_action(
+        {
+            "x.vel": 0.25,
+            "wz.vel": -0.75,
+        }
+    )
+
+    assert deltas == [0.25, 0.0, 0.0, 0.0, 0.0, -0.75]
+
+
 def test_delta_teleop_absolute_pos_integration_respects_virtual_reference_flag():
+    """Delta integration: absolute POS targets should honor virtual-reference accumulation settings."""
     frame = TaskFrame(
         policy_mode=[PolicyMode.ABSOLUTE, None, None, None, None, None],
         control_mode=[ControlMode.POS] * 6,
@@ -78,7 +114,28 @@ def test_delta_teleop_absolute_pos_integration_respects_virtual_reference_flag()
     assert torch.allclose(nv2, torch.tensor([1.1]))
 
 
+def test_velocity_style_delta_teleop_maps_differential_targets_directly():
+    """Delta teleop mapping: velocity-style EE teleops should match differential task-frame semantics."""
+    step = MatchTeleopToPolicyActionProcessorStep(
+        teleoperators={"arm": MockVelocityDeltaTeleoperator()},
+        task_frame={
+            "arm": TaskFrame(
+                policy_mode=[PolicyMode.ABSOLUTE, PolicyMode.ABSOLUTE, None, None, None, None],
+                control_mode=[ControlMode.VEL, ControlMode.FORCE, ControlMode.POS, ControlMode.POS, ControlMode.POS, ControlMode.POS],
+                target=[0.0] * 6,
+            )
+        },
+    )
+
+    tr = _transition_with_teleop_action("arm", {"x.vel": 0.4, "y.vel": -0.2})
+    out = step(tr)
+    converted = out[TransitionKey.COMPLEMENTARY_DATA][TELEOP_ACTION_KEY]["arm"]
+
+    assert torch.allclose(converted, torch.tensor([0.4, -0.2]))
+
+
 def test_absolute_joint_teleop_uses_fk_and_relative_modes():
+    """Absolute-joint mapping: FK-based task poses should support relative policy channels."""
     step = MatchTeleopToPolicyActionProcessorStep(
         teleoperators={"arm": MockAbsoluteJointTeleoperator()},
         task_frame={
@@ -111,6 +168,7 @@ def test_absolute_joint_teleop_uses_fk_and_relative_modes():
 
 
 def test_match_step_uses_complex_fk_for_relative_kinematic_channels():
+    """Absolute-joint mapping: richer FK models should propagate the correct relative Cartesian deltas."""
     robot = MockComplexObservationRobot()
     obs = robot.get_observation(prefix="arm")
 

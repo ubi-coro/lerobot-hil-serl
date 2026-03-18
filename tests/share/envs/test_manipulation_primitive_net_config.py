@@ -1,283 +1,99 @@
-from io import StringIO
-from types import SimpleNamespace
+"""Graph-validation tests for ``ManipulationPrimitiveNetConfig``.
 
-import draccus
+Each test covers one piece of MP-Net config validation so graph mistakes fail
+at load time rather than during hardware rollouts.
+
+Redundancy note: older draccus/YAML roundtrip coverage targeted a registration
+shape that is no longer a stable contract for this base config class, so this
+file now focuses on constructor-level graph validation only.
+"""
+
+from __future__ import annotations
+
 import pytest
 
+from share.envs.manipulation_primitive.config_manipulation_primitive import ManipulationPrimitiveConfig
 from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import (
     ManipulationPrimitiveNetConfig,
 )
-from share.envs.manipulation_primitive_net.transitions import (
-    ObservationThresholdTransition,
-    RewardClassifierTransition,
-    TimeLimitTransition,
-)
+from share.envs.manipulation_primitive_net.transitions import Always
 
 
-def _transition(*, next_primitive=None):
-    return ObservationThresholdTransition(obs_key="x", threshold=0.0, next_primitive=next_primitive)
+def _primitive(*, is_terminal: bool = False) -> ManipulationPrimitiveConfig:
+    return ManipulationPrimitiveConfig(is_terminal=is_terminal)
 
 
-def test_mp_net_config_rejects_unknown_primitive_in_transition():
+def test_mp_net_config_defaults_start_and_reset_to_first_primitive():
+    """Config validation: default routing should start from the first declared primitive."""
+    cfg = ManipulationPrimitiveNetConfig(
+        primitives={"pick": _primitive(), "place": _primitive(is_terminal=True)},
+        transitions=[Always(source="pick", target="place")],
+    )
+
+    assert cfg.start_primitive == "pick"
+    assert cfg.reset_primitive == "pick"
+
+
+def test_mp_net_config_rejects_unknown_transition_source():
+    """Config validation: transition sources must reference declared primitive names."""
+    with pytest.raises(ValueError, match="Transition source 'unknown'"):
+        ManipulationPrimitiveNetConfig(
+            primitives={"pick": _primitive(), "place": _primitive(is_terminal=True)},
+            transitions=[Always(source="unknown", target="place")],
+        )
+
+
+def test_mp_net_config_rejects_unknown_transition_target():
+    """Config validation: transition targets must reference declared primitive names."""
     with pytest.raises(ValueError, match="Transition target 'unknown'"):
         ManipulationPrimitiveNetConfig(
-            start_primitive="pick",
-            primitives={"pick": SimpleNamespace(), "reset": SimpleNamespace()},
-            transitions=[("pick", "unknown", _transition())],
-            reset_primitives=["reset"],
+            primitives={"pick": _primitive(), "place": _primitive(is_terminal=True)},
+            transitions=[Always(source="pick", target="unknown")],
         )
 
 
 def test_mp_net_config_rejects_missing_start_primitive():
-    with pytest.raises(ValueError, match="start_primitive 'pick'"):
+    """Config validation: explicit start primitives must exist in the primitive registry."""
+    with pytest.raises(ValueError, match="start_primitive 'missing'"):
         ManipulationPrimitiveNetConfig(
-            start_primitive="pick",
-            primitives={"reset": SimpleNamespace()},
-            transitions=[],
-            reset_primitives=["reset"],
+            start_primitive="missing",
+            primitives={"pick": _primitive(), "place": _primitive(is_terminal=True)},
+            transitions=[Always(source="pick", target="place")],
         )
-
-
-def test_mp_net_config_rejects_terminal_transition_to_non_reset_primitive():
-    with pytest.raises(ValueError, match="Terminal primitive transitions must target a reset primitive"):
-        ManipulationPrimitiveNetConfig(
-            start_primitive="pick",
-            primitives={
-                "pick": SimpleNamespace(),
-                "terminal": SimpleNamespace(is_terminal_primitive=True),
-                "reset": SimpleNamespace(),
-            },
-            transitions=[("terminal", "pick", _transition())],
-            reset_primitives=["reset"],
-        )
-
-
-def test_mp_net_config_allows_terminal_transition_to_reset_primitive():
-    config = ManipulationPrimitiveNetConfig(
-        start_primitive="pick",
-        primitives={
-            "pick": SimpleNamespace(),
-            "terminal": SimpleNamespace(is_terminal_primitive=True),
-            "reset": SimpleNamespace(),
-        },
-        transitions=[("pick", "terminal", _transition()), ("terminal", "reset", _transition())],
-        reset_primitives=["reset"],
-    )
-
-    assert config.start_primitive == "pick"
 
 
 def test_mp_net_config_rejects_non_terminal_dead_end():
+    """Config validation: non-terminal primitives need at least one outgoing edge."""
     with pytest.raises(ValueError, match="non-terminal dead-end primitive"):
         ManipulationPrimitiveNetConfig(
-            start_primitive="pick",
             primitives={
-                "pick": SimpleNamespace(),
-                "place": SimpleNamespace(),
-                "terminal": SimpleNamespace(is_terminal_primitive=True),
-                "reset": SimpleNamespace(),
+                "pick": _primitive(),
+                "place": _primitive(),
+                "done": _primitive(is_terminal=True),
             },
-            transitions=[
-                ("pick", "terminal", _transition()),
-                ("terminal", "reset", _transition()),
-                ("reset", "pick", _transition()),
-            ],
-            reset_primitives=["reset"],
+            transitions=[Always(source="pick", target="done")],
         )
 
 
-def test_mp_net_config_rejects_unreachable_terminal():
+def test_mp_net_config_allows_terminal_dead_end_when_marked_terminal():
+    """Config validation: terminal primitives may intentionally have no outgoing transitions."""
+    cfg = ManipulationPrimitiveNetConfig(
+        primitives={"pick": _primitive(), "done": _primitive(is_terminal=True)},
+        transitions=[Always(source="pick", target="done")],
+    )
+
+    assert cfg.terminals == ["done"]
+
+
+def test_mp_net_config_rejects_unreachable_terminal_primitive():
+    """Config validation: terminal primitives should be reachable from the configured start node."""
     with pytest.raises(ValueError, match="unreachable from start_primitive"):
         ManipulationPrimitiveNetConfig(
             start_primitive="pick",
             primitives={
-                "pick": SimpleNamespace(),
-                "place": SimpleNamespace(),
-                "terminal": SimpleNamespace(is_terminal_primitive=True),
-                "reset": SimpleNamespace(),
+                "pick": _primitive(),
+                "place": _primitive(),
+                "done": _primitive(is_terminal=True),
             },
-            transitions=[
-                ("pick", "place", _transition()),
-                ("place", "pick", _transition()),
-                ("terminal", "reset", _transition()),
-                ("reset", "pick", _transition()),
-            ],
-            reset_primitives=["reset"],
+            transitions=[Always(source="pick", target="place"), Always(source="place", target="pick")],
         )
-
-
-def test_mp_net_config_rejects_reset_without_path_to_start():
-    with pytest.raises(ValueError, match="Reset primitive has no transition path to start_primitive"):
-        ManipulationPrimitiveNetConfig(
-            start_primitive="pick",
-            primitives={
-                "pick": SimpleNamespace(),
-                "terminal": SimpleNamespace(is_terminal_primitive=True),
-                "reset": SimpleNamespace(),
-            },
-            transitions=[
-                ("pick", "terminal", _transition()),
-                ("terminal", "reset", _transition()),
-                ("reset", "terminal", _transition()),
-            ],
-            reset_primitives=["reset"],
-        )
-
-
-def test_mp_net_config_rejects_unknown_next_primitive_override():
-    with pytest.raises(ValueError, match="Transition resolver points to unknown primitive"):
-        ManipulationPrimitiveNetConfig(
-            start_primitive="pick",
-            primitives={
-                "pick": SimpleNamespace(),
-                "terminal": SimpleNamespace(is_terminal_primitive=True),
-                "reset": SimpleNamespace(),
-            },
-            transitions=[
-                ("pick", "terminal", _transition(next_primitive="terminal")),
-                ("terminal", "reset", _transition(next_primitive="bogus")),
-                ("reset", "pick", _transition(next_primitive="pick")),
-            ],
-            reset_primitives=["reset"],
-        )
-
-
-def test_mp_net_config_allows_intentional_terminal_dead_end():
-    config = ManipulationPrimitiveNetConfig(
-        start_primitive="pick",
-        primitives={
-            "pick": SimpleNamespace(),
-            "terminal": SimpleNamespace(is_terminal_primitive=True),
-            "reset": SimpleNamespace(),
-        },
-        transitions=[
-            ("pick", "terminal", _transition()),
-            ("terminal", "reset", _transition()),
-            ("reset", "pick", _transition()),
-        ],
-        reset_primitives=["reset"],
-    )
-
-    assert config.start_primitive == "pick"
-
-
-def test_mp_net_config_collects_reset_primitives_from_metadata():
-    config = ManipulationPrimitiveNetConfig(
-        start_primitive="pick",
-        primitives={
-            "pick": SimpleNamespace(),
-            "terminal": SimpleNamespace(is_terminal_primitive=True),
-            "reset": SimpleNamespace(is_reset_primitive=True),
-        },
-        transitions=[
-            ("pick", "terminal", _transition()),
-            ("terminal", "reset", _transition()),
-            ("reset", "pick", _transition()),
-        ],
-        reset_primitives=[],
-    )
-
-    assert config.reset_primitives == ["reset"]
-
-
-def test_mp_net_config_rejects_reset_list_entry_without_metadata_flag():
-    with pytest.raises(ValueError, match="must set is_reset_primitive=True"):
-        ManipulationPrimitiveNetConfig(
-            start_primitive="pick",
-            primitives={
-                "pick": SimpleNamespace(),
-                "terminal": SimpleNamespace(is_terminal_primitive=True),
-                "reset": SimpleNamespace(),
-            },
-            transitions=[
-                ("pick", "terminal", _transition()),
-                ("terminal", "reset", _transition()),
-                ("reset", "pick", _transition()),
-            ],
-            reset_primitives=["reset"],
-        )
-
-
-def test_mp_net_config_dict_of_typed_primitives():
-    config_dict = {
-        "start_primitive": "pick",
-        "primitives": {
-            "pick": {"type": "manipulation_primitive", "is_terminal_primitive": False},
-            "reset": {"type": "manipulation_primitive", "is_reset_primitive": True},
-        },
-        "transitions": [
-            [
-                "pick",
-                "reset",
-                {
-                    "type": "observation_threshold",
-                    "obs_key": "score",
-                    "threshold": 1.0,
-                    "next_primitive": "reset",
-                },
-            ],
-            [
-                "reset",
-                "pick",
-                {
-                    "type": "time_limit",
-                    "max_steps": 1,
-                    "next_primitive": "pick",
-                },
-            ],
-        ],
-    }
-
-    cfg = draccus.decode(ManipulationPrimitiveNetConfig, config_dict)
-
-    assert cfg.primitives["pick"].type == "manipulation_primitive"
-    assert cfg.primitives["reset"].is_reset_primitive is True
-
-
-def test_mp_net_config_dict_of_typed_transitions():
-    config_dict = {
-        "start_primitive": "pick",
-        "primitives": {
-            "pick": {"type": "manipulation_primitive"},
-            "reset": {"type": "manipulation_primitive", "is_reset_primitive": True},
-        },
-        "transitions": [
-            ["pick", "reset", {"type": "observation_threshold", "obs_key": "reward", "threshold": 1.5}],
-            ["reset", "pick", {"type": "time_limit", "max_steps": 3, "next_primitive": "pick"}],
-        ],
-    }
-
-    cfg = draccus.decode(ManipulationPrimitiveNetConfig, config_dict)
-
-    assert isinstance(cfg.transitions[0][2], ObservationThresholdTransition)
-    assert isinstance(cfg.transitions[1][2], TimeLimitTransition)
-
-
-def test_mp_net_config_roundtrip_serialization():
-    raw_yaml = """
-start_primitive: pick
-primitives:
-  pick:
-    type: manipulation_primitive
-  terminal:
-    type: manipulation_primitive
-    is_terminal_primitive: true
-  reset:
-    type: manipulation_primitive
-    is_reset_primitive: true
-transitions:
-  - [pick, terminal, {type: observation_threshold, obs_key: score, threshold: 0.9}]
-  - [terminal, reset, {type: reward_classifier, metric_key: success, threshold: 0.5, additional_reward: 2.0}]
-  - [reset, pick, {type: time_limit, max_steps: 1, next_primitive: pick}]
-"""
-
-    cfg = draccus.load(ManipulationPrimitiveNetConfig, StringIO(raw_yaml))
-    dumped_yaml = draccus.dump(cfg)
-    roundtrip_cfg = draccus.load(ManipulationPrimitiveNetConfig, StringIO(dumped_yaml))
-
-    assert isinstance(roundtrip_cfg.transitions[0][2], ObservationThresholdTransition)
-    assert isinstance(roundtrip_cfg.transitions[1][2], RewardClassifierTransition)
-    assert isinstance(roundtrip_cfg.transitions[2][2], TimeLimitTransition)
-    assert roundtrip_cfg.transitions[1][2].additional_reward == pytest.approx(2.0)
-    assert roundtrip_cfg.primitives["terminal"].is_terminal_primitive is True
-    assert roundtrip_cfg.primitives["reset"].is_reset_primitive is True
