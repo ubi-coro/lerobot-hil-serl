@@ -18,6 +18,7 @@ from lerobot.teleoperators.widowx.widowx import WidowXConfig
 @dataclass
 @EnvConfig.register_subclass("aloha_bimanual")
 class AlohaBimanualEnvConfig(RobotEnvConfig):
+    fps = 30
     benchmark: bool = False
 
     def __post_init__(self):
@@ -60,9 +61,10 @@ class AlohaBimanualEnvConfig(RobotEnvConfig):
 
         self.processor.gripper.use_gripper = True
         self.processor.reset.terminate_on_success = True
+        self.processor.reset.teleop_on_reset = True
         self.processor.events.foot_switch_mapping = {
-            (TeleopEvents.SUCCESS,): {"device": 2, "toggle": False},
-            (TeleopEvents.IS_INTERVENTION,): {"device": 7, "toggle": True},
+            (TeleopEvents.SUCCESS,): {"device": 3, "toggle": False},
+            (TeleopEvents.IS_INTERVENTION,): {"device": 8, "toggle": True},
         }
         self.processor.events.key_mapping = {
             TeleopEvents.RERECORD_EPISODE: keyboard.Key.left,
@@ -94,6 +96,7 @@ class AlohaBimanualSafeEnvConfig(AlohaBimanualEnvConfig):
 @dataclass
 @EnvConfig.register_subclass("aloha_single")
 class AlohaSingleEnvConfig(RobotEnvConfig):
+    fps = 30
     teleop: TeleoperatorConfig = WidowXConfig(port="/dev/ttyDXL_leader_left", id="left")
     robot: RobotConfig = ViperXConfig(port="/dev/ttyDXL_follower_left", id="left")
     cameras: dict[str, CameraConfig] = field(

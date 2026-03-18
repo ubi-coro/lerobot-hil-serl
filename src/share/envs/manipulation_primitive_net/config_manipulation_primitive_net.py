@@ -1,36 +1,36 @@
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Optional
 
-import draccus
-
-from lerobot.configs import parser
-from lerobot.configs.policies import PreTrainedConfig
 from lerobot.envs import EnvConfig
 from lerobot.cameras import CameraConfig
-from lerobot.policies.factory import make_policy
 from lerobot.teleoperators import TeleoperatorConfig
 from lerobot.robots import RobotConfig
-from lerobot.utils.constants import DEFAULT_ROBOT_NAME, CHECKPOINTS_DIR, LAST_CHECKPOINT_LINK
+from lerobot.utils.constants import DEFAULT_ROBOT_NAME
 
-from .transitions import MP_Transition
+from .transitions import Transition
 from ..manipulation_primitive.config_manipulation_primitive import ManipulationPrimitiveConfig
 
 
-@EnvConfig.register_subclass(name="manipulation_primitive_net")
 @dataclass
-class ManipulationPrimitiveNetConfig:
+class ManipulationPrimitiveNetConfig(EnvConfig):
     """Serializable config for MP-Net transition routing and reset/start semantics."""
 
-    start_primitive: str
-    reset_primitive: str
-    primitives: dict[str, ManipulationPrimitiveConfig]
-    transitions: list[tuple[str, str, MP_Transition]]
+    start_primitive: str | None = None
+    reset_primitive: str | None = None
+    primitives: dict[str, ManipulationPrimitiveConfig] = field(default_factory=dict)
+    transitions: list[Transition] = field(default_factory=list)
 
     fps: int = 10
     robot: RobotConfig | dict[str, RobotConfig] | None = None
     teleop: TeleoperatorConfig | dict[str, TeleoperatorConfig] | None = None
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
+
+    @property
+    def gym_kwargs(self) -> dict:
+        return {}
+
+    def make(self):
+        from .env_manipulation_primitive_net import ManipulationPrimitiveNet
+        return ManipulationPrimitiveNet(self)
 
     def __post_init__(self):
         """Validate primitive roles and transition graph semantics for MP-Net."""
@@ -41,36 +41,24 @@ class ManipulationPrimitiveNetConfig:
             if robot_cfg is not None:
                 robot_cfg.cameras = {}
 
-        primitive_names = set(self.primitives)
+        assert self.primitives
+        primitive_names = list(self.primitives.keys())
+        if self.start_primitive is None:
+            self.start_primitive = primitive_names[0]
+        if self.reset_primitive is None:
+            self.reset_primitive = primitive_names[0]
         if self.start_primitive not in primitive_names:
             raise ValueError(f"start_primitive '{self.start_primitive}' is not present in primitives.")
 
         outgoing_edges: dict[str, set[str]] = {name: set() for name in primitive_names}
 
-        for source, target, transition in self.transitions:
-            if source not in primitive_names:
-                raise ValueError(f"Transition source '{source}' is not present in primitives.")
-            if target not in primitive_names:
-                raise ValueError(f"Transition target '{target}' is not present in primitives.")
+        for transition in self.transitions:
+            if transition.source not in primitive_names:
+                raise ValueError(f"Transition source '{transition.source}' is not present in primitives.")
+            if transition.target not in primitive_names:
+                raise ValueError(f"Transition target '{transition.target}' is not present in primitives.")
 
-            resolved_target = target
-            transition_target = getattr(transition, "next_primitive", None)
-            if transition_target is not None:
-                if transition_target not in primitive_names:
-                    raise ValueError(
-                        "Transition resolver points to unknown primitive "
-                        f"'{transition_target}' from source '{source}'."
-                    )
-                resolved_target = transition_target
-
-            outgoing_edges[source].add(resolved_target)
-
-            source_config = self.primitives[source]
-            if bool(getattr(source_config, "is_reset_primitive", False)) and resolved_target not in primitive_names:
-                raise ValueError(
-                    "Reset primitive transition points to unknown primitive. "
-                    f"Invalid edge: {source} -> {resolved_target}."
-                )
+            outgoing_edges[transition.source].add(transition.target)
 
         def _reachable_from(start: str) -> set[str]:
             visited = {start}
@@ -105,7 +93,6 @@ class ManipulationPrimitiveNetConfig:
                 "Terminal primitive(s) are unreachable from start_primitive "
                 f"'{self.start_primitive}': {', '.join(unreachable_terminals)}"
             )
-
 
     @property
     def terminals(self):

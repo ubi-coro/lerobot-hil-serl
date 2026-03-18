@@ -2,10 +2,12 @@ from .env.mock import MockEnvConfig
 from .env.aloha import AlohaBimanualEnvConfig
 from .env.aloha_bimanual_v2 import AlohaBimanualEnvConfigV2
 from .env.aloha_bimanual_v2_lemgo import AlohaBimanualEnvConfigLemgoV2
+from .env.aloha_looped_folding import AlohaLoopedFoldingEnvConfig
 from .env.ur3e_spacemouse import UR3eSpacemouseEnvConfig
 from .env.ur5e_bimanual_polytec import UR5eBimanualPolytecEnvConfig, UR5eSinglePolytecEnvConfig
+from .env.demo_mp_net import DemoManipulationPrimitiveNetConfig
 
-from .dataset.test import DatasetTestConfig
+from .dataset.test import TestDatasetConfig
 from .dataset.aloha_folding import AlohaFoldingDatasetConfig
 from .dataset.aloha_unfolding import AlohaUnfoldingDatasetConfig
 from .dataset.aloha_cable import AlohaCableDatasetConfig

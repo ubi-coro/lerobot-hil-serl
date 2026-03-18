@@ -1,7 +1,16 @@
 import logging
 import time
+from dataclasses import replace
+from pathlib import Path
 from typing import Sequence, Tuple
 
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.envs.utils import env_to_dataset_features
+from lerobot.policies.factory import make_policy, make_pre_post_processors
+from lerobot.processor.rename_processor import rename_stats
+
+from share.configs.record import RecordConfig
 from share.envs.manipulation_primitive.config_manipulation_primitive import ManipulationPrimitiveConfig
 
 
@@ -104,3 +113,75 @@ class MPNetStepCounter:
     @property
     def global_step(self):
         return sum(self._count.values())
+
+
+def make_policies_and_datasets(cfg: RecordConfig):
+    datasets = {}
+    policies = {}
+    preprocessors = {}
+    postprocessors = {}
+    for name, p in cfg.env.primitives.items():
+        if p.is_adaptive and name != cfg.env.reset_primitive:
+
+            # 1) dataset
+            stats = None
+            rename_map = {}
+            if cfg.dataset is not None:
+                root = Path(cfg.dataset.root) / name
+                repo_id = f"{cfg.dataset.repo_id}-{name}"
+
+                if cfg.resume:
+                    datasets[name] = LeRobotDataset(
+                        repo_id,
+                        root=root,
+                        batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+                        vcodec=cfg.dataset.vcodec,
+                    )
+                    datasets[name].start_image_writer(
+                        num_processes=cfg.dataset.num_image_writer_processes,
+                        num_threads=cfg.dataset.num_image_writer_threads_per_camera * p.num_cameras
+                    )
+
+                else:
+                    datasets[name] = LeRobotDataset.create(
+                        repo_id,
+                        cfg.env.fps,
+                        root=root,
+                        features=env_to_dataset_features(p.features),
+                        robot_type=cfg.env.type,
+                        use_videos=cfg.dataset.video,
+                        image_writer_processes=cfg.dataset.num_image_writer_processes,
+                        image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * p.num_cameras,
+                        batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+                        vcodec=cfg.dataset.vcodec,
+                    )
+
+                stats = rename_stats(datasets[name].meta.stats, cfg.dataset.rename_map)
+                rename_map = cfg.dataset.rename_map
+
+            # 2) policy
+            if p.policy is None:
+                continue
+
+            if p.policy.pretrained_path is not None:
+                policy_path = p.policy.pretrained_path
+                p.policy = PreTrainedConfig.from_pretrained(policy_path)
+                p.policy = replace(p.policy, **p.policy_overwrites)
+                p.policy.pretrained_path = policy_path
+
+            policies[name] = make_policy(cfg=p.policy, env_cfg=p)
+            policies[name] = policies[name].eval()
+
+            pre, post = make_pre_post_processors(
+                policy_cfg=p.policy,
+                pretrained_path=p.policy.pretrained_path,
+                dataset_stats=stats,
+                preprocessor_overrides={
+                    "device_processor": {"device": p.policy.device},
+                    "rename_observations_processor": {"rename_map": rename_map},
+                },
+            )
+            preprocessors[name] = pre
+            postprocessors[name] = post
+
+    return datasets, policies, preprocessors, postprocessors

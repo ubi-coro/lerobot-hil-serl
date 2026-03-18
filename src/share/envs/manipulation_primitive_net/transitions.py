@@ -5,33 +5,28 @@ import numpy as np
 
 from draccus import ChoiceRegistry
 
+from lerobot.teleoperators import TeleopEvents
+
 
 @dataclass
 class TransitionOutcome:
-    condition_fulfilled: bool
-    additional_reward: float = 0.0
+    reward: float = 0.0
     terminated: bool = False
     truncated: bool = False
     reason: str | None = None
-    transition_name: str | None = None
-    transition_type: str | None = None
-
-    def to_metadata(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass
-class MP_Transition(ChoiceRegistry):
-    additional_reward: float = 0.0
-    terminated: bool = False
-    truncated: bool = False
-    reason: str | None = None
+class Transition(ChoiceRegistry):
+    source: str
+    target: str
 
     def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
         raise NotImplementedError
 
     def check(self, obs: dict, info: dict) -> bool:
-        return self.evaluate(obs=obs, info=info).condition_fulfilled
+        result = self.evaluate(obs=obs, info=info)
+        return result.terminated or result.truncated
 
 
 def _resolve_value(source: dict[str, Any], key: str) -> Any:
@@ -72,21 +67,31 @@ def _compare(lhs: float, rhs: float, operator: str) -> bool:
     raise ValueError(f"Unsupported comparison operator '{operator}'.")
 
 
-@MP_Transition.register_subclass("always")
+@Transition.register_subclass("always")
 @dataclass
-class AlwaysTransition(MP_Transition):
+class Always(Transition):
     def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
         return TransitionOutcome(
-            condition_fulfilled=True,
-            reason="always fire",
-            transition_name=self.__class__.__name__,
-            transition_type="always",
+            terminated=True,
+            reason="always"
         )
 
 
-@MP_Transition.register_subclass("observation_threshold")
+@Transition.register_subclass("on_success")
 @dataclass
-class ObservationThresholdTransition(MP_Transition):
+class OnSuccess(Transition):
+    success_key: str = TeleopEvents.SUCCESS
+
+    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
+        return TransitionOutcome(
+            terminated=info.get(self.success_key, False),
+            reason="success"
+        )
+
+
+@Transition.register_subclass("on_observation_threshold")
+@dataclass
+class OnObservationThreshold(Transition):
     obs_key: str = ""
     threshold: float = 0.0
     operator: Literal["ge", "gt", "le", "lt", "eq", "ne"] = "ge"
@@ -95,47 +100,39 @@ class ObservationThresholdTransition(MP_Transition):
         value = _to_scalar(_resolve_value(obs, self.obs_key))
         fired = _compare(value, self.threshold, self.operator)
         return TransitionOutcome(
-            condition_fulfilled=fired,
-            additional_reward=self.additional_reward,
-            terminated=self.terminated,
-            truncated=self.truncated,
-            reason=self.reason or "observation_threshold",
-            transition_name=self.__class__.__name__,
-            transition_type="observation_threshold",
+            terminated=fired,
+            reason="observation_threshold"
         )
 
 
-@MP_Transition.register_subclass("time_limit")
+@Transition.register_subclass("on_time_limit")
 @dataclass
-class TimeLimitTransition(MP_Transition):
+class OnTimeLimit(Transition):
     max_steps: int = 0
-    step_key: str = "episode_step_count"
-    terminated: bool = False
-    truncated: bool = True
+    step_key: str = "step"
 
     def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
-        current_steps = int(_to_scalar(_resolve_value(info, "step")))
+        current_steps = int(_to_scalar(_resolve_value(info, self.step_key)))
         fired = current_steps >= self.max_steps
         return TransitionOutcome(
-            condition_fulfilled=fired,
-            additional_reward=self.additional_reward,
-            terminated=self.terminated,
-            truncated=self.truncated,
-            reason=self.reason or "time_limit",
-            transition_name=self.__class__.__name__,
-            transition_type="time_limit",
+            terminated=False,
+            truncated=fired,
+            reason="time_limit",
         )
 
 
-@MP_Transition.register_subclass("reward_classifier")
+@Transition.register_subclass("reward_classifier")
 @dataclass
-class RewardClassifierTransition(MP_Transition):
+class RewardClassifierTransition(Transition):
     metric_key: str = "success"
     threshold: float = 0.5
     operator: Literal["ge", "gt", "le", "lt", "eq", "ne"] = "ge"
     additional_reward: float = 1.0
 
     def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
+
+        # todo: run the classifier here
+
         if self.metric_key in info:
             metric = _resolve_value(info, self.metric_key)
         else:
@@ -146,9 +143,9 @@ class RewardClassifierTransition(MP_Transition):
         return TransitionOutcome(
             condition_fulfilled=fired,
             additional_reward=self.additional_reward,
-            terminated=self.terminated,
-            truncated=self.truncated,
-            reason=self.reason or "reward_classifier",
+            terminated=True,
+            truncated=False,
+            reason="reward_classifier",
             transition_name=self.__class__.__name__,
             transition_type="reward_classifier",
         )

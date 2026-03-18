@@ -45,11 +45,15 @@ class ManipulationPrimitive(gymnasium.Env):
 
         start = 0
         for name, robot in self.robot_dict.items():
+            offset = self._action_length[name]
+
             if self._is_task_frame_robot[name]:
                 robot.set_task_frame(self.task_frame[name])
+                action_to_send = action[start:start + offset]
+            else:
+                action_to_send = {key: action[start + i] for i, key in enumerate(robot.action_features.keys())}
 
-            offset = self._action_length[name]
-            robot.send_action(action[start:start+offset])
+            robot.send_action(action_to_send)
             start += offset
 
         obs = self._get_observation()
@@ -103,7 +107,7 @@ class ManipulationPrimitive(gymnasium.Env):
         obs_dict = {}
 
         for cam_key, cam in self.cameras.items():
-            obs_dict[f"{OBS_IMAGES}{cam_key}"] = cam.async_read()
+            obs_dict[f"{OBS_IMAGES}.{cam_key}"] = cam.async_read()
 
         for name in self.robot_dict:
             robot_dict_obs_dict = self.robot_dict[name].get_observation()

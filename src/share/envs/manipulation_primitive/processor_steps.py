@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+import einops
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
@@ -43,6 +44,7 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
     teleoperators: dict[str, Any] = field(default_factory=dict)
     task_frame: dict[str, TaskFrame] = field(default_factory=dict)
     kinematics: dict[str, Any] = field(default_factory=dict)
+    joint_names: dict[str, list[str]] = field(default_factory=dict)
     use_virtual_reference: bool | dict[str, bool] = True
 
     _is_delta_teleoperator: dict[str, bool] = field(default_factory=dict, init=False)
@@ -106,8 +108,8 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
         """Map absolute joint teleop input into learning-space values."""
         joint_state = self._extract_joint_action(teleop_action)
         if frame.space == ControlSpace.JOINT:
-            values = [joint_state.get(f"joint_{axis + 1}", 0.0) for axis in frame.learnable_axis_indices]
-            return torch.tensor(values, dtype=torch.float32)
+            #values = [joint_state.get(f"joint_{axis + 1}", joint_state.get(self.joint_names[name][axis])) for axis in frame.learnable_axis_indices]
+            return torch.tensor(list(joint_state.values()), dtype=torch.float32)
 
         solver = self._require_solver(name)
         pose = solver.forward_kinematics(joint_state)
@@ -210,12 +212,9 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
     def _extract_joint_action(teleop_action: Any) -> dict[str, float]:
         """Normalize teleop joint input into ``joint_name -> position``."""
         if isinstance(teleop_action, dict):
-            joint_state: dict[str, float] = {}
-            for k, v in teleop_action.items():
-                name = k.replace(".pos", "")
-                joint_state[name] = float(v)
-            return joint_state
-        return {f"joint_{i + 1}": float(v) for i, v in enumerate(teleop_action)}
+            return teleop_action
+        else:
+            return {f"joint_{i + 1}": float(v) for i, v in enumerate(teleop_action)}
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
@@ -232,10 +231,13 @@ class InterventionActionProcessorStep(ProcessorStep):
     teleoperators: dict[str, Any] = field(default_factory=dict)
     task_frame: dict[str, TaskFrame] = field(default_factory=dict)
 
-    _intervention_occurred: bool = field(default=False, init=False)
+    def __post_init__(self):
+        self._disable_torque_on_intervention = {name: hasattr(teleop, "bus") for name, teleop in self.teleoperators.items()}
+        self._intervention_occurred = False
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         """Select policy or teleop action source and emit full task-frame targets."""
+        # 1) read out transition info
         action = transition.get(TransitionKey.ACTION)
         if not isinstance(action, torch.Tensor):
             raise TypeError(f"Action should be a torch.Tensor, got {type(action)}")
@@ -243,18 +245,36 @@ class InterventionActionProcessorStep(ProcessorStep):
         new_transition = transition.copy()
         info = dict(new_transition.get(TransitionKey.INFO) or {})
         complementary_data = dict(new_transition.get(TransitionKey.COMPLEMENTARY_DATA) or {})
-
         teleop_action_dict = complementary_data.get(TELEOP_ACTION_KEY)
         is_intervention = bool(info.get(TeleopEvents.IS_INTERVENTION, False))
 
+        # 2) process teleop action, decide leader torque, send feedback, prepare actions
         self._intervention_occurred = self._intervention_occurred | is_intervention
         if self._intervention_occurred and not is_intervention:
             info[TeleopEvents.INTERVENTION_COMPLETED] = True
 
         if is_intervention and isinstance(teleop_action_dict, dict):
             source_actions = teleop_action_dict
+
+            # torque leaders off during teleop
+            for name, teleop_action in teleop_action_dict.items():
+                if self._disable_torque_on_intervention[name]:
+                    self.teleoperators[name].disable_torque()
+
         else:
             source_actions = self._split_policy_action(action)
+
+            if self._intervention_occurred:
+                # torque leader on intervention end
+                # todo: this takes forever (2-3ms -> 25-30ms) when recording normally, ie not interactive
+                for name, teleop_action in self.teleoperators.items():
+                    if self._disable_torque_on_intervention[name]:
+                        self.teleoperators[name].enable_torque()
+            else:
+                # send feedback to the leaders
+                # disabled during the first cycle where the intervention ended -> requires reset
+                for teleop_name, teleop in self.teleoperators.items():
+                        teleop.send_feedback(self._map_to_teleop_action(source_actions, teleop_name))
 
         full_action: dict[str, torch.Tensor] = {}
         for name, frame in self.task_frame.items():
@@ -266,11 +286,16 @@ class InterventionActionProcessorStep(ProcessorStep):
                 continue
 
             # project partial action on all task frame targets
-            projected = self._project_learning_action(frame, encoded_action)
+            projected = self._project_policy_action(frame, encoded_action)
             full_action[name] = torch.tensor(projected, dtype=action.dtype, device=action.device)
 
+        # build teleop action that looks exactly like the action that came in
+        teleop_action_store = torch.tensor([])
+        if teleop_action_dict:
+            teleop_action_store = torch.concatenate([a for a in teleop_action_dict.values()])
+        complementary_data[TELEOP_ACTION_KEY] = teleop_action_store
+
         new_transition[TransitionKey.ACTION] = full_action
-        complementary_data[TELEOP_ACTION_KEY] = full_action
         new_transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
         new_transition[TransitionKey.INFO] = info
         return new_transition
@@ -285,17 +310,13 @@ class InterventionActionProcessorStep(ProcessorStep):
             idx += dim
         return policy_by_robot
 
-    def _project_learning_action(self, frame: TaskFrame, encoded_action: Any) -> list[float]:
+    def _project_policy_action(self, frame: TaskFrame, encoded_action: Any) -> list[float]:
         """Project encoded learning-space vectors into a full 6-DoF task target."""
         raw = torch.as_tensor(encoded_action, dtype=torch.float32).flatten().tolist()
 
         full_target = list(frame.target)
         cursor = 0
-        absolute_rot_axes = [
-            axis
-            for axis in frame.learnable_axis_indices
-            if axis >= 3 and frame.control_mode[axis] == ControlMode.POS and frame.policy_mode[axis] == PolicyMode.ABSOLUTE
-        ]
+        absolute_rot_axes = [axis for axis in frame.learnable_axis_indices if frame.is_absolute_rotation_axis(axis)]
 
         for axis in frame.learnable_axis_indices:
             if axis in absolute_rot_axes:
@@ -321,6 +342,17 @@ class InterventionActionProcessorStep(ProcessorStep):
             raise ValueError("Encoded action has trailing values that do not match task-frame manifold layout")
 
         return full_target
+
+    def _map_to_teleop_action(self, policy_action: dict[str, torch.Tensor], name: str) -> dict[str, float]:
+        teleop_action = {}
+        policy_action_idx = 0
+
+        for teleop_action_idx, ft in enumerate(self.teleoperators[name].action_features):
+            if teleop_action_idx in self.task_frame[name].learnable_axis_indices:
+                teleop_action[ft] = float(policy_action[name][policy_action_idx])
+                policy_action_idx += 1
+
+        return teleop_action
 
     @staticmethod
     def _bound_differential_axis(frame: TaskFrame, axis: int, value: float) -> float:
@@ -606,9 +638,13 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
             img = torch.from_numpy(np.asarray(image))
 
         if img.ndim == 3:
-            img = img.permute(2, 0, 1)
+            h, w, c = img.shape
+            if c < h and c < w:  # to channel first
+                img = einops.rearrange(img, "h w c -> c h w")
         elif img.ndim == 4:
-            img = img.permute(0, 3, 1, 2)
+            _, h, w, c = img.shape
+            if c < h and c < w:  # to channel first
+                img = einops.rearrange(img, "b h w c -> b c h w")
         else:
             raise ValueError(f"Expected image tensor with 3 or 4 dimensions, got shape {tuple(img.shape)}")
 
@@ -640,14 +676,14 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
 
     def _joint_keys(self, observation: dict[str, Any], robot_name: str, suffix: str) -> list[str]:
         prefix = f"{robot_name}."
-        return sorted(
+        return [
             key
             for key in observation
             if key.startswith(prefix)
             and key.endswith(f".{suffix}")
             and ".ee_" not in key
             and ".gripper." not in key
-        )
+        ]
 
     def _collect_joint_channel(self, observation: dict[str, Any], robot_name: str, suffix: str) -> list[float]:
         return [self._to_float(observation[key]) for key in self._joint_keys(observation, robot_name, suffix)]
@@ -712,6 +748,13 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
 
         if state_dim > 0:
             obs_features[OBS_STATE] = PolicyFeature(type=FeatureType.STATE, shape=(state_dim,))
+
+        # transform to channel first images
+        for name, feature in obs_features.items():
+            if feature.type == FeatureType.VISUAL:
+                h, w, c = feature.shape
+                if c < h and c < w:
+                    obs_features[name].shape = (feature.shape[2], feature.shape[0], feature.shape[1])
 
         return new_features
 
@@ -911,14 +954,13 @@ class RelativeFrameActionProcessor(ProcessorStep):
 class RobotActionToPolicyActionProcessorStep(ProcessorStep):
     """Flatten robot action dict to policy tensor with stable robot->joint ordering."""
 
-    motor_names: dict[str, list[str]] = field(default_factory=dict)
-
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         action = transition.get(TransitionKey.ACTION)
         if not isinstance(action, dict):
             return transition
 
         out = torch.concatenate([robot_action for robot_action in action.values()])
+
         new_transition = transition.copy()
         new_transition[TransitionKey.ACTION] = out
         return new_transition

@@ -501,6 +501,7 @@ class ObservationConfig:
 class GripperConfig:
     """Configuration for gripper control and penalties."""
 
+    enable: bool | dict[str, bool] = True
     use_gripper: bool | dict[str, bool] = False
     penalty: float | dict[str, float | None] | None = None
     max_pos: float | dict[str, float] = 1.0

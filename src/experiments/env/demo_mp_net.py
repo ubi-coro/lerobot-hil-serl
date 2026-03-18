@@ -5,16 +5,12 @@ import numpy as np
 import torch
 
 from lerobot.envs.configs import EnvConfig
+from lerobot.processor import TransitionKey
 from share.envs.manipulation_primitive.config_manipulation_primitive import ManipulationPrimitiveConfig
 from share.envs.manipulation_primitive.task_frame import ControlMode, PolicyMode, TaskFrame
 from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import ManipulationPrimitiveNetConfig
 from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import ManipulationPrimitiveNet
-from share.envs.manipulation_primitive_net.transitions import (
-    AlwaysTransition,
-    MP_Transition,
-    ObservationThresholdTransition,
-    TimeLimitTransition,
-)
+from share.envs.manipulation_primitive_net.transitions import Always, OnObservationThreshold, OnTimeLimit, Transition
 from share.envs.mocks import MockKinematicsSolver, MockRobot, MockTeleoperator
 
 
@@ -87,24 +83,17 @@ def _build_primitives() -> dict[str, ManipulationPrimitiveConfig]:
 
 def _build_transitions():
     return [
-        (
-            "search",
-            "final_stage",
-            ObservationThresholdTransition(obs_key="random_bot.x.ee_pos", threshold=0.45, operator="ge"),
+        OnObservationThreshold(
+            source="search",
+            target="final_stage",
+            obs_key="random_bot.x.ee_pos",
+            threshold=0.45,
+            operator="ge"
         ),
-        ("final_stage", "retract", AlwaysTransition()),
-        ("retract", "home", TimeLimitTransition(max_steps=5)),
-        ("home", "search", TimeLimitTransition(max_steps=5)),
+        Always(source="final_stage", target="retract"),
+        OnTimeLimit(source="retract", target="home", max_steps=2),
+        OnTimeLimit(source="home", target="search", max_steps=2)
     ]
-
-
-@dataclass
-@EnvConfig.register_subclass("demo_mp_net")
-class DemoManipulationPrimitiveNetConfig(ManipulationPrimitiveNetConfig):
-    start_primitive: str = "search"
-    reset_primitive: str = "final_stage"
-    primitives: dict[str, ManipulationPrimitiveConfig] = field(default_factory=_build_primitives)
-    transitions: list[tuple[str, str, MP_Transition]] = field(default_factory=_build_transitions)
 
 
 class DemoManipulationPrimitiveNet(ManipulationPrimitiveNet):
@@ -118,25 +107,41 @@ class DemoManipulationPrimitiveNet(ManipulationPrimitiveNet):
         return {"random_bot": robot}, {"random_bot": MockTeleoperator("random_bot", is_delta=True)}, {}
 
 
+@dataclass
+@EnvConfig.register_subclass("demo_mp_net")
+class DemoManipulationPrimitiveNetConfig(ManipulationPrimitiveNetConfig):
+    start_primitive: str = "search"
+    reset_primitive: str = "final_stage"
+    primitives: dict[str, ManipulationPrimitiveConfig] = field(default_factory=_build_primitives)
+    transitions: list[Transition] = field(default_factory=_build_transitions)
+
+    def make(self):
+        return DemoManipulationPrimitiveNet(self)
+
+
 def run_demo(steps: int = 100):
     net = DemoManipulationPrimitiveNet(DemoManipulationPrimitiveNetConfig())
-    _, info = net.reset()
-    print(f"--- ROLLOUT START: {info['active_primitive']} ---")
+    transition = net.reset()
 
+    print(f"--- ROLLOUT START: {transition} ---")
+
+    # Run until we hit the terminal stage
     for i in range(steps):
+        # Dummy action tensor matching the search primitive's 3 adaptive dimensions
         action = torch.randn(3)
-        _, _, terminated, _, info = net.step(action)
-        active = info["active_primitive"]
-        if terminated:
-            print(f"Step {i}: [{active}] Terminal condition met!")
-            break
-        print(f"Step {i}: Running [{active}]...")
 
-    print("\n--- TRIGGERING SYSTEM RESET ---")
-    _, reset_info = net.reset()
-    print(f"Final Destination: {reset_info['active_primitive']}")
-    print(f"Reset Path Steps Taken: {reset_info.get('reset_transition_steps', 0)}")
-    print("Reset Sequence: final_stage -> retract -> home -> search")
+        transition = net.step(action)
+        print(f"Step {i}: Running [{transition}]...")
+
+        print(f"  --done:", transition[TransitionKey.DONE])
+
+        if net.active_primitive.is_terminal:
+            transition = net.reset()
+            print(f"--- ROLLOUT RESET: {transition} ---")
+
+        # if terminated:
+        #    print(f"Step {i}: [{active}] Terminal condition met!")
+        #    break
 
 
 if __name__ == "__main__":

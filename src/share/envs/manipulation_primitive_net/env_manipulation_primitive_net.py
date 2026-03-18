@@ -1,23 +1,21 @@
-from dataclasses import asdict, is_dataclass
-from typing import TYPE_CHECKING, Any
-from venv import create
+import time
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
 import torch
 
-from lerobot.configs.types import FeatureType
 from lerobot.processor import create_transition, TransitionKey, EnvTransition
 from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
 from lerobot.utils.constants import ACTION
+from lerobot.cameras import Camera
+from lerobot.teleoperators import Teleoperator, TeleopEvents
+from lerobot.robots import Robot
+from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.transition import Transition
-from tests.processor.test_libero_processor import observation
 
-if TYPE_CHECKING:
-    from lerobot.cameras import Camera
-    from lerobot.teleoperators import Teleoperator, TeleopEvents
-    from lerobot.robots import Robot
-    from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import ManipulationPrimitiveNetConfig
+from share.envs.manipulation_primitive.config_manipulation_primitive import ManipulationPrimitiveConfig
+from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import ManipulationPrimitiveNetConfig
 
 
 class ManipulationPrimitiveNet(gym.Env):
@@ -33,7 +31,7 @@ class ManipulationPrimitiveNet(gym.Env):
         self._envs = {}
         self._env_processors = {}
         self._action_processors = {}
-        self._transitions = {}
+        self._transitions: dict[str, list[Transition]] = {}
 
         for name, primitive in self.config.primitives.items():
             env, env_processor, action_processor = primitive.make(robot_dict, teleop_dict, cameras, device=getattr(self.config, "device", "cpu"))
@@ -42,22 +40,26 @@ class ManipulationPrimitiveNet(gym.Env):
             self._action_processors[name] = action_processor
             self._transitions[name] = []
 
-        for source, target, transition in self.config.transitions:
-            self._transitions[source].append((target, transition))
+        for transition in self.config.transitions:
+            self._transitions[transition.source].append(transition)
 
-        self._active_primitive = self.config.reset_primitive
+        self._active = self.config.reset_primitive
         self._last_reset_info: dict[str, Any] = {}
         self._episode_step_count = 0
         self._primitive_step_count = 0
         self._needs_full_reset = True
 
     @property
-    def active_primitive(self) -> str:
-        return self._active_primitive
+    def active_id(self) -> str:
+        return self._active
+
+    @property
+    def active_primitive(self) -> ManipulationPrimitiveConfig:
+        return self.config.primitives[self._active]
 
     @property
     def action_dim(self) -> int:
-        return self.config.primitives[self.active_primitive].features[ACTION].shape[0]
+        return self.active_primitive.features[ACTION].shape[0]
 
     def connect(self) -> tuple[dict[str, "Robot"], dict[str, "Teleoperator"], dict[str, "Camera"]]:
         assert self.config.robot is not None, "Robot config must be provided for real robot environment"
@@ -91,26 +93,26 @@ class ManipulationPrimitiveNet(gym.Env):
             raise RuntimeError("step() called after MP-Net episode finished; call reset() before stepping again.")
 
         transition = self._step_env_and_check_transitions(action)
-        self._needs_full_reset = self.config.primitives[self._active_primitive].is_terminal
+        self._needs_full_reset = self.config.primitives[self._active].is_terminal
 
         return transition
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None) -> EnvTransition:
         super().reset(seed=seed)
 
-        self._episode_step_count = 0
         self._primitive_step_count = 0
 
         obs = {}
         info = {"seed": None}
         if self._needs_full_reset:
             # If we start in a reset primitive, route to start primitive inside reset()
-            if self._active_primitive not in self.config.terminals:
-                self._active_primitive = self.config.reset_primitive
+            if self._active not in self.config.terminals:
+                self._active = self.config.reset_primitive
 
             obs, _info = self._step_reset_path_until_start(obs=obs, info=info)
             info.update(_info)
             self._needs_full_reset = False
+            self._episode_step_count = 0
 
         # pass down reset call
         for name, env in self._envs.items():
@@ -122,19 +124,19 @@ class ManipulationPrimitiveNet(gym.Env):
             _obs, _info = env.reset(seed=env_seed, options=options)
 
             # store observation of the active primitive
-            if name == self._active_primitive:
+            if name == self._active:
                 obs = _obs
                 info.update(_info)
 
         transition = create_transition(observation=obs, info=info)
-        processed_transition = self._env_processors[self._active_primitive](transition)
+        processed_transition = self._env_processors[self._active](transition)
         self._last_reset_info = processed_transition[TransitionKey.INFO]
         return processed_transition
 
-    def _step_env_and_check_transitions(self, action: np.ndarray | torch.Tensor) -> EnvTransition:
+    def _step_env_and_check_transitions(self, action: torch.Tensor) -> EnvTransition:
         self._episode_step_count += 1
         self._primitive_step_count += 1
-        active = self._active_primitive
+        active = self._active
         if active not in self._envs:
             raise KeyError(f"Unknown active primitive '{active}'.")
 
@@ -156,11 +158,10 @@ class ManipulationPrimitiveNet(gym.Env):
         complementary_data = processed_action_transition[TransitionKey.COMPLEMENTARY_DATA].copy()
         info.update(processed_action_transition[TransitionKey.INFO].copy())
 
-        # Determine which action to store (either action that went in, or teleop action that was written as complementary data)
         if info.get(TeleopEvents.IS_INTERVENTION, False) and TELEOP_ACTION_KEY in complementary_data:
             action_to_record = complementary_data[TELEOP_ACTION_KEY]
         else:
-            action_to_record = action_transition[TransitionKey.ACTION]
+            action_to_record = action
 
         # 4) Process observation
         transition = create_transition(
@@ -178,43 +179,46 @@ class ManipulationPrimitiveNet(gym.Env):
 
         # 5) Build info
         info = processed_transition.get(TransitionKey.INFO, {})
-        info["step"] = self._primitive_step_count
-        info["active_primitive"] = self._active_primitive
+        info["primitive_step"] = self._primitive_step_count
+        info["episode_step"] = self._episode_step_count
         info["transition_from"] = active
         info["transition_to"] = active
         info["transition_reason"] = None
 
         # 6) Check for transitions
-        for target, transition in self._transitions[self._active_primitive]:
-            transition_result = transition.evaluate(obs=obs, info=info)
-            if not transition_result.condition_fulfilled:
+        for transition in self._transitions[self._active]:
+            result = transition.evaluate(obs=obs, info=info)
+            if not (result.terminated or result.truncated):
                 continue
 
             # condition has fired
             self._primitive_step_count = 0
-            self._active_primitive = target
+            self._active = transition.target
 
-            reward += transition_result.additional_reward
-            processed_transition[TransitionKey.DONE] |= transition_result.terminated
-            processed_transition[TransitionKey.TRUNCATED] |= transition_result.truncated
-            info["transition_to"] = target
-            info["transition_reason"] = transition_result.reason
+            reward += result.reward
+            processed_transition[TransitionKey.DONE] |= result.terminated
+            processed_transition[TransitionKey.TRUNCATED] |= result.truncated
+            info["transition_to"] = transition.target
+            info["transition_reason"] = result.reason
             break
 
         return processed_transition
 
     def _step_reset_path_until_start(self, obs: dict[str, np.ndarray], info: dict[str, Any]) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-        while self._active_primitive != self.config.start_primitive:
-            action = self._sample_action(self._active_primitive)
+        while self._active != self.config.start_primitive:
+            start_loop_t = time.perf_counter()
+
+            action = self._sample_action(self._active)
             transition = self._step_env_and_check_transitions(action)
             obs = transition[TransitionKey.OBSERVATION]
             info.update(transition[TransitionKey.INFO])  # keep at least prior info dict if env returns empty
 
-            print(transition[TransitionKey.INFO])
+            dt_load = time.perf_counter() - start_loop_t
+            precise_sleep(1 / self.config.fps - dt_load)
         return obs, info
 
     def _sample_action(self, current_primitive: str) -> Any:
         ft = self.config.primitives[current_primitive].features[ACTION]
-        return np.random.uniform(low=-1, high=1, size=ft.shape)
+        return 2 * torch.rand(size=ft.shape) - 1
 
 

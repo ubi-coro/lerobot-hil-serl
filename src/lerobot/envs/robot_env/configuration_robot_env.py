@@ -243,13 +243,13 @@ class RobotEnvConfig(EnvConfig):
         if self.processor.control_time_s:
             env_pipeline_steps.append(TimeLimitProcessorStep(max_episode_steps=int(self.processor.control_time_s * self.fps)))
 
-        env_pipeline_steps.append(
-            GripperPenaltyProcessorStep(
-                gripper_idc=self.gripper_idc,
-                penalty=self.processor.gripper.penalty,
-                max_gripper_pos=self.processor.gripper.max_pos
-            )
-        )
+        #env_pipeline_steps.append(
+        #    GripperPenaltyProcessorStep(
+        #        gripper_idc=self.gripper_idc,
+        #        penalty=self.processor.gripper.penalty,
+        #        max_gripper_pos=self.processor.gripper.max_pos
+        #    )
+        #)
 
         if (
             self.processor.reward_classifier is not None

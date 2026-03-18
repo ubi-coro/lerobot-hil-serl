@@ -91,18 +91,10 @@ class TaskFrame:
         absolute_rotation_axes = 0
 
         for axis in self.learnable_axis_indices:
-            control_mode = self.control_mode[axis]
-            policy_mode = self.policy_mode[axis]
-
-            if control_mode in {ControlMode.VEL, ControlMode.FORCE}:
+            if self.is_absolute_rotation_axis(axis):
+                absolute_rotation_axes += 1
+            else:
                 dim += 1
-                continue
-
-            if axis < 3 or policy_mode == PolicyMode.RELATIVE:
-                dim += 1
-                continue
-
-            absolute_rotation_axes += 1
 
         if absolute_rotation_axes == 0:
             return dim
@@ -116,6 +108,14 @@ class TaskFrame:
         raise ValueError(
             "Invalid absolute rotation axis count while inferring policy_action_dim. "
             f"Expected 0..3, got {absolute_rotation_axes}."
+        )
+
+    def is_absolute_rotation_axis(self, axis: int):
+        return (
+                axis >= 3 and
+                self.control_mode[axis] == ControlMode.POS and
+                self.policy_mode[axis] == PolicyMode.ABSOLUTE and
+                self.space == ControlSpace.TASK
         )
 
     def to_dict(self) -> dict:

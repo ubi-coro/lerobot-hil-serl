@@ -76,7 +76,7 @@ class DatasetRecordConfig(draccus.ChoiceRegistry, DatasetConfig):
 
 @dataclass
 class RecordConfig:
-    env: EnvConfig
+    env: ManipulationPrimitiveNetConfig
     dataset: DatasetRecordConfig | None = None
     # Whether to control the robot with a policy
     policy: PreTrainedConfig | None = None

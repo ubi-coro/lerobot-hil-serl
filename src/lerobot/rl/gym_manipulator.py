@@ -38,10 +38,8 @@ from lerobot.processor import (
     GripperPenaltyProcessorStep,
     ImageCropResizeProcessorStep,
     InterventionActionProcessorStep,
-    JointVelocityProcessorStep,
     MapDeltaActionToRobotActionStep,
     MapTensorToDeltaActionDictStep,
-    MotorCurrentProcessorStep,
     Numpy2TorchActionProcessorStep,
     RewardClassifierProcessorStep,
     RobotActionToPolicyActionProcessorStep,
@@ -49,9 +47,10 @@ from lerobot.processor import (
     Torch2NumpyActionProcessorStep,
     TransitionKey,
     VanillaObservationProcessorStep,
-    create_transition,
+    create_transition, RobotObservation,
 )
 from lerobot.processor.converters import identity_transition
+from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
 from lerobot.robots import (  # noqa: F401
     RobotConfig,
     make_robot_from_config,

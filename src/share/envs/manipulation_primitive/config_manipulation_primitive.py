@@ -1,31 +1,28 @@
 from dataclasses import dataclass, field, fields
 
-from lerobot.configs.policies import PreTrainedConfig
-from lerobot.envs import EnvConfig
+from pynput import keyboard
 
 from lerobot.cameras import Camera
-
+from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.datasets.pipeline_features import PREFIXES_TO_STRIP, strip_prefix, create_initial_features
+from lerobot.envs import EnvConfig
 from lerobot.teleoperators import Teleoperator, TeleopEvents
-
 from lerobot.robots import Robot
-
-from lerobot.envs.robot_env.configuration_robot_env import is_union_with_dict
 from lerobot.processor import (
-    AddBatchDimensionProcessorStep,
     AddTeleopActionAsComplimentaryDataStep,
     AddTeleopEventsAsInfoStep,
     DataProcessorPipeline,
     DeviceProcessorStep,
-    ImageCropResizeProcessorStep,
+    ImageCropResizeProcessorStep
 )
 from lerobot.processor.converters import identity_transition
 from lerobot.processor.hil_processor import (
     AddFootswitchEventsAsInfoStep,
     AddKeyboardEventsAsInfoStep
 )
-from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
-from lerobot.datasets.pipeline_features import PREFIXES_TO_STRIP, strip_prefix, create_initial_features
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
+
 from share.envs.manipulation_primitive.env_manipulation_primitive import ManipulationPrimitive
 from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, TaskFrame
 from share.envs.manipulation_primitive.processor_steps import (
@@ -38,7 +35,7 @@ from share.envs.manipulation_primitive.processor_steps import (
     ToJointActionProcessorStep,
     VanillaMPObservationProcessorStep,
 )
-from share.envs.utils import check_task_frame_robot, check_delta_teleoperator
+from share.envs.utils import check_task_frame_robot, check_delta_teleoperator, is_union_with_dict
 from share.utils.kinematics import get_kinematics
 
 
@@ -94,7 +91,7 @@ class GripperConfig:
 class EventConfig:
     """Mappings from teleop inputs to structured intervention events."""
 
-    key_mapping: dict[TeleopEvents, dict] = field(default_factory=lambda: {})
+    key_mapping: dict[TeleopEvents, dict | keyboard.Key] = field(default_factory=lambda: {})
     foot_switch_mapping: dict[tuple[TeleopEvents], dict] = field(default_factory=lambda: {})
 
 
@@ -124,17 +121,18 @@ class ManipulationPrimitiveProcessorConfig:
     kinematics: KinematicsConfig = field(default_factory=KinematicsConfig)
 
 
-@EnvConfig.register_subclass(name="manipulation_primitive")
 @dataclass
 class ManipulationPrimitiveConfig(EnvConfig):
     """Configuration for one manipulation primitive in a primitive net."""
     task_frame: TaskFrame | dict[str, TaskFrame] = field(default_factory=TaskFrame)
     processor: ManipulationPrimitiveProcessorConfig = field(default_factory=ManipulationPrimitiveProcessorConfig)
     policy: PreTrainedConfig | None = None
+    policy_overwrites: dict = field(default_factory=dict)
     is_terminal: bool = False
 
-    _kinematics_solver: dict = field(default_factory=dict)
-    _joint_names: dict = field(default_factory=dict)
+    def __post_init__(self):
+        self._kinematics_solver = {}
+        self._joint_names = {}
 
     @property
     def gym_kwargs(self) -> dict:
@@ -206,7 +204,8 @@ class ManipulationPrimitiveConfig(EnvConfig):
                 teleoperators=teleop_dict,
                 task_frame=self.task_frame,
                 kinematics=self._kinematics_solver,
-                use_virtual_reference=self.processor.kinematics.use_virtual_reference
+                use_virtual_reference=self.processor.kinematics.use_virtual_reference,
+                joint_names=self._joint_names
             ),
 
             # scatter policy / teleop action (depending on is-intervention event) into full task frame action target
@@ -231,8 +230,9 @@ class ManipulationPrimitiveConfig(EnvConfig):
                 )
             )
 
+        # todo: fix this
         is_task_frame_robot = check_task_frame_robot(robot_dict)
-        if not all(is_task_frame_robot.values()):
+        if not all(is_task_frame_robot.values()) and False:
             # after this processor, the action must a dictionary of joint names
             # policy_action: delta vel ->
 
@@ -247,7 +247,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
             )
 
         # up until here, the action is a dictionary, this turns it into one tensor
-        action_pipeline_steps.append(RobotActionToPolicyActionProcessorStep(motor_names=self._joint_names))
+        action_pipeline_steps.append(RobotActionToPolicyActionProcessorStep())
 
         # timing hooks
         if self.processor.hooks.time_action_processor:
@@ -274,7 +274,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
         # obs is dict with keys {robot_name}.{axis/joint}.{pos/vel/ee_pos/ee_vel/ee_wrench} | {OBS_IMAGES}{camera_name}
         # {axis} is in {x,y,z,wx,wy,wz}
         if self._kinematics_solver:
-            # for all robots that have a solver, we want fetch their joints and add {robot_name}.{axis}.ee_pos to the obs
+            # for all robots that have a solver, we want to fetch their joints and add {robot_name}.{axis}.ee_pos to the obs
             env_pipeline_steps.append(
                 JointsToEEObservation(
                     kinematics=self._kinematics_solver,
@@ -294,8 +294,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
             env_pipeline_steps.append(
                 ImageCropResizeProcessorStep(
                     crop_params_dict=self.processor.image_preprocessing.crop_params_dict,
-                    resize_size=self.processor.image_preprocessing.resize_size,
-                    filter_keys=self.processor.image_preprocessing.filter_keys
+                    resize_size=self.processor.image_preprocessing.resize_size
                 )
             )
 
@@ -320,7 +319,6 @@ class ManipulationPrimitiveConfig(EnvConfig):
                 add_ee_velocity_to_observation=self.processor.observation.add_ee_velocity_to_observation,
                 add_ee_wrench_to_observation=self.processor.observation.add_ee_wrench_to_observation,
             ),
-            AddBatchDimensionProcessorStep(),
             DeviceProcessorStep(device=device)
         ])
 
@@ -348,13 +346,10 @@ class ManipulationPrimitiveConfig(EnvConfig):
         is_task_frame_robot = check_task_frame_robot(robot_dict)
         is_delta_teleoperator = check_delta_teleoperator(teleop_dict)
 
-        # check if we need a policy
+        # go through each per-robot attribute and check if we need to turn scalar configs into configs for each robot
         if not isinstance(self.task_frame, dict):
             self.task_frame = {name: self.task_frame for name in robot_dict}
-        if self.is_adaptive and self.policy is None:
-            print(f"Primitive {self.type} has adaptive axes but no policy config")
 
-        # go through each processor and check if we need to turn scalar configs into configs for each robot
         for attr in ["observation", "gripper", "kinematics"]:
             _attr = getattr(self.processor, attr)
             for fn in fields(_attr):
@@ -364,24 +359,22 @@ class ManipulationPrimitiveConfig(EnvConfig):
 
         # Set up kinematics solver if inverse kinematics is configured
         for name, robot in robot_dict.items():
-            if self.processor.kinematics.enable[name] and hasattr(robot, "bus"):
+            if not is_task_frame_robot[name]:
+                assert hasattr(robot, "bus")
                 self._joint_names[name] = list(robot.bus.motors.keys())
-                self._kinematics_solver[name] = get_kinematics(
-                    robot_name=robot.name,
-                    urdf_path=self.processor.kinematics.urdf_path[name],
-                    target_frame_name=self.processor.kinematics.target_frame_name[name],
-                    joint_names=self._joint_names[name],
-                )
+
+                if self.processor.kinematics.enable[name]:
+                    self._kinematics_solver[name] = get_kinematics(
+                        robot_name=robot.name,
+                        urdf_path=self.processor.kinematics.urdf_path[name],
+                        target_frame_name=self.processor.kinematics.target_frame_name[name],
+                        joint_names=self._joint_names[name],
+                    )
 
         # checks per robot
         for name, frame in self.task_frame.items():
             if name not in robot_dict:
                 raise ValueError(f"Missing robot for task-frame entry '{name}'.")
-
-            if name not in is_delta_teleoperator:
-                raise ValueError(
-                    f"Missing teleoperator for '{name}' while validating task-frame teleop compatibility."
-                )
 
             # ENV-101: learnable VEL/FORCE axes require delta teleoperator input.
             for axis in frame.learnable_axis_indices:
@@ -433,8 +426,8 @@ class ManipulationPrimitiveConfig(EnvConfig):
         # process features with respective pipeline
         # get initial obs features from robot_dict instead
         initial_features = {}
-        for cam_key, cam in cameras:
-            initial_features[f"{OBS_IMAGES}{cam_key}"] = PolicyFeature(type=FeatureType.VISUAL, shape=cam.async_read().shape)
+        for cam_key, cam in cameras.items():
+            initial_features[f"{OBS_IMAGES}.{cam_key}"] = PolicyFeature(type=FeatureType.VISUAL, shape=cam.async_read().shape)
 
         for name in robot_dict:
             for k, v in robot_dict[name].get_observation().items():
