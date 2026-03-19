@@ -15,10 +15,32 @@ from share.policies.cfgrl_common.backbones import TimmVisionBackboneConfig, Visi
 @PreTrainedConfig.register_subclass("cfgrl_policy")
 @dataclass
 class CFGRLPolicyConfig(PreTrainedConfig):
-    """Configuration for the DiT-style CFGRL flow policy."""
+    """Configuration for the DiT-style CFGRL flow policy.
 
+    Key semantics:
+
+    - ``chunk_size`` is the native horizon predicted by the generative policy.
+    - ``n_action_steps`` controls how many actions from a sampled chunk are
+      consumed before resampling during rollout.
+    - ``metadata_keys`` are optional non-visual, non-proprio observation fields
+      fused into the policy context, such as task identifiers or task parameters.
+    - ``previous_action_key`` optionally points to a previous action chunk or
+      summary tensor that should be fused into the observation context.
+    - ``condition_key`` stores CFGRL labels in the training batch. ``0`` means
+      "ordinary / behavior" and ``1`` means "good / optimal". Missing labels
+      imply unconditional generation.
+    - ``weight_key`` stores per-sample extraction weights for CFGRL-style
+      weighted imitation.
+    - ``default_rollout_condition`` and ``default_guidance_scale`` are rollout
+      defaults baked into checkpoints. ``None`` means unconditional rollout.
+    """
+
+    # Future-facing observation history field. The current policy uses the most
+    # recent observation, but checkpoints still record the intended stack size.
     n_obs_steps: int = 1
+    # Native chunk horizon predicted by the generative policy.
     chunk_size: int = 8
+    # Number of actions consumed from a sampled chunk before resampling.
     n_action_steps: int = 8
     hidden_dim: int = 256
     time_embed_dim: int = 64
@@ -31,13 +53,19 @@ class CFGRLPolicyConfig(PreTrainedConfig):
 
     backbone: VisionBackboneConfig = field(default_factory=TimmVisionBackboneConfig)
 
+    # Dataset field carrying CFGRL labels: 0 = ordinary/behavior, 1 = good/optimal.
     condition_key: str = "cfgrl_condition"
+    # Dataset field carrying per-sample CFGRL extraction weights.
     weight_key: str = "cfgrl_weight"
     condition_dropout_p: float = 0.2
-    default_rollout_condition: int | None = 1
-    default_guidance_scale: float | None = 2.0
+    # Rollout defaults saved in checkpoints. ``None`` means unconditional rollout.
+    default_rollout_condition: int | None = None
+    default_guidance_scale: float | None = None
 
+    # Optional non-visual, non-proprio observation features fused into context,
+    # such as task IDs, task embeddings, or task parameters.
     metadata_keys: list[str] = field(default_factory=list)
+    # Optional observation key containing a previous action chunk or summary.
     previous_action_key: str | None = None
 
     normalization_mapping: dict[str, NormalizationMode] = field(

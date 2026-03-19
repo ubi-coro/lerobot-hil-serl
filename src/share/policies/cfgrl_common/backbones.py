@@ -1,4 +1,19 @@
-"""Vision backbone adapters for the share-local visuomotor CFGRL stack."""
+"""Vision backbone adapters for the share-local visuomotor CFGRL stack.
+
+The policy and critic both consume a generic ``VisionBackboneOutput`` with:
+
+- ``pooled``: a compact global summary that is useful for global conditioning.
+- ``tokens``: patch/spatial tokens used by token-aware fusion blocks.
+
+Tuning modes intentionally describe the *vision stack* contract used by the CFGRL
+modules rather than only the raw encoder weights:
+
+- ``frozen``: freeze the backbone and the lightweight projection layers attached
+  directly to backbone outputs.
+- ``projector_only``: freeze the backbone, but keep those external projection
+  layers trainable so the policy/critic can adapt token interfaces cheaply.
+- ``full``: train the backbone together with the projection layers.
+"""
 
 from __future__ import annotations
 
@@ -26,7 +41,7 @@ class VisionBackboneOutput:
 class VisionBackboneConfig(draccus.ChoiceRegistry, abc.ABC):
     """Choice-registered config for all supported CFGRL vision backbones."""
 
-    tune_mode: str = "frozen"  # {"frozen", "projector_only", "full"}
+    tune_mode: str = "frozen"
     image_size: tuple[int, int] = (224, 224)
     image_mean: tuple[float, float, float] = (0.485, 0.456, 0.406)
     image_std: tuple[float, float, float] = (0.229, 0.224, 0.225)
@@ -86,7 +101,12 @@ class BaseVisionBackbone(nn.Module, abc.ABC):
         raise NotImplementedError
 
     def configure_tuning_mode(self) -> None:
-        """Apply the requested parameter-freezing strategy to the backbone."""
+        """Apply the requested parameter-freezing strategy to encoder weights.
+
+        ``projector_only`` intentionally behaves like ``frozen`` at the backbone
+        level because the trainable projectors live in the policy/critic modules
+        that consume backbone outputs.
+        """
 
         if self.config.tune_mode == "full":
             for param in self.parameters():
@@ -97,6 +117,14 @@ class BaseVisionBackbone(nn.Module, abc.ABC):
                 param.requires_grad_(False)
             return
         raise ValueError(f"Unsupported tune_mode={self.config.tune_mode}")
+
+
+def should_train_backbone_outputs(tune_mode: str) -> bool:
+    """Return whether modules attached directly to backbone outputs should train."""
+
+    if tune_mode not in {"frozen", "projector_only", "full"}:
+        raise ValueError(f"Unsupported tune_mode={tune_mode}")
+    return tune_mode in {"projector_only", "full"}
 
 
 class MockVisionBackbone(BaseVisionBackbone):
@@ -112,7 +140,8 @@ class MockVisionBackbone(BaseVisionBackbone):
             nn.Conv2d(config.hidden_dim, config.hidden_dim, kernel_size=3, stride=2, padding=1),
             nn.GELU(),
         )
-        self.proj = MLP(config.hidden_dim, config.out_dim, config.out_dim, num_layers=2)
+        self.token_proj = nn.Linear(config.hidden_dim, config.out_dim)
+        self.pooled_proj = MLP(config.out_dim, config.out_dim, config.out_dim, num_layers=2)
         self.configure_tuning_mode()
 
     @property
@@ -122,8 +151,8 @@ class MockVisionBackbone(BaseVisionBackbone):
     def forward(self, pixel_values: Tensor) -> VisionBackboneOutput:
         feats = self.conv(pixel_values)
         tokens = feats.flatten(2).transpose(1, 2)
-        pooled = tokens.mean(dim=1)
-        pooled = self.proj(pooled)
+        tokens = self.token_proj(tokens)
+        pooled = self.pooled_proj(tokens.mean(dim=1))
         return VisionBackboneOutput(
             pooled=pooled,
             tokens=tokens,

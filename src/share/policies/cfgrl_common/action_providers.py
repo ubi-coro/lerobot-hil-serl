@@ -80,7 +80,7 @@ class PolicyActionProvider:
     """Sample current and next chunks directly from a reference policy snapshot."""
 
     policy: SupportsActionSampling
-    condition: int | None = 1
+    condition: int | None = None
     guidance_scale: float | None = None
 
     def sample_current_actions(self, batch: dict, num_samples: int) -> Tensor:

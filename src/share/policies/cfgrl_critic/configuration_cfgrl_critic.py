@@ -17,7 +17,11 @@ from share.policies.cfgrl_common.backbones import TimmVisionBackboneConfig, Visi
 
 @dataclass
 class CriticBackboneConfig:
-    """Config for the XVLA-free state-action critic backbone."""
+    """Config for the XVLA-free state-action critic backbone.
+
+    ``pool`` selects how the final action-token sequence is reduced before the
+    critic head. ``mean`` is usually the safest chunk-level default.
+    """
 
     vision_backbone: VisionBackboneConfig = field(default_factory=TimmVisionBackboneConfig)
     hidden_dim: int = 256
@@ -93,16 +97,29 @@ class ValueFlowsHeadConfig(CriticHeadConfig):
 @PreTrainedConfig.register_subclass("cfgrl_critic")
 @dataclass
 class CFGRLCriticConfig(PreTrainedConfig):
-    """Configuration for the share-local chunk-aware CFGRL critic."""
+    """Configuration for the share-local chunk-aware CFGRL critic.
 
+    Key semantics:
+
+    - ``chunk_size`` is the action horizon evaluated by the critic. Advantage
+      labels produced from this critic are only valid for that chunk length.
+    - ``num_action_samples`` controls how many candidate chunks are sampled when
+      estimating ``V(s)`` from an action provider.
+    - ``metadata_keys`` are optional non-visual, non-proprio observation fields
+      treated as extra critic context, such as task IDs or task parameters.
+    """
+
+    # Native action horizon evaluated by the critic.
     chunk_size: int = 8
     gamma: float = 0.99
     tau: float = 0.005
+    # Number of sampled action chunks used when estimating V(s) from an action provider.
     num_action_samples: int = 4
 
     backbone: CriticBackboneConfig = field(default_factory=CriticBackboneConfig)
     head: CriticHeadConfig = field(default_factory=ScalarFlowHeadConfig)
 
+    # Optional non-visual, non-proprio observation features fused into critic context.
     metadata_keys: list[str] = field(default_factory=list)
 
     normalization_mapping: dict[str, NormalizationMode] = field(

@@ -57,8 +57,8 @@ def make_policy_config(
     hidden_dim: int = 48,
     num_denoising_steps: int = 4,
     condition_dropout_p: float = 0.0,
-    default_rollout_condition: int | None = 1,
-    default_guidance_scale: float | None = 2.0,
+    default_rollout_condition: int | None = None,
+    default_guidance_scale: float | None = None,
 ) -> CFGRLPolicyConfig:
     return CFGRLPolicyConfig(
         input_features=make_input_features(

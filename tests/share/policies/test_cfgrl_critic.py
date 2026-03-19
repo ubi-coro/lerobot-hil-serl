@@ -28,9 +28,12 @@ def test_critic_encodes_observation_and_action_chunk():
 
     feat = critic.encode_state_action(batch)
     q = critic.q(batch)
+    context_tokens = critic.backbone.encode_context_tokens(batch["state"])
 
     assert feat.shape == (3, critic.backbone.out_dim)
     assert q.shape == (3,)
+    assert context_tokens.shape[0] == 3
+    assert context_tokens.shape[1] > 4
 
 
 def test_critic_chunk_reward_accumulation_and_done_boundary():
@@ -100,6 +103,19 @@ def test_critic_soft_update_target_moves_parameters():
 
     expected = old_target * 0.75 + source_param.detach() * 0.25
     torch.testing.assert_close(target_param, expected)
+
+
+def test_critic_projector_only_tuning_mode_is_honest():
+    critic = make_critic()
+    projector_only = make_critic()
+    projector_only.config.backbone.vision_backbone.tune_mode = "projector_only"
+    projector_only.backbone._configure_vision_tuning()
+
+    frozen_backbone_params = [param.requires_grad for param in projector_only.backbone.vision_backbone.parameters()]
+    projector_params = [param.requires_grad for param in projector_only.backbone.camera_token_proj.parameters()]
+
+    assert all(not requires_grad for requires_grad in frozen_backbone_params)
+    assert all(projector_params)
 
 
 def test_critic_policy_action_provider_path():

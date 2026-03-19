@@ -11,7 +11,7 @@ from torch import Tensor, nn
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.utils.constants import ACTION, DONE, OBS_STATE, REWARD
 from share.policies.cfgrl_common.action_providers import CachedActionProvider, DatasetActionProvider
-from share.policies.cfgrl_common.backbones import build_vision_backbone
+from share.policies.cfgrl_common.backbones import build_vision_backbone, should_train_backbone_outputs
 from share.policies.cfgrl_common.modules import ActionChunkTokenEncoder, CrossAttentionBlock, MLP
 from .configuration_cfgrl_critic import CFGRLCriticConfig, CriticBackboneConfig
 from .heads.c51 import C51TwinQHead
@@ -22,7 +22,13 @@ from .heads.value_flows import ValueFlowsTwinQHead
 
 
 class CriticBackbone(nn.Module):
-    """Encode observation/action-chunk pairs into critic features."""
+    """Encode observation/action-chunk pairs into critic features.
+
+    Action tokens remain the native sequence. They cross-attend to visual patch
+    tokens plus compact state/metadata tokens before being pooled for the critic
+    head, which keeps the critic lightweight while preserving token-level visual
+    structure.
+    """
 
     def __init__(
         self,
@@ -40,8 +46,12 @@ class CriticBackbone(nn.Module):
         self.metadata_dims = metadata_dims
         self.vision_backbone = build_vision_backbone(config.vision_backbone)
         self.camera_proj = nn.Linear(self.vision_backbone.output_dim, config.hidden_dim)
-        metadata_dim = sum(metadata_dims.values())
-        self.state_proj = nn.Linear(state_dim + metadata_dim, config.hidden_dim)
+        self.camera_token_proj = nn.Linear(self.vision_backbone.output_dim, config.hidden_dim)
+        self.camera_token_embedding = nn.Embedding(max(len(camera_keys), 1), config.hidden_dim)
+        self.state_proj = nn.Linear(state_dim, config.hidden_dim)
+        self.metadata_proj = nn.ModuleDict(
+            {key: nn.Linear(dim, config.hidden_dim) for key, dim in metadata_dims.items()}
+        )
         self.action_encoder = ActionChunkTokenEncoder(
             action_dim=action_dim,
             hidden_dim=config.hidden_dim,
@@ -56,6 +66,7 @@ class CriticBackbone(nn.Module):
             nn.LayerNorm(config.hidden_dim),
             MLP(config.hidden_dim, config.hidden_dim, config.hidden_dim, num_layers=2, dropout=config.dropout),
         )
+        self._configure_vision_tuning()
 
     @property
     def out_dim(self) -> int:
@@ -70,25 +81,42 @@ class CriticBackbone(nn.Module):
             image = image.permute(0, 3, 1, 2).contiguous()
         return image.float()
 
-    def _state_token(self, state: dict[str, Any]) -> Tensor:
+    def _configure_vision_tuning(self) -> None:
+        """Align external projector trainability with the configured vision mode."""
+
+        train_projectors = should_train_backbone_outputs(self.config.vision_backbone.tune_mode)
+        for module in (self.camera_proj, self.camera_token_proj, self.camera_token_embedding):
+            for param in module.parameters():
+                param.requires_grad_(train_projectors)
+
+    def _context_tokens(self, state: dict[str, Any]) -> list[Tensor]:
+        """Build non-action context tokens for cross-attention."""
+
         state_tensor = state[OBS_STATE]
         if state_tensor.ndim == 3:
             state_tensor = state_tensor[:, -1]
-        parts = [state_tensor.float()]
+        tokens = [self.state_proj(state_tensor.float()).unsqueeze(1)]
         for key in self.metadata_dims:
             tensor = state[key]
             if tensor.ndim > 2:
                 tensor = tensor.flatten(1)
-            parts.append(tensor.float())
-        return self.state_proj(torch.cat(parts, dim=-1)).unsqueeze(1)
+            tokens.append(self.metadata_proj[key](tensor.float()).unsqueeze(1))
+        return tokens
 
-    def forward(self, *, state: dict[str, Any], action: Tensor) -> Tensor:
-        obs_tokens = [self._state_token(state)]
-        for key in self.camera_keys:
+    def encode_context_tokens(self, state: dict[str, Any]) -> Tensor:
+        """Encode state and visual observations into critic context tokens."""
+
+        obs_tokens = self._context_tokens(state)
+        for camera_index, key in enumerate(self.camera_keys):
             image = self._prepare_image(state[key])
             vision_out = self.vision_backbone(image)
-            obs_tokens.append(self.camera_proj(vision_out.pooled).unsqueeze(1))
-        obs_tokens = torch.cat(obs_tokens, dim=1)
+            camera_bias = self.camera_token_embedding.weight[camera_index].view(1, 1, -1)
+            obs_tokens.append(self.camera_proj(vision_out.pooled).unsqueeze(1) + camera_bias)
+            obs_tokens.append(self.camera_token_proj(vision_out.tokens) + camera_bias)
+        return torch.cat(obs_tokens, dim=1)
+
+    def forward(self, *, state: dict[str, Any], action: Tensor) -> Tensor:
+        obs_tokens = self.encode_context_tokens(state)
 
         time = torch.zeros(action.shape[0], device=action.device, dtype=action.dtype)
         action_tokens = self.action_encoder(action, time=time, context=None)

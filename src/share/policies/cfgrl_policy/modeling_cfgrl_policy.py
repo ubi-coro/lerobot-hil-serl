@@ -1,4 +1,25 @@
-"""From-scratch visuomotor CFGRL flow policy with a DiT-style action head."""
+"""From-scratch visuomotor CFGRL flow policy with a token-aware DiT-style head.
+
+The policy learns a continuous-time vector field over action chunks. We use the
+standard linear interpolation convention
+
+``x_t = t * x_0 + (1 - t) * x_1``
+
+with:
+
+- ``x_0`` = Gaussian noise
+- ``x_1`` = the target dataset action chunk
+
+The target vector field is therefore the constant displacement
+
+``dx_t / dt = x_0 - x_1``.
+
+Training regresses that field from randomly sampled points along the line between
+noise and data. Sampling starts from ``x_0`` at ``t = 1`` and integrates the
+learned field backwards to ``t = 0`` with a negative Euler step. Because the
+training target matches the derivative of the same interpolation path, the sign
+convention is consistent between training and generation.
+"""
 
 from __future__ import annotations
 
@@ -11,9 +32,10 @@ from torch import Tensor, nn
 
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
-from share.policies.cfgrl_common.backbones import build_vision_backbone
+from share.policies.cfgrl_common.backbones import build_vision_backbone, should_train_backbone_outputs
 from share.policies.cfgrl_common.modules import (
     ActionChunkTokenEncoder,
+    CrossAttentionBlock,
     DiTBlock,
     DiTFinalLayer,
     MLP,
@@ -33,7 +55,12 @@ class ObservationEncoding:
 
 
 class DiTFlowMatchingHead(nn.Module):
-    """Flow-matching head that predicts chunk vector fields with DiT blocks."""
+    """Flow-matching head that predicts chunk vector fields with DiT blocks.
+
+    Action tokens are the denoising sequence. They cross-attend to visual and
+    state/metadata tokens, then receive DiT-style adaLN modulation from the
+    compact global conditioning vector.
+    """
 
     def __init__(self, config: CFGRLPolicyConfig, action_dim: int) -> None:
         super().__init__()
@@ -53,6 +80,12 @@ class DiTFlowMatchingHead(nn.Module):
             num_layers=2,
             dropout=config.dropout,
         )
+        self.cross_blocks = nn.ModuleList(
+            [
+                CrossAttentionBlock(config.hidden_dim, config.num_attention_heads, dropout=config.dropout)
+                for _ in range(config.num_transformer_layers)
+            ]
+        )
         self.blocks = nn.ModuleList(
             [
                 DiTBlock(
@@ -66,13 +99,14 @@ class DiTFlowMatchingHead(nn.Module):
         )
         self.output = DiTFinalLayer(config.hidden_dim, action_dim, cond_dim=config.hidden_dim)
 
-    def forward(self, noisy_actions: Tensor, time: Tensor, context: Tensor) -> Tensor:
+    def forward(self, noisy_actions: Tensor, time: Tensor, context: Tensor, observation_tokens: Tensor) -> Tensor:
         """Predict the continuous-time action vector field."""
 
         time_emb = sinusoidal_time_embedding(time, self.config.time_embed_dim)
         cond = self.cond_proj(torch.cat([context, time_emb], dim=-1))
-        tokens = self.chunk_encoder(noisy_actions, time=time, context=None)
-        for block in self.blocks:
+        tokens = self.chunk_encoder(noisy_actions, time=time, context=context)
+        for cross_block, block in zip(self.cross_blocks, self.blocks, strict=True):
+            tokens = cross_block(tokens, observation_tokens)
             tokens = block(tokens, cond)
         return self.output(tokens, cond)
 
@@ -92,6 +126,8 @@ class CFGRLPolicy(PreTrainedPolicy):
         self.backbone = build_vision_backbone(config.backbone)
         self.camera_keys = sorted(config.image_features.keys())
         self.camera_proj = nn.Linear(self.backbone.output_dim, config.hidden_dim)
+        self.camera_token_proj = nn.Linear(self.backbone.output_dim, config.hidden_dim)
+        self.camera_token_embedding = nn.Embedding(max(len(self.camera_keys), 1), config.hidden_dim)
         self.state_proj = nn.Linear(self.state_dim, config.hidden_dim)
 
         metadata_dim = sum(config.input_features[key].shape[0] for key in config.metadata_keys)
@@ -110,6 +146,7 @@ class CFGRLPolicy(PreTrainedPolicy):
         self.head = DiTFlowMatchingHead(config, self.action_dim)
         self._time_dist = torch.distributions.Beta(config.time_beta_alpha, config.time_beta_beta)
         self._queues: dict[str, deque] | None = None
+        self._configure_vision_tuning()
         self.reset()
 
     def get_optim_params(self) -> dict:
@@ -121,6 +158,14 @@ class CFGRLPolicy(PreTrainedPolicy):
         """Clear rollout-time action chunk caches."""
 
         self._queues = {ACTION: deque(maxlen=self.config.n_action_steps)}
+
+    def _configure_vision_tuning(self) -> None:
+        """Align external projector trainability with the configured backbone mode."""
+
+        train_projectors = should_train_backbone_outputs(self.config.backbone.tune_mode)
+        for module in (self.camera_proj, self.camera_token_proj, self.camera_token_embedding):
+            for param in module.parameters():
+                param.requires_grad_(train_projectors)
 
     def _extract_obs(self, batch: dict[str, Tensor] | dict) -> dict[str, Tensor]:
         """Normalize training and rollout batch layouts to a flat observation dict."""
@@ -152,6 +197,15 @@ class CFGRLPolicy(PreTrainedPolicy):
         return feat.float()
 
     def _raw_condition_to_embedding_index(self, condition: Tensor | None) -> Tensor:
+        """Map raw CFGRL labels to embedding ids.
+
+        Embedding index ``0`` is reserved for the unconditional branch.
+        Dataset labels therefore map as:
+
+        - ``0 -> 1`` for ordinary / behavior-conditioned generation
+        - ``1 -> 2`` for good / optimal-conditioned generation
+        """
+
         if condition is None:
             raise ValueError("condition tensor must not be None here")
         cond = condition.to(dtype=torch.long)
@@ -161,21 +215,34 @@ class CFGRLPolicy(PreTrainedPolicy):
         return cond + 1
 
     def _sample_training_condition_indices(self, batch: dict[str, Tensor], mode: str, batch_size: int, device) -> Tensor:
+        """Choose the conditioning branch used for training.
+
+        BC is intentionally unconditional. CFGRL extraction uses provided labels
+        when available, otherwise it also falls back to unconditional generation.
+        Condition dropout only applies when we were going to use a labeled branch.
+        """
+
+        if mode == "bc":
+            return torch.zeros(batch_size, device=device, dtype=torch.long)
+
         raw = batch.get(self.config.condition_key)
         if raw is None:
-            raw = torch.zeros(batch_size, device=device, dtype=torch.long)
-        else:
-            raw = raw.to(device=device, dtype=torch.long).view(batch_size)
+            return torch.zeros(batch_size, device=device, dtype=torch.long)
+
+        raw = raw.to(device=device, dtype=torch.long).view(batch_size)
         cond_idx = self._raw_condition_to_embedding_index(raw)
         if self.training and self.config.condition_dropout_p > 0:
             drop_mask = torch.rand(batch_size, device=device) < self.config.condition_dropout_p
             cond_idx = torch.where(drop_mask, torch.zeros_like(cond_idx), cond_idx)
-        if mode == "bc" and raw is None:
-            cond_idx = torch.ones(batch_size, device=device, dtype=torch.long)
         return cond_idx
 
     def encode_observations(self, batch: dict[str, Tensor] | dict) -> ObservationEncoding:
-        """Encode images, proprioception, and optional metadata into policy conditioning."""
+        """Encode images, proprioception, and optional metadata into policy conditioning.
+
+        The returned ``tokens`` keep patch/spatial structure from the vision
+        backbone so action tokens can attend to visual layout directly. The
+        compact ``context`` vector remains useful for timestep/condition adaLN.
+        """
 
         obs = self._extract_obs(batch)
         state = obs[OBS_STATE]
@@ -186,13 +253,17 @@ class CFGRLPolicy(PreTrainedPolicy):
         fused_parts: list[Tensor] = []
         obs_tokens: list[Tensor] = [self.state_proj(state.float()).unsqueeze(1)]
 
-        for key in self.camera_keys:
+        for camera_index, key in enumerate(self.camera_keys):
             image = self._prepare_image(obs[key])
             encoded = self.backbone(image)
-            projected = self.camera_proj(encoded.pooled)
-            camera_features[key] = projected
-            fused_parts.append(projected)
-            obs_tokens.append(projected.unsqueeze(1))
+            projected_pooled = self.camera_proj(encoded.pooled)
+            projected_tokens = self.camera_token_proj(encoded.tokens)
+            camera_bias = self.camera_token_embedding.weight[camera_index].view(1, 1, -1)
+            projected_tokens = projected_tokens + camera_bias
+
+            camera_features[key] = projected_pooled
+            fused_parts.append(projected_pooled)
+            obs_tokens.append(projected_tokens)
 
         fused_parts.append(state.float())
         for key in self.config.metadata_keys:
@@ -221,7 +292,26 @@ class CFGRLPolicy(PreTrainedPolicy):
         """Apply CFGRL conditioning and predict the action vector field."""
 
         conditioned_context = obs_encoding.context + self.condition_embedding(condition_indices)
-        return self.head(noisy_actions, time, conditioned_context)
+        return self.head(noisy_actions, time, conditioned_context, obs_encoding.tokens)
+
+    @staticmethod
+    def _build_flow_training_pair(actions: Tensor, noise: Tensor, time: Tensor) -> tuple[Tensor, Tensor]:
+        """Construct the flow-matching training state ``x_t`` and its target field.
+
+        We parameterize a straight path from data to noise:
+
+        ``x_t = t * noise + (1 - t) * actions``
+
+        Its derivative with respect to ``t`` is ``noise - actions``. The network
+        learns that derivative, then sampling integrates the learned field from
+        ``t = 1`` back to ``t = 0`` using a negative step size.
+        """
+
+        batch_size = actions.shape[0]
+        mix = time.view(batch_size, 1, 1)
+        x_t = mix * noise + (1.0 - mix) * actions
+        target = noise - actions
+        return x_t, target
 
     def compute_loss(
         self,
@@ -239,9 +329,7 @@ class CFGRLPolicy(PreTrainedPolicy):
         device = actions.device
         time = self._time_dist.sample((batch_size,)).to(device=device, dtype=actions.dtype)
         noise = torch.randn_like(actions)
-        mix = time.view(batch_size, 1, 1)
-        x_t = mix * noise + (1.0 - mix) * actions
-        target = noise - actions
+        x_t, target = self._build_flow_training_pair(actions, noise, time)
 
         cond_idx = self._sample_training_condition_indices(batch, mode, batch_size, device)
         pred = self._predict_vector_field(obs_encoding, x_t, time, condition_indices=cond_idx)
@@ -277,7 +365,17 @@ class CFGRLPolicy(PreTrainedPolicy):
         noise: Tensor | None = None,
         num_steps: int | None = None,
     ) -> Tensor:
-        """Sample one or more action chunks with optional CFG guidance."""
+        """Sample one or more action chunks with optional CFG guidance.
+
+        Sampling starts from Gaussian noise, corresponding to ``t = 1`` in the
+        training path definition. We then integrate the learned velocity field
+        backwards to ``t = 0`` with Euler updates:
+
+        ``x <- x + dt * v_theta(x, t)``, where ``dt < 0``.
+
+        That negative step is the only sign flip involved; the learned vector
+        field itself uses the same ``noise - action`` convention as training.
+        """
 
         obs_encoding = self.encode_observations(obs)
         batch_size = obs_encoding.context.shape[0]
