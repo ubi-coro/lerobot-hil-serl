@@ -19,6 +19,9 @@ class Transition(ChoiceRegistry):
     source: str
     target: str
 
+    additional_reward: float = 0.0
+    reason: str | None = None
+
     def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
         raise NotImplementedError
 
@@ -72,7 +75,8 @@ class Always(Transition):
     def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
         return TransitionOutcome(
             terminated=True,
-            reason="always"
+            reward=self.additional_reward,
+            reason="always" if self.reason is None else self.reason
         )
 
 
@@ -84,7 +88,8 @@ class OnSuccess(Transition):
     def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
         return TransitionOutcome(
             terminated=info.get(self.success_key, False),
-            reason="success"
+            reward=self.additional_reward,
+            reason="success" if self.reason is None else self.reason
         )
 
 
@@ -100,7 +105,8 @@ class OnObservationThreshold(Transition):
         fired = _compare(value, self.threshold, self.operator)
         return TransitionOutcome(
             terminated=fired,
-            reason="observation_threshold"
+            reward=self.additional_reward,
+            reason="observation_threshold" if self.reason is None else self.reason
         )
 
 
@@ -116,7 +122,8 @@ class OnTimeLimit(Transition):
         return TransitionOutcome(
             terminated=False,
             truncated=fired,
-            reason="time_limit",
+            reward=self.additional_reward,
+            reason="time_limit" if self.reason is None else self.reason
         )
 
 
@@ -140,8 +147,8 @@ class RewardClassifierTransition(Transition):
         value = _to_scalar(metric)
         fired = _compare(value, self.threshold, self.operator)
         return TransitionOutcome(
-            reward=self.additional_reward if fired else 0.0,
             terminated=fired,
             truncated=False,
-            reason="reward_classifier" if fired else None,
+            reward=self.additional_reward,
+            reason="reward_classifier" if self.reason is None else self.reason,
         )

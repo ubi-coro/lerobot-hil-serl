@@ -27,8 +27,15 @@ from statistics import mean
 
 import numpy as np
 import torch
-from accelerate import Accelerator
 from datasets.utils.logging import disable_progress_bar, enable_progress_bar
+
+try:
+    from accelerate import Accelerator
+except ImportError:
+    class Accelerator:  # type: ignore[override]
+        """Fallback placeholder used when accelerate is unavailable at import time."""
+
+        pass
 
 
 def inside_slurm():
