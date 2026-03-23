@@ -3,6 +3,7 @@
 Each test documents one mapping rule in ``MatchTeleopToPolicyActionProcessorStep``.
 """
 
+import pytest
 import torch
 
 from lerobot.processor.core import TransitionKey
@@ -48,7 +49,7 @@ def test_delta_teleop_maps_differential_targets_directly():
     out = step(tr)
     converted = out[TransitionKey.COMPLEMENTARY_DATA][TELEOP_ACTION_KEY]["arm"]
 
-    assert torch.allclose(converted, torch.tensor([0.4, -0.2]))
+    assert converted == {"x.vel": 0.4, "y.wrench": -0.2}
 
 
 def test_extract_delta_action_accepts_velocity_style_keys():
@@ -97,8 +98,8 @@ def test_delta_teleop_absolute_pos_integration_respects_virtual_reference_flag()
     v1 = out1[TransitionKey.COMPLEMENTARY_DATA][TELEOP_ACTION_KEY]["arm"]
     v2 = out2[TransitionKey.COMPLEMENTARY_DATA][TELEOP_ACTION_KEY]["arm"]
 
-    assert torch.allclose(v1, torch.tensor([1.1]))
-    assert torch.allclose(v2, torch.tensor([1.2]))
+    assert v1 == {"x.pos": 1.1}
+    assert v2["x.pos"] == pytest.approx(1.2)
 
     no_virtual = MatchTeleopToPolicyActionProcessorStep(
         teleoperators={"arm": MockDeltaTeleoperator()},
@@ -110,8 +111,8 @@ def test_delta_teleop_absolute_pos_integration_respects_virtual_reference_flag()
     nv1 = out3[TransitionKey.COMPLEMENTARY_DATA][TELEOP_ACTION_KEY]["arm"]
     nv2 = out4[TransitionKey.COMPLEMENTARY_DATA][TELEOP_ACTION_KEY]["arm"]
 
-    assert torch.allclose(nv1, torch.tensor([1.1]))
-    assert torch.allclose(nv2, torch.tensor([1.1]))
+    assert nv1 == {"x.pos": 1.1}
+    assert nv2 == {"x.pos": 1.1}
 
 
 def test_velocity_style_delta_teleop_maps_differential_targets_directly():
@@ -131,7 +132,7 @@ def test_velocity_style_delta_teleop_maps_differential_targets_directly():
     out = step(tr)
     converted = out[TransitionKey.COMPLEMENTARY_DATA][TELEOP_ACTION_KEY]["arm"]
 
-    assert torch.allclose(converted, torch.tensor([0.4, -0.2]))
+    assert converted == {"x.vel": 0.4, "y.wrench": -0.2}
 
 
 def test_absolute_joint_teleop_uses_fk_and_relative_modes():
@@ -163,8 +164,8 @@ def test_absolute_joint_teleop_uses_fk_and_relative_modes():
     first_val = first[TransitionKey.COMPLEMENTARY_DATA][TELEOP_ACTION_KEY]["arm"]
     second_val = second[TransitionKey.COMPLEMENTARY_DATA][TELEOP_ACTION_KEY]["arm"]
 
-    assert torch.allclose(first_val, torch.tensor([0.0]))
-    assert torch.allclose(second_val, torch.tensor([0.5]))
+    assert first_val == {"x.pos": 0.0}
+    assert second_val == {"x.pos": 0.5}
 
 
 def test_match_step_uses_complex_fk_for_relative_kinematic_channels():
@@ -188,7 +189,7 @@ def test_match_step_uses_complex_fk_for_relative_kinematic_channels():
     joint_action_1 = {"joint_1.pos": obs["arm.joint_1.pos"], "joint_2.pos": obs["arm.joint_2.pos"], "joint_3.pos": obs["arm.joint_3.pos"]}
     out1 = step(_transition_with_teleop_action("arm", joint_action_1))
     val1 = out1[TransitionKey.COMPLEMENTARY_DATA][TELEOP_ACTION_KEY]["arm"]
-    assert torch.allclose(val1, torch.tensor([0.0, 0.0]))
+    assert val1 == {"x.pos": 0.0, "y.pos": 0.0}
 
     joint_action_2 = {
         "joint_1.pos": joint_action_1["joint_1.pos"] + 0.1,
@@ -201,4 +202,5 @@ def test_match_step_uses_complex_fk_for_relative_kinematic_channels():
     # Expected deltas under MockComplexKinematicsSolver.forward_kinematics.
     expected_dx = 0.5 * 0.1 + 0.2 * (-0.05) - 0.1 * 0.02
     expected_dy = -0.3 * 0.1 + 0.4 * (-0.05) + 0.2 * 0.02
-    assert torch.allclose(val2, torch.tensor([expected_dx, expected_dy], dtype=torch.float32), atol=1e-6)
+    assert val2["x.pos"] == pytest.approx(expected_dx, abs=1e-6)
+    assert val2["y.pos"] == pytest.approx(expected_dy, abs=1e-6)

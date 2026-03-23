@@ -6,6 +6,7 @@ pipeline.
 
 import math
 
+import pytest
 import torch
 
 from lerobot.processor.core import TransitionKey
@@ -18,7 +19,7 @@ from share.envs.manipulation_primitive.processor_steps import (
 from share.envs.manipulation_primitive.task_frame import ControlMode, PolicyMode, TaskFrame
 
 
-def _base_transition(action: torch.Tensor, info: dict | None = None, complementary_data: dict | None = None):
+def _base_transition(action, info: dict | None = None, complementary_data: dict | None = None):
     return {
         TransitionKey.OBSERVATION: {},
         TransitionKey.ACTION: action,
@@ -41,16 +42,16 @@ def test_intervention_action_processor_projects_and_merges_task_frame_targets():
     )
     step = InterventionActionProcessorStep(task_frame={"arm": frame})
 
-    transition = _base_transition(torch.tensor([2.0, -0.5, 0.0, 1.0], dtype=torch.float32))
+    transition = _base_transition({"arm": {"x.vel": torch.tensor(2.0), "z.pos": torch.tensor(-0.5), "wx.pos.cos": torch.tensor(0.0), "wx.pos.sin": torch.tensor(1.0)}})
     out = step(transition)
 
     action = out[TransitionKey.ACTION]["arm"]
-    assert torch.isclose(action[0], torch.tensor(math.tanh(2.0) * 0.5), atol=1e-6)
-    assert torch.isclose(action[1], torch.tensor(2.0), atol=1e-6)
-    assert torch.isclose(action[2], torch.tensor(-0.5), atol=1e-6)
-    assert torch.isclose(action[3], torch.tensor(math.pi / 2), atol=1e-6)
-    assert torch.isclose(action[4], torch.tensor(0.2), atol=1e-6)
-    assert torch.isclose(action[5], torch.tensor(0.3), atol=1e-6)
+    assert action["x.vel"] == pytest.approx(math.tanh(2.0) * 0.5, abs=1e-6)
+    assert action["y.pos"] == pytest.approx(2.0, abs=1e-6)
+    assert action["z.pos"] == pytest.approx(-0.5, abs=1e-6)
+    assert action["wx.pos"] == pytest.approx(math.pi / 2, abs=1e-6)
+    assert action["wy.pos"] == pytest.approx(0.2, abs=1e-6)
+    assert action["wz.pos"] == pytest.approx(0.3, abs=1e-6)
 
 
 def test_intervention_action_processor_prefers_teleop_during_intervention_and_marks_completion():
@@ -64,16 +65,16 @@ def test_intervention_action_processor_prefers_teleop_during_intervention_and_ma
 
     first = step(
         _base_transition(
-            torch.tensor([0.1], dtype=torch.float32),
+            {"arm": {"x.pos": torch.tensor(0.1)}},
             info={TeleopEvents.IS_INTERVENTION: True},
-            complementary_data={TELEOP_ACTION_KEY: {"arm": torch.tensor([0.4], dtype=torch.float32)}},
+            complementary_data={TELEOP_ACTION_KEY: {"arm": {"x.pos": 0.4}}},
         )
     )
-    assert torch.isclose(first[TransitionKey.ACTION]["arm"][0], torch.tensor(0.4), atol=1e-6)
+    assert first[TransitionKey.ACTION]["arm"]["x.pos"] == pytest.approx(0.4, abs=1e-6)
 
     second = step(
         _base_transition(
-            torch.tensor([0.2], dtype=torch.float32),
+            {"arm": {"x.pos": torch.tensor(0.2)}},
             info={TeleopEvents.IS_INTERVENTION: False},
             complementary_data={},
         )
@@ -97,7 +98,16 @@ def test_intervention_action_processor_decodes_so3_6d_representation():
     )
     step = InterventionActionProcessorStep(task_frame={"arm": frame})
 
-    out = step(_base_transition(encoded))
-    euler = out[TransitionKey.ACTION]["arm"][3:6]
+    out = step(_base_transition({"arm": {
+        "rotation.so3.a1.x": encoded[0],
+        "rotation.so3.a1.y": encoded[1],
+        "rotation.so3.a1.z": encoded[2],
+        "rotation.so3.a2.x": encoded[3],
+        "rotation.so3.a2.y": encoded[4],
+        "rotation.so3.a2.z": encoded[5],
+    }}))
+    action = out[TransitionKey.ACTION]["arm"]
 
-    assert torch.allclose(euler, torch.tensor(expected_euler), atol=1e-5)
+    assert action["wx.pos"] == pytest.approx(expected_euler[0], abs=1e-5)
+    assert action["wy.pos"] == pytest.approx(expected_euler[1], abs=1e-5)
+    assert action["wz.pos"] == pytest.approx(expected_euler[2], abs=1e-5)
