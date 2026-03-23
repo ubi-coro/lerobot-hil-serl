@@ -30,7 +30,6 @@ from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnected
 from share.envs.manipulation_primitive.task_frame import TaskFrame, ControlMode
 from share.robots.lerobot_robot_ur.lerobot_robot_urV2.tf_controller import RTDETaskFrameController, TaskFrameCommand
 from share.robots.lerobot_robot_ur.lerobot_robot_urV2.config_ur import URV2Config
-from share.robots.lerobot_robot_ur.lerobot_robot_urV2.tf_mock_controller import RTDETFFMockController
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +59,7 @@ class URV2(Robot):
         self.shm.start()
         config.shm_manager = self.shm
 
-        if config.mock:
-            self.controller = RTDETFFMockController(config)
-        else:
-            self.controller = RTDETaskFrameController(config)
+        self.controller = RTDETaskFrameController(config)
 
         if self.config.use_gripper:
             self.gripper = RTDERobotiqController(

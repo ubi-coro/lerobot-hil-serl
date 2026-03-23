@@ -1039,8 +1039,8 @@ class RelativeFrameActionProcessor(ProcessorStep):
 
 
 @dataclass
-@ProcessorStepRegistry.register("robot_action_to_policy_action_dict")
-class RobotActionToPolicyActionProcessorStep(ProcessorStep):
+@ProcessorStepRegistry.register("to_flat_action")
+class ToFlatAction(ProcessorStep):
     """Flatten robot action dict to policy tensor with stable robot->joint ordering."""
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:

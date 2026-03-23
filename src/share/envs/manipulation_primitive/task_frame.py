@@ -26,7 +26,7 @@ class ControlMode(IntEnum):
     WRENCH = 2
 
 
-TASK_FRAME_AXIS_NAMES = ["x", "y", "z", "wx", "wy", "wz"]
+TASK_FRAME_AXIS_NAMES = ["x", "y", "z", "rx", "ry", "rz"]
 
 @dataclass(slots=True)
 class TaskFrame:
@@ -147,7 +147,7 @@ class TaskFrame:
             suffix = {
                 ControlMode.POS: "pos",
                 ControlMode.VEL: "vel",
-                ControlMode.FORCE: "wrench",
+                ControlMode.WRENCH: "wrench",
             }[control_mode]
             feature_keys[f"{axis_name}.{suffix}"] = float
         return feature_keys

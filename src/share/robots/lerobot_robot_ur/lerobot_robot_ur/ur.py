@@ -24,12 +24,13 @@ from typing import Any
 from lerobot.cameras import make_cameras_from_configs
 from lerobot.processor.hil_processor import GRIPPER_KEY
 from lerobot.robots import Robot
-from lerobot.robots.ur import URConfig
-from share.grippers.robotiq_controller import RTDERobotiqController
-from lerobot.robots.ur.tf_controller import TaskFrameCommand, RTDETFFController, AxisMode
-from lerobot.robots.ur.tf_mock_controller import RTDETFFMockController
 from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnectedError
+
 from share.envs.manipulation_primitive.task_frame import TaskFrame
+from share.grippers.robotiq_controller import RTDERobotiqController
+from .config_ur import URConfig
+from .tf_controller import RTDETFFController, TaskFrameCommand, AxisMode
+from .tf_mock_controller import RTDETFFMockController
 
 logger = logging.getLogger(__name__)
 

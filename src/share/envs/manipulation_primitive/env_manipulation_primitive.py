@@ -32,13 +32,11 @@ class ManipulationPrimitive(gymnasium.Env):
 
         self.current_step = 0
         self._motor_keys: set[str] = set()
-        self._action_length: dict[str, int] = {}
         self._is_task_frame_robot: dict[str, bool] = check_task_frame_robot(robot_dict)
         for name, robot in self.robot_dict.items():
             if self._is_task_frame_robot[name]:
                 robot.set_task_frame(self.task_frame[name])
             self._motor_keys.update([f"{name}.{key}" for key in robot._motors_ft])
-            self._action_length[name] = len(robot.action_features)
 
     def step(self, action: np.ndarray | torch.Tensor) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
         """Apply an action slice per robot and return fresh observations."""
@@ -47,7 +45,6 @@ class ManipulationPrimitive(gymnasium.Env):
 
         start = 0
         for name, robot in self.robot_dict.items():
-            offset = self._action_length[name]
 
             if self._is_task_frame_robot[name]:
                 robot.set_task_frame(self.task_frame[name])
@@ -55,7 +52,7 @@ class ManipulationPrimitive(gymnasium.Env):
             action_to_send = {key: float(action[start + i]) for i, key in enumerate(action_keys)}
 
             robot.send_action(action_to_send)
-            start += offset
+            start += len(action_keys)
 
         obs = self._get_observation()
 

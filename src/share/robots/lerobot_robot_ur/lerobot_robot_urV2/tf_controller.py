@@ -5,9 +5,8 @@ import os
 import time
 import enum
 import multiprocessing as mp
-from dataclasses import dataclass, asdict, replace, field
+from dataclasses import dataclass, asdict, replace
 from multiprocessing.managers import SharedMemoryManager
-from typing import Optional
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -54,6 +53,7 @@ class TaskFrameCommand(TaskFrame):
         d = asdict(self)
         try:
             d["cmd"] = self.cmd.value
+            d.pop("policy_mode", None)
             d["space"] = np.asarray(self.space).astype(np.int8)
             d["control_mode"] = np.array([int(m) if m is not None else -1 for m in self.control_mode])
             d["policy_mode"] = np.array([int(m) if m is not None else -1 for m in self.policy_mode])
@@ -457,8 +457,8 @@ class RTDETaskFrameController(mp.Process):
                         pose_F = self.read_current_state(rtde_r)["ActualTCPPose"]
 
                         # modes: 6×int8 each
-                        new_control_mode = [m if m >= 0 else None for m in single["control_mode"]]
-                        new_delta_mode = [m if m >= 0 else None for m in single["delta_mode"]]
+                        new_control_mode = single["control_mode"]
+                        new_delta_mode = single["delta_mode"]
 
                         # reset virtual position when switching to delta position control
                         for i in range(6):

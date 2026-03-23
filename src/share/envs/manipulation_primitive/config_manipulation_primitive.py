@@ -24,6 +24,7 @@ from lerobot.processor import (
 )
 from lerobot.processor.converters import identity_transition
 from lerobot.processor.hil_processor import (
+    GRIPPER_KEY,
     AddFootswitchEventsAsInfoStep,
     AddKeyboardEventsAsInfoStep
 )
@@ -37,7 +38,6 @@ from share.envs.manipulation_primitive.processor_steps import (
     MatchTeleopToPolicyActionProcessorStep,
     RelativeFrameActionProcessor,
     RelativeFrameObservationProcessor,
-    RobotActionToPolicyActionProcessorStep,
     ToJointActionProcessorStep,
     VanillaMPObservationProcessorStep,
 )
@@ -196,6 +196,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
 
         action_pipeline_steps.extend([
             AddTeleopActionAsComplimentaryDataStep(teleoperators=teleop_dict),  # this checks events and should come after Add*EventsAsInfoStep's
+            ToNestedActionProcessorStep(robot_dict=robot_dict),  # unflatten action and split into per-robot dict
 
             # make teleop action match policy based on task frame (treat delta ee / vel / force the same):
             # teleop Q:
@@ -256,7 +257,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
             )
 
         # up until here, the action is a dictionary, this turns it into one tensor
-        action_pipeline_steps.append(RobotActionToPolicyActionProcessorStep())
+        action_pipeline_steps.append(ToFlatActionProcessorStep())
 
         # timing hooks
         if self.processor.hooks.time_action_processor:
@@ -434,6 +435,13 @@ class ManipulationPrimitiveConfig(EnvConfig):
                 )
 
         # if gripper.enable but the robot has no GRIPPER_KEY action feature, disable
+        for name, robot in robot_dict.items():
+            if self.processor.gripper.enable[name]:
+                if not f"{GRIPPER_KEY}.pos" in robot.action_features:
+                    raise ValueError(
+                        f"Gripper processing enabled for robot '{name}' but no gripper action feature found. "
+                        "Expected an action key like '{GRIPPER_KEY}.pos'."
+                    )
 
     def infer_features(self, robot_dict, cameras):
         """Infer policy-visible feature specs from configured processors."""
@@ -461,6 +469,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
         obs_features = pipeline_features[PipelineFeatureType.OBSERVATION]
 
         action_dim = sum(frame.policy_action_dim for frame in self.task_frame.values())
+        action_dim += sum(bool(enable) for enable in self.processor.gripper.enable.values())  # add gripper action dim if enabled
 
         # expose state, action and visual features
         self.features = {
