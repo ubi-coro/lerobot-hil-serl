@@ -14,6 +14,7 @@ from share.envs.manipulation_primitive.processor_steps import (
     InterventionActionProcessorStep,
     MatchTeleopToPolicyActionProcessorStep,
     ToJointActionProcessorStep,
+    ToNestedActionProcessorStep,
 )
 from share.envs.manipulation_primitive.task_frame import ControlMode, PolicyMode, TaskFrame
 from tests.share.envs.mock_pipeline_entities import (
@@ -55,7 +56,7 @@ def test_to_joint_integrates_relative_task_frame_action_and_clamps_limits():
 
     out1 = step(
         _transition(
-            {"arm": torch.tensor([0.5, 0.0, 0.0, 0.0, 0.0, 0.0])},
+            {"arm": {"x.pos": 0.5, "y.pos": 0.0, "z.pos": 0.0, "wx.pos": 0.0, "wy.pos": 0.0, "wz.pos": 0.0}},
             observation={
                 "arm.x.ee_pos": 0.1,
                 "arm.y.ee_pos": 0.0,
@@ -66,10 +67,10 @@ def test_to_joint_integrates_relative_task_frame_action_and_clamps_limits():
             },
         )
     )
-    assert out1[TransitionKey.ACTION]["joint_2.pos"] == pytest.approx(0.2)
+    assert out1[TransitionKey.ACTION]["arm"]["joint_2.pos"] == pytest.approx(0.2)
 
-    out2 = step(_transition({"arm": torch.tensor([-0.1, 0.0, 0.0, 0.0, 0.0, 0.0])}))
-    assert out2[TransitionKey.ACTION]["joint_2.pos"] == pytest.approx(0.1)
+    out2 = step(_transition({"arm": {"x.pos": -0.1, "y.pos": 0.0, "z.pos": 0.0, "wx.pos": 0.0, "wy.pos": 0.0, "wz.pos": 0.0}}))
+    assert out2[TransitionKey.ACTION]["arm"]["joint_2.pos"] == pytest.approx(0.1)
 
 
 def test_processor_chain_teleop_to_task_frame_to_joint_action():
@@ -82,6 +83,7 @@ def test_processor_chain_teleop_to_task_frame_to_joint_action():
         max_pose=[2.0] * 6,
     )
 
+    to_nested = ToNestedActionProcessorStep(task_frame={"arm": frame})
     match = MatchTeleopToPolicyActionProcessorStep(
         teleoperators={"arm": MockDeltaTeleoperator()},
         task_frame={"arm": frame},
@@ -109,11 +111,11 @@ def test_processor_chain_teleop_to_task_frame_to_joint_action():
         complementary_data={TELEOP_ACTION_KEY: {"arm": {"delta_x": 0.1}}},
     )
 
-    out = to_joint(intervention(match(tr)))
+    out = to_joint(intervention(match(to_nested(tr))))
 
-    assert out[TransitionKey.ACTION]["joint_1.pos"] == pytest.approx(0.0)
-    assert out[TransitionKey.ACTION]["joint_2.pos"] == pytest.approx(0.6)
-    assert out[TransitionKey.ACTION]["joint_3.pos"] == pytest.approx(0.0)
+    assert out[TransitionKey.ACTION]["arm"]["joint_1.pos"] == pytest.approx(0.0)
+    assert out[TransitionKey.ACTION]["arm"]["joint_2.pos"] == pytest.approx(0.6)
+    assert out[TransitionKey.ACTION]["arm"]["joint_3.pos"] == pytest.approx(0.0)
 
 
 def test_to_joint_step_consumes_ee_observation_for_relative_integration():
@@ -138,7 +140,7 @@ def test_to_joint_step_consumes_ee_observation_for_relative_integration():
 
     out = step(
         _transition(
-            {"arm": torch.tensor([0.1, obs["arm.y.ee_pos"], obs["arm.z.ee_pos"], 0.0, 0.0, 0.0])},
+            {"arm": {"x.pos": 0.1, "y.pos": obs["arm.y.ee_pos"], "z.pos": obs["arm.z.ee_pos"], "wx.pos": 0.0, "wy.pos": 0.0, "wz.pos": 0.0}},
             observation={
                 "arm.x.ee_pos": obs["arm.x.ee_pos"],
                 "arm.y.ee_pos": obs["arm.y.ee_pos"],
@@ -153,7 +155,7 @@ def test_to_joint_step_consumes_ee_observation_for_relative_integration():
     # Relative x axis should integrate against observed x.ee_pos before IK.
     integrated_target = [obs["arm.x.ee_pos"] + 0.1, obs["arm.y.ee_pos"], obs["arm.z.ee_pos"], 0.0, 0.0, 0.0]
     expected_joints = MockComplexKinematicsSolver().inverse_kinematics(integrated_target)
-    result = out[TransitionKey.ACTION]
+    result = out[TransitionKey.ACTION]["arm"]
     assert result["joint_1.pos"] == pytest.approx(expected_joints["joint_1"], abs=1e-6)
     assert result["joint_2.pos"] == pytest.approx(expected_joints["joint_2"], abs=1e-6)
     assert result["joint_3.pos"] == pytest.approx(expected_joints["joint_3"], abs=1e-6)

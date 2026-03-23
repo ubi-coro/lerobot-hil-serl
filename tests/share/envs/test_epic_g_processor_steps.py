@@ -1,7 +1,7 @@
 """Focused tests for observation-side processor steps.
 
 This file covers FK observation enrichment, relative EE-frame transforms,
-action flattening, and observation-state feature inference.
+action dict shaping, and observation-state feature inference.
 """
 
 from __future__ import annotations
@@ -14,11 +14,12 @@ from share.envs.manipulation_primitive.processor_steps import (
     JointsToEEObservation,
     RelativeFrameActionProcessor,
     RelativeFrameObservationProcessor,
-    RobotActionToPolicyActionProcessorStep,
+    ToNestedActionProcessorStep,
     VanillaMPObservationProcessorStep,
     _euler_xyz_from_rotation,
     _rotation_from_extrinsic_xyz,
 )
+from share.envs.manipulation_primitive.task_frame import ControlMode, PolicyMode, TaskFrame
 from tests.share.envs.mock_pipeline_entities import MockComplexKinematicsSolver
 
 
@@ -150,45 +151,52 @@ def test_relative_frame_observation_processor_reset_reinitializes_reference():
 
 
 def test_relative_frame_action_processor_transforms_kinematic_axes_only():
-    """Relative action frame: the current implementation is an identity on numeric values."""
+    """Relative action frame: the current implementation is an identity on nested robot actions."""
     step = RelativeFrameActionProcessor(enable={"arm": True})
     action = {
-        "joint_1.pos": 0.1,
-        "joint_2.pos": -0.2,
-        "gripper.pos": 0.75,
+        "arm": {
+            "joint_1.pos": 0.1,
+            "joint_2.pos": -0.2,
+            "gripper.pos": 0.75,
+        }
     }
     out = step(_transition(action=action))[TransitionKey.ACTION]
-    assert out["joint_1.pos"] == pytest.approx(0.1)
-    assert out["joint_2.pos"] == pytest.approx(-0.2)
-    assert out["gripper.pos"] == pytest.approx(0.75)
+    assert out["arm"]["joint_1.pos"] == pytest.approx(0.1)
+    assert out["arm"]["joint_2.pos"] == pytest.approx(-0.2)
+    assert out["arm"]["gripper.pos"] == pytest.approx(0.75)
 
 
 def test_relative_frame_action_processor_is_noop_when_disabled():
-    """Relative action frame: disabling the step should leave actions untouched."""
+    """Relative action frame: disabling the step should leave nested actions untouched."""
     step = RelativeFrameActionProcessor(enable=False)
-    action = {"joint_1.pos": 0.2}
+    action = {"arm": {"joint_1.pos": 0.2}}
     out = step(_transition(action=action))[TransitionKey.ACTION]
     assert out == action
 
 
-def test_robot_action_to_policy_action_processor_stable_joint_order():
-    """Action flattening: per-robot action tensors should flatten in insertion order."""
-    step = RobotActionToPolicyActionProcessorStep()
-    action = {
-        "arm": torch.tensor([1.0, 2.0]),
-        "wrist": torch.tensor([3.0]),
-    }
-    out = step(_transition(action=action))[TransitionKey.ACTION]
-    assert isinstance(out, torch.Tensor)
-    torch.testing.assert_close(out, torch.tensor([1.0, 2.0, 3.0]))
+def test_to_nested_action_processor_uses_task_frame_schema_order():
+    """Action shaping: flat policy tensors should split into nested per-robot action dicts."""
+    frame = TaskFrame(
+        target=[0.0] * 6,
+        policy_mode=[PolicyMode.ABSOLUTE, None, None, None, None, None],
+        control_mode=[ControlMode.POS] * 6,
+    )
+    step = ToNestedActionProcessorStep(
+        task_frame={"arm": frame, "wrist": frame},
+        gripper_enable={"arm": True, "wrist": False},
+    )
+    out = step(_transition(action=torch.tensor([1.0, 2.0, 3.0])))[TransitionKey.ACTION]
+    assert torch.isclose(out["arm"]["x.pos"], torch.tensor(1.0))
+    assert torch.isclose(out["arm"]["gripper.pos"], torch.tensor(2.0))
+    assert torch.isclose(out["wrist"]["x.pos"], torch.tensor(3.0))
 
 
-def test_robot_action_to_policy_action_processor_passes_non_dict_actions_through():
-    """Action flattening: non-dict inputs should be returned unchanged."""
-    step = RobotActionToPolicyActionProcessorStep()
-    action = torch.tensor([1.0, 2.0])
+def test_to_nested_action_processor_passes_dict_actions_through():
+    """Action shaping: dict actions should be returned unchanged."""
+    step = ToNestedActionProcessorStep()
+    action = {"arm": {"x.pos": torch.tensor(1.0)}}
     out = step(_transition(action=action))[TransitionKey.ACTION]
-    torch.testing.assert_close(out, action)
+    assert out == action
 
 
 def test_vanilla_mp_observation_processor_collects_modalities_and_images():

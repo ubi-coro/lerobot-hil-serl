@@ -24,9 +24,10 @@ class ControlMode(IntEnum):
     POS = 0
     VEL = 1
     WRENCH = 2
+    FORCE = 2
 
 
-TASK_FRAME_AXIS_NAMES = ["x", "y", "z", "rx", "ry", "rz"]
+TASK_FRAME_AXIS_NAMES = ["x", "y", "z", "wx", "wy", "wz"]
 
 @dataclass(slots=True)
 class TaskFrame:
@@ -129,7 +130,7 @@ class TaskFrame:
             f"Expected 0..3, got {absolute_rotation_axes}."
         )
 
-    def is_absolute_rotation_axis(self, axis: int):
+    def is_absolute_rotation_axis(self, axis: int) -> bool:
         return (
                 axis >= 3 and
                 self.control_mode[axis] == ControlMode.POS and
@@ -137,19 +138,56 @@ class TaskFrame:
                 self.space == ControlSpace.TASK
         )
 
+    def action_key_for_axis(self, axis: int) -> str:
+        """Return the low-level action key for one axis of this task frame."""
+        if self.space == ControlSpace.JOINT:
+            return f"joint_{axis + 1}.pos"
+
+        axis_name = TASK_FRAME_AXIS_NAMES[axis]
+        suffix = {
+            ControlMode.POS: "pos",
+            ControlMode.VEL: "vel",
+            ControlMode.WRENCH: "wrench",
+        }[self.control_mode[axis]]
+        return f"{axis_name}.{suffix}"
+
+    def policy_action_keys(self) -> list[str]:
+        """Return ordered learning-space keys matching the flat policy tensor layout."""
+        keys: list[str] = []
+        absolute_rot_axes = [axis for axis in self.learnable_axis_indices if self.is_absolute_rotation_axis(axis)]
+
+        for axis in self.learnable_axis_indices:
+            if axis in absolute_rot_axes:
+                continue
+            keys.append(self.action_key_for_axis(axis))
+
+        if len(absolute_rot_axes) == 1:
+            axis_name = TASK_FRAME_AXIS_NAMES[absolute_rot_axes[0]]
+            keys.extend([f"{axis_name}.pos.cos", f"{axis_name}.pos.sin"])
+        elif len(absolute_rot_axes) == 2:
+            keys.extend(["rotation.s2.x", "rotation.s2.y", "rotation.s2.z"])
+        elif len(absolute_rot_axes) == 3:
+            keys.extend([
+                "rotation.so3.a1.x",
+                "rotation.so3.a1.y",
+                "rotation.so3.a1.z",
+                "rotation.so3.a2.x",
+                "rotation.so3.a2.y",
+                "rotation.so3.a2.z",
+            ])
+        elif len(absolute_rot_axes) > 3:
+            raise ValueError(f"Expected at most 3 absolute rotation axes, got {len(absolute_rot_axes)}")
+
+        return keys
+
     def action_feature_keys(self) -> dict[str, type]:
         """Return the keyed low-level action schema implied by this task frame."""
         if self.space == ControlSpace.JOINT:
             return {f"joint_{i + 1}.pos": float for i in range(len(self.target))}
 
         feature_keys: dict[str, type] = {}
-        for axis_name, control_mode in zip(TASK_FRAME_AXIS_NAMES, self.control_mode, strict=True):
-            suffix = {
-                ControlMode.POS: "pos",
-                ControlMode.VEL: "vel",
-                ControlMode.WRENCH: "wrench",
-            }[control_mode]
-            feature_keys[f"{axis_name}.{suffix}"] = float
+        for axis in range(len(self.target)):
+            feature_keys[self.action_key_for_axis(axis)] = float
         return feature_keys
 
     def to_dict(self) -> dict:

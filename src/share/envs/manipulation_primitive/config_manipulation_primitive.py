@@ -33,12 +33,14 @@ from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 from share.envs.manipulation_primitive.env_manipulation_primitive import ManipulationPrimitive
 from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, TaskFrame
 from share.envs.manipulation_primitive.processor_steps import (
+    DiscretizeGripperProcessorStep,
     InterventionActionProcessorStep,
     JointsToEEObservation,
     MatchTeleopToPolicyActionProcessorStep,
     RelativeFrameActionProcessor,
     RelativeFrameObservationProcessor,
     ToJointActionProcessorStep,
+    ToNestedActionProcessorStep,
     VanillaMPObservationProcessorStep,
 )
 from share.envs.utils import check_task_frame_robot, check_delta_teleoperator, is_union_with_dict
@@ -90,9 +92,9 @@ class GripperConfig:
 
     enable: bool | dict[str, bool] = False
     discretize: bool | dict[str, bool] = False
+    threshold: float | dict[str, float] = 0.5
     max_pos: float | dict[str, float] = 1.0
     min_pos: float | dict[str, float] = 0.0
-    static_pos: float | dict[str, float] = 0.0  # sent if enable = False
     penalty: float | dict[str, float | None] | None = None
 
 
@@ -196,7 +198,10 @@ class ManipulationPrimitiveConfig(EnvConfig):
 
         action_pipeline_steps.extend([
             AddTeleopActionAsComplimentaryDataStep(teleoperators=teleop_dict),  # this checks events and should come after Add*EventsAsInfoStep's
-            ToNestedActionProcessorStep(robot_dict=robot_dict),  # unflatten action and split into per-robot dict
+            ToNestedActionProcessorStep(
+                task_frame=self.task_frame,
+                gripper_enable=self.processor.gripper.enable,
+            ),
 
             # make teleop action match policy based on task frame (treat delta ee / vel / force the same):
             # teleop Q:
@@ -215,7 +220,8 @@ class ManipulationPrimitiveConfig(EnvConfig):
                 task_frame=self.task_frame,
                 kinematics=self._kinematics_solver,
                 use_virtual_reference=self.processor.kinematics.use_virtual_reference,
-                joint_names=self._joint_names
+                joint_names=self._joint_names,
+                gripper_enable=self.processor.gripper.enable,
             ),
 
             # scatter policy / teleop action (depending on is-intervention event) into full task frame action target
@@ -223,13 +229,14 @@ class ManipulationPrimitiveConfig(EnvConfig):
             InterventionActionProcessorStep(
                 teleoperators=teleop_dict,
                 task_frame=self.task_frame,
+                gripper_enable=self.processor.gripper.enable,
             ),
-
-            #DiscretizeGripperProcessorStep(
-            #    gripper_idc=self.gripper_idc,
-            #    min_pos=self.processor.gripper.min_pos,
-            #    max_pos=self.processor.gripper.max_pos
-            #),
+            DiscretizeGripperProcessorStep(
+                min_pos=self.processor.gripper.min_pos,
+                max_pos=self.processor.gripper.max_pos,
+                threshold=self.processor.gripper.threshold, 
+                discretize=self.processor.gripper.discretize
+            ),
         ])
 
         # action in ee frame instead of in world frame
@@ -256,8 +263,6 @@ class ManipulationPrimitiveConfig(EnvConfig):
                 )
             )
 
-        # up until here, the action is a dictionary, this turns it into one tensor
-        action_pipeline_steps.append(ToFlatActionProcessorStep())
 
         # timing hooks
         if self.processor.hooks.time_action_processor:
