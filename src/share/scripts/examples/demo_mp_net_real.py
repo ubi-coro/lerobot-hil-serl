@@ -11,7 +11,7 @@ from lerobot.utils.robot_utils import precise_sleep
 from share.envs.manipulation_primitive_net.transitions import OnSuccess, OnTimeLimit
 from share.envs.manipulation_primitive.task_frame import TaskFrame, PolicyMode, ControlMode
 from share.envs.manipulation_primitive.config_manipulation_primitive import ManipulationPrimitiveConfig, EventConfig, \
-    ManipulationPrimitiveProcessorConfig
+    ManipulationPrimitiveProcessorConfig, GripperConfig
 from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import ManipulationPrimitiveNetConfig
 from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import ManipulationPrimitiveNet
 from share.robots.lerobot_robot_ur.lerobot_robot_urV2 import URV2Config
@@ -22,6 +22,11 @@ _event = EventConfig(
     foot_switch_mapping={
         (TeleopEvents.SUCCESS,): {"device": 4, "toggle": False}
     }
+)
+
+_gripper = GripperConfig(
+    enable=True,
+    discretize=True
 )
 
 reset_cfg = ManipulationPrimitiveConfig(
@@ -43,7 +48,7 @@ learn_cfg = ManipulationPrimitiveConfig(
         kp=[2500, 2500, 2500, 100, 100, 100],
         kd=[960, 960, 320, 6, 6, 6]
     ),
-    processor=ManipulationPrimitiveProcessorConfig(events=_event)
+    processor=ManipulationPrimitiveProcessorConfig(events=_event, gripper=_gripper)
 )
 
 # Define the Net with Diverse Transitions
@@ -58,7 +63,7 @@ net_cfg = ManipulationPrimitiveNetConfig(
     transitions=[
         OnSuccess(source="reset", target="learn"),
         OnSuccess(source="learn", target="reset"),
-        #bbbbOnTimeLimit(source="learn", target="reset", max_steps=1000)
+        #OnTimeLimit(source="learn", target="reset", max_steps=1000)
     ],
     robot=URV2Config(
         robot_ip="172.22.22.2",
@@ -86,6 +91,9 @@ def run_demo():
         # Dummy action tensor matching the search primitive's 3 adaptive dimensions
         action = torch.randn(net.action_dim)
 
+        if net._active == "learn":
+            x = 5
+
         transition = net.step(action)
 
         if transition[TransitionKey.DONE]:
@@ -96,6 +104,7 @@ def run_demo():
         print(
             f"Running [{net._active}], "
             f"dt_load: {dt_load * 1000:5.2f}ms ({1 / dt_load:3.1f}hz)"
+            f"{transition[TransitionKey.ACTION]}"
         )
 
     # The "Two Processor Step Reset" happens here

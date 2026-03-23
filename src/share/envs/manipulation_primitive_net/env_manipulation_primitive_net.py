@@ -54,12 +54,12 @@ class ManipulationPrimitiveNet(gym.Env):
         return self._active
 
     @property
-    def active_primitive(self) -> ManipulationPrimitiveConfig:
-        return self.config.primitives[self._active]
+    def active_primitive(self) -> str:
+        return self._active
 
     @property
     def action_dim(self) -> int:
-        return self.active_primitive.features[ACTION].shape[0]
+        return self.config.primitives[self._active].features[ACTION].shape[0]
 
     def connect(self) -> tuple[dict[str, "Robot"], dict[str, "Teleoperator"], dict[str, "Camera"]]:
         assert self.config.robot is not None, "Robot config must be provided for real robot environment"

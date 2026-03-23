@@ -60,7 +60,7 @@ class TaskFrameCommand(TaskFrame):
             d["delta_mode"] = np.array([int(m) if m is not None else -1 for m in self.delta_mode])
             d["target"] = np.asarray(self.target).astype(np.float64)
             d["origin"] = np.asarray(self.origin).astype(np.float64)
-            d["origin"][3:6] = R.from_euler("xyz", d["origin"][3:6], degrees=False).as_rotvec()
+            #d["origin"][3:6] = R.from_euler("xyz", d["origin"][3:6], degrees=False).as_rotvec()
             d["max_pose"] = np.asarray(self.max_pose).astype(np.float64)
             d["min_pose"] = np.asarray(self.min_pose).astype(np.float64)
             d["kp"] = np.asarray(self.kp).astype(np.float64)

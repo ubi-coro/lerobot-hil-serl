@@ -56,10 +56,10 @@ class URV2Config(RobotConfig):
     speed_limits: list[float] = field(default_factory = lambda: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])
 
     # deadband
-    deadband_pos: float = 0.001  # [m/s]
-    deadband_rot: float = 0.003  # [rad/s]
-    leak_rate_pos: float = 50.0  # [1/m]
-    leak_rate_rot: float = 15.0  # [1/s]
+    deadband_pos: float = 0.0005  # [m/s]
+    deadband_rot: float = 0.001  # [rad/s]
+    leak_rate_pos: float = 20.0  # [1/m]
+    leak_rate_rot: float = 10.0  # [1/s]
 
     # contact-aware scaling of wrench limits
     compliance_safety_mode: Literal["adaptive_wrench_limits", "reference_limits"] = "adaptive_limits"

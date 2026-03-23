@@ -27,7 +27,7 @@ class ControlMode(IntEnum):
     FORCE = 2
 
 
-TASK_FRAME_AXIS_NAMES = ["x", "y", "z", "wx", "wy", "wz"]
+TASK_FRAME_AXIS_NAMES = ["x", "y", "z", "rx", "ry", "rz"]
 
 @dataclass(slots=True)
 class TaskFrame:
@@ -145,9 +145,9 @@ class TaskFrame:
 
         axis_name = TASK_FRAME_AXIS_NAMES[axis]
         suffix = {
-            ControlMode.POS: "pos",
-            ControlMode.VEL: "vel",
-            ControlMode.WRENCH: "wrench",
+            ControlMode.POS: "ee_pos",
+            ControlMode.VEL: "ee_vel",
+            ControlMode.WRENCH: "ee_wrench",
         }[self.control_mode[axis]]
         return f"{axis_name}.{suffix}"
 

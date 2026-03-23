@@ -5,7 +5,8 @@ from .env.aloha_bimanual_v2_lemgo import AlohaBimanualEnvConfigLemgoV2
 from .env.aloha_looped_folding import AlohaLoopedFoldingEnvConfig
 from .env.ur3e_spacemouse import UR3eSpacemouseEnvConfig
 from .env.ur5e_bimanual_polytec import UR5eBimanualPolytecEnvConfig, UR5eSinglePolytecEnvConfig
-from .env.demo_mp_net import DemoManipulationPrimitiveNetConfig
+from .env.demo_mp_net_mock import DemoManipulationPrimitiveNetConfig
+from .env.mp_net_ur5e_insertion import MPNetUR5eInsertionConfig
 
 from .dataset.test import TestDatasetConfig
 from .dataset.aloha_folding import AlohaFoldingDatasetConfig
@@ -13,4 +14,3 @@ from .dataset.aloha_unfolding import AlohaUnfoldingDatasetConfig
 from .dataset.aloha_cable import AlohaCableDatasetConfig
 from .dataset.aloha_bimanual_lemgo_v2 import AlohaBimanualDatasetConfigLemgoV2
 from .dataset.polytec import PolytecDatasetConfig
-from .dataset.aloha_stacking_cubes import AlohaStackingCubesDatasetConfig

@@ -141,6 +141,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
     policy_overwrites: dict = field(default_factory=dict)
     notes: str | None = None
     is_terminal: bool = False
+    task_description: str | None = None
 
     def __post_init__(self):
         self._kinematics_solver = {}

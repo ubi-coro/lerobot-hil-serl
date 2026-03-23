@@ -12,7 +12,7 @@ from scipy.spatial.transform import Rotation
 
 from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
 from lerobot.processor.core import EnvTransition, TransitionKey
-from lerobot.processor.hil_processor import TELEOP_ACTION_KEY
+from lerobot.processor.hil_processor import TELEOP_ACTION_KEY, GRIPPER_KEY
 from lerobot.processor.pipeline import ProcessorStep, ProcessorStepRegistry
 from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.constants import OBS_IMAGES, OBS_STATE
@@ -20,16 +20,40 @@ from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpa
 from share.envs.utils import check_delta_teleoperator
 
 
-def _safe_register(name: str):
-    def decorator(step_class: type) -> type:
-        existing = ProcessorStepRegistry._registry.get(name)
-        if existing is not None:
-            if existing.__module__ == step_class.__module__ and existing.__name__ == step_class.__name__:
-                step_class._registry_name = name
-            return step_class
-        return ProcessorStepRegistry.register(name)(step_class)
+def _first_tensor(value: Any) -> torch.Tensor | None:
+    if isinstance(value, torch.Tensor):
+        return value
+    if isinstance(value, dict):
+        for nested in value.values():
+            tensor = _first_tensor(nested)
+            if tensor is not None:
+                return tensor
+    return None
 
-    return decorator
+
+def _flatten_nested_policy_action(
+    action: dict[str, dict[str, Any]],
+    task_frame: dict[str, TaskFrame],
+    gripper_enable: dict[str, bool],
+    like: Any | None = None,
+) -> torch.Tensor:
+    tensor = _first_tensor(action)
+    if tensor is None and like is not None:
+        tensor = _first_tensor(like) if isinstance(like, dict) else like if isinstance(like, torch.Tensor) else None
+    dtype = tensor.dtype if isinstance(tensor, torch.Tensor) else torch.float32
+    device = tensor.device if isinstance(tensor, torch.Tensor) else torch.device("cpu")
+
+    values: list[torch.Tensor] = []
+    for name, frame in task_frame.items():
+        robot_action = action.get(name, {})
+        for key in policy_action_keys_for_robot(frame, gripper_enable[name]):
+            if key not in robot_action:
+                raise ValueError(f"Missing policy action key '{name}.{key}' while flattening action dict")
+            values.append(torch.as_tensor(robot_action[key], dtype=dtype, device=device).reshape(1))
+
+    if not values:
+        return torch.empty(0, dtype=dtype, device=device)
+    return torch.cat(values)
 
 
 def _rotation_from_extrinsic_xyz(rx: float, ry: float, rz: float) -> Rotation:
@@ -49,72 +73,14 @@ def _euler_xyz_from_rotation(rotation: Rotation) -> list[float]:
     return rotation.as_euler("xyz", degrees=False).tolist()
 
 
-def _enabled(flag: bool | dict[str, bool], name: str) -> bool:
-    if isinstance(flag, dict):
-        return bool(flag.get(name, False))
-    return bool(flag)
-
-
-def _to_float(value: Any) -> float:
-    if isinstance(value, torch.Tensor):
-        return float(value.item()) if value.ndim == 0 else float(value.flatten()[0].item())
-    return float(value)
-
-
-def _first_tensor(value: Any) -> torch.Tensor | None:
-    if isinstance(value, torch.Tensor):
-        return value
-    if isinstance(value, dict):
-        for nested in value.values():
-            tensor = _first_tensor(nested)
-            if tensor is not None:
-                return tensor
-    return None
-
-
-def _policy_action_keys_for_robot(name: str, frame: TaskFrame, gripper_enable: bool | dict[str, bool]) -> list[str]:
+def policy_action_keys_for_robot(frame: TaskFrame, gripper_enable: bool) -> list[str]:
     keys = list(frame.policy_action_keys())
-    if _enabled(gripper_enable, name):
-        keys.append("gripper.pos")
+    if gripper_enable:
+        keys.append(f"{GRIPPER_KEY}.pos")
     return keys
 
 
-def _flatten_nested_policy_action(
-    action: dict[str, dict[str, Any]],
-    task_frame: dict[str, TaskFrame],
-    gripper_enable: bool | dict[str, bool],
-    like: Any | None = None,
-) -> torch.Tensor:
-    tensor = _first_tensor(action)
-    if tensor is None and like is not None:
-        tensor = _first_tensor(like) if isinstance(like, dict) else like if isinstance(like, torch.Tensor) else None
-    dtype = tensor.dtype if isinstance(tensor, torch.Tensor) else torch.float32
-    device = tensor.device if isinstance(tensor, torch.Tensor) else torch.device("cpu")
-
-    values: list[torch.Tensor] = []
-    for name, frame in task_frame.items():
-        robot_action = action.get(name, {})
-        for key in _policy_action_keys_for_robot(name, frame, gripper_enable):
-            if key not in robot_action:
-                raise ValueError(f"Missing policy action key '{name}.{key}' while flattening action dict")
-            values.append(torch.as_tensor(robot_action[key], dtype=dtype, device=device).reshape(1))
-
-    if not values:
-        return torch.empty(0, dtype=dtype, device=device)
-    return torch.cat(values)
-
-
-def _normalize_gripper_action(teleop_action: Any) -> float | None:
-    if not isinstance(teleop_action, dict):
-        return None
-    if "gripper.pos" in teleop_action:
-        return float(teleop_action["gripper.pos"])
-    if "gripper" in teleop_action:
-        return float(teleop_action["gripper"])
-    return None
-
-
-def _rotation_component_keys(frame: TaskFrame, absolute_rot_axes: list[int]) -> list[str]:
+def rotation_component_keys(frame: TaskFrame, absolute_rot_axes: list[int]) -> list[str]:
     if len(absolute_rot_axes) == 1:
         axis_name = frame.action_key_for_axis(absolute_rot_axes[0]).removesuffix(".pos")
         return [f"{axis_name}.pos.cos", f"{axis_name}.pos.sin"]
@@ -133,12 +99,12 @@ def _rotation_component_keys(frame: TaskFrame, absolute_rot_axes: list[int]) -> 
 
 
 @dataclass
-@_safe_register("to_nested_action")
+@ProcessorStepRegistry.register("to_nested_action")
 class ToNestedActionProcessorStep(ProcessorStep):
     """Convert the flat policy action tensor into a per-robot keyed dict."""
 
     task_frame: dict[str, TaskFrame] = field(default_factory=dict)
-    gripper_enable: bool | dict[str, bool] = False
+    gripper_enable: dict[str, bool] = field(default_factory=dict)
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         action = transition.get(TransitionKey.ACTION)
@@ -150,7 +116,7 @@ class ToNestedActionProcessorStep(ProcessorStep):
         idx = 0
         for name, frame in self.task_frame.items():
             robot_action: dict[str, torch.Tensor] = {}
-            for key in _policy_action_keys_for_robot(name, frame, self.gripper_enable):
+            for key in policy_action_keys_for_robot(frame, self.gripper_enable[name]):
                 if idx >= action_tensor.numel():
                     raise ValueError("Policy action tensor is shorter than expected for the configured action schema")
                 robot_action[key] = action_tensor[idx]
@@ -171,7 +137,7 @@ class ToNestedActionProcessorStep(ProcessorStep):
 
 
 @dataclass
-@_safe_register("match_teleop_to_policy_action")
+@ProcessorStepRegistry.register("match_teleop_to_policy_action")
 class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
     """Map raw teleop commands into the keyed policy learning-space action format."""
 
@@ -179,8 +145,8 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
     task_frame: dict[str, TaskFrame] = field(default_factory=dict)
     kinematics: dict[str, Any] = field(default_factory=dict)
     joint_names: dict[str, list[str]] = field(default_factory=dict)
-    use_virtual_reference: bool | dict[str, bool] = True
-    gripper_enable: bool | dict[str, bool] = False
+    use_virtual_reference: dict[str, bool] = field(default_factory=dict)
+    gripper_enable: dict[str, bool] = field(default_factory=dict)
 
     _is_delta_teleoperator: dict[str, bool] = field(default_factory=dict, init=False)
     _virtual_task_pose: dict[str, list[float]] = field(default_factory=dict, init=False)
@@ -209,9 +175,8 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
             else:
                 converted = self._map_absolute_joint_teleop(name, frame, teleop_action)
 
-            gripper_value = _normalize_gripper_action(teleop_action)
-            if gripper_value is not None and _enabled(self.gripper_enable, name):
-                converted["gripper.pos"] = gripper_value
+            if self.gripper_enable[name] and f"{GRIPPER_KEY}.pos" in teleop_action:
+                converted[f"{GRIPPER_KEY}.pos"] = teleop_action[f"{GRIPPER_KEY}.pos"]
 
             converted_actions[name] = converted
 
@@ -222,6 +187,7 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
     def _map_delta_teleop(self, name: str, frame: TaskFrame, teleop_action: Any, transition: EnvTransition) -> dict[str, float]:
         deltas = self._extract_delta_action(teleop_action)
 
+        # ik to get from integrated deltas to joints
         if frame.space == ControlSpace.JOINT:
             solver = self._require_solver(name)
             base_pose = self._integration_base_pose(name, frame, transition)
@@ -230,17 +196,17 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
             base_joint_state = self._integration_base_joint_state(name, transition)
             encoded: dict[str, float] = {}
             for axis in frame.learnable_axis_indices:
-                joint_name = self._joint_name_for_axis(name, axis)
-                joint_value = float(joint_target.get(joint_name, joint_target.get(f"joint_{axis + 1}", 0.0)))
+                joint_name = self.joint_names[name][axis]
+                joint_value = joint_target[joint_name]
                 if frame.policy_mode[axis] == PolicyMode.RELATIVE:
                     joint_value -= float(base_joint_state.get(joint_name, joint_value))
                 encoded[frame.action_key_for_axis(axis)] = joint_value
 
+            # update virtual
             if any(frame.policy_mode[axis] == PolicyMode.ABSOLUTE for axis in frame.learnable_axis_indices):
-                self._virtual_joint_target[name] = {
-                    self._joint_name_for_axis(name, axis): float(joint_target.get(self._joint_name_for_axis(name, axis), joint_target.get(f"joint_{axis + 1}", 0.0)))
-                    for axis in frame.learnable_axis_indices
-                }
+                learnable_joints = [self.joint_names[name][axis] for axis in frame.learnable_axis_indices]
+                self._virtual_joint_target[name] = {name: joint_target[name] for name in learnable_joints}
+
             return encoded
 
         source_pose = deltas
@@ -329,17 +295,11 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
                 if key not in observation:
                     obs_pose = []
                     break
-                obs_pose.append(_to_float(observation[key]))
+                obs_pose.append(observation[key])
             if len(obs_pose) == 6:
                 return obs_pose
 
         return list(frame.target)
-
-    def _joint_name_for_axis(self, name: str, axis: int) -> str:
-        joint_names = self.joint_names.get(name, [])
-        if axis < len(joint_names):
-            return joint_names[axis]
-        return f"joint_{axis + 1}"
 
     def _integration_base_joint_state(self, name: str, transition: EnvTransition) -> dict[str, float]:
         use_virtual = self.use_virtual_reference[name] if isinstance(self.use_virtual_reference, dict) else self.use_virtual_reference
@@ -352,7 +312,7 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
             for joint_name in self.joint_names.get(name, []):
                 key = f"{name}.{joint_name}.pos"
                 if key in observation:
-                    joint_state[joint_name] = _to_float(observation[key])
+                    joint_state[joint_name] = observation[key]
             if joint_state:
                 return joint_state
 
@@ -398,7 +358,7 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
 
 
 @dataclass
-@_safe_register("task_frame_intervention_action_processor")
+@ProcessorStepRegistry.register("task_frame_intervention_action_processor")
 class InterventionActionProcessorStep(ProcessorStep):
     """Merge keyed learning-space actions and project them into full robot actions."""
 
@@ -427,36 +387,35 @@ class InterventionActionProcessorStep(ProcessorStep):
             info[TeleopEvents.INTERVENTION_COMPLETED] = True
 
         if is_intervention and isinstance(teleop_action_dict, dict):
-            actions = teleop_action_dict
+            source_actions = teleop_action_dict
             for name in teleop_action_dict:
                 if self._disable_torque_on_intervention.get(name, False):
                     self.teleoperators[name].disable_torque()
         else:
-            actions = policy_actions
+            source_actions = policy_actions
             if self._intervention_occurred:
                 for name, teleop in self.teleoperators.items():
                     if self._disable_torque_on_intervention.get(name, False):
                         teleop.enable_torque()
             else:
                 for teleop_name, teleop in self.teleoperators.items():
-                    teleop.send_feedback(self._map_to_teleop_action(actions, teleop_name))
+                    teleop.send_feedback(self._map_to_teleop_action(source_actions, teleop_name))
 
-        full_action: dict[str, dict[str, float]] = {}
+        full_action_dict: dict[str, dict[str, float]] = {}
         for name, frame in self.task_frame.items():
-            robot_learning_action = dict(actions.get(name, {}))
-            robot_action = self._project_policy_action(frame, robot_learning_action)
-            if _enabled(self.gripper_enable, name) and "gripper.pos" in robot_learning_action:
-                robot_action["gripper.pos"] = _to_float(robot_learning_action["gripper.pos"])
-            full_action[name] = robot_action
+            full_action = self._project_policy_action(frame, source_actions[name])
+            if self.gripper_enable[name] and f"{GRIPPER_KEY}.pos" in source_actions[name]:
+                full_action[f"{GRIPPER_KEY}.pos"] = source_actions[name][f"{GRIPPER_KEY}.pos"]
+            full_action_dict[name] = full_action
 
         complementary_data[TELEOP_ACTION_KEY] = _flatten_nested_policy_action(
-            actions,
+            source_actions,
             task_frame=self.task_frame,
             gripper_enable=self.gripper_enable,
             like=policy_actions,
         )
 
-        new_transition[TransitionKey.ACTION] = full_action
+        new_transition[TransitionKey.ACTION] = full_action_dict
         new_transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
         new_transition[TransitionKey.INFO] = info
         return new_transition
@@ -474,18 +433,18 @@ class InterventionActionProcessorStep(ProcessorStep):
             key = frame.action_key_for_axis(axis)
             if key not in encoded_action:
                 raise ValueError(f"Missing learning-space action key '{key}' for task-frame projection")
-            value = _to_float(encoded_action[key])
+            value = encoded_action[key]
             if frame.control_mode[axis] in {ControlMode.VEL, ControlMode.WRENCH}:
                 value = self._bound_differential_axis(frame, axis, value)
             full_target[key] = float(value)
 
         if absolute_rot_axes:
-            rotation_keys = _rotation_component_keys(frame, absolute_rot_axes)
+            rotation_keys = rotation_component_keys(frame, absolute_rot_axes)
             rotation_raw = []
             for key in rotation_keys:
                 if key not in encoded_action:
                     raise ValueError(f"Missing rotation learning-space key '{key}' for task-frame projection")
-                rotation_raw.append(_to_float(encoded_action[key]))
+                rotation_raw.append(encoded_action[key])
             rotation_values, _ = self._decode_absolute_rotation(absolute_rot_axes, rotation_raw)
             for axis in absolute_rot_axes:
                 full_target[frame.action_key_for_axis(axis)] = float(rotation_values[axis - 3])
@@ -508,17 +467,17 @@ class InterventionActionProcessorStep(ProcessorStep):
             "delta_x": "x.vel",
             "delta_y": "y.vel",
             "delta_z": "z.vel",
-            "delta_rx": "wx.vel",
-            "delta_ry": "wy.vel",
-            "delta_rz": "wz.vel",
-            "gripper": "gripper.pos",
+            "delta_rx": "rx.vel",
+            "delta_ry": "ry.vel",
+            "delta_rz": "rz.vel",
+            "gripper": f"{GRIPPER_KEY}.pos",
         }
         robot_action = policy_action[name]
         teleop_action: dict[str, float] = {}
         for feature_name in feature_names:
             key = aliases.get(feature_name, feature_name)
             if key in robot_action:
-                teleop_action[feature_name] = _to_float(robot_action[key])
+                teleop_action[feature_name] = robot_action[key]
         return teleop_action
 
     @staticmethod
@@ -594,15 +553,15 @@ class InterventionActionProcessorStep(ProcessorStep):
 
 
 @dataclass
-@_safe_register("discretize_gripper_processor")
+@ProcessorStepRegistry.register("discretize_gripper_processor_v2")
 class DiscretizeGripperProcessorStep(ProcessorStep):
     """Discretize gripper actions using a per-robot internal gripper state."""
 
-    discretize: bool | dict[str, bool] = 1.0
-    min_pos: float | dict[str, float] = 0.0
-    max_pos: float | dict[str, float] = 1.0
-    threshold: float = 0.5
-    mode: Literal["state", "pulse"] = "state"
+    discretize: dict[str, bool] = field(default_factory=dict)
+    min_pos: dict[str, float] = field(default_factory=dict)
+    max_pos: dict[str, float] = field(default_factory=dict)
+    threshold: dict[str, float] = field(default_factory=dict)
+    mode: dict[str, Literal["state", "pulse"]] = field(default_factory=dict)
 
     _robot_names: list[str] = field(default_factory=list, init=False)
     _gripper_state: dict[str, float] = field(default_factory=dict, init=False)
@@ -630,57 +589,49 @@ class DiscretizeGripperProcessorStep(ProcessorStep):
         new_transition = transition.copy()
         new_action: dict[str, dict[str, Any]] = {}
         for name, robot_action in action.items():
-            if not isinstance(robot_action, dict) or not self._discretize(name):
+            if not isinstance(robot_action, dict) or not self.discretize.get(name, False):
                 new_action[name] = robot_action
                 continue
 
             robot_action_out = dict(robot_action)
-            if "gripper.pos" not in robot_action_out:
+            if f"{GRIPPER_KEY}.pos" not in robot_action_out:
                 new_action[name] = robot_action_out
                 continue
 
+            # initialize gripper state
             if name not in self._gripper_state:
-                self._gripper_state[name] = self._min_pos(name)
+                self._gripper_state[name] = self.min_pos.get(name, 0.0)
                 if name not in self._robot_names:
                     self._robot_names.append(name)
 
-            input_val = _to_float(robot_action_out["gripper.pos"])
-            if self.mode == "pulse":
-                if input_val > self.threshold:
-                    self._gripper_state[name] = self._max_pos(name)
-                elif input_val < -self.threshold:
-                    self._gripper_state[name] = self._min_pos(name)
-            elif self.mode == "state":
-                if input_val > self.threshold:
-                    self._gripper_state[name] = self._max_pos(name)
-                elif input_val < self.threshold:
-                    self._gripper_state[name] = self._min_pos(name)
+            # update gripper state
+            input_val = robot_action_out[f"{GRIPPER_KEY}.pos"]
+            mode = self.mode.get(name, "state")
+            threshold = self.threshold.get(name, 0.5)
+            min_pos = self.min_pos.get(name, 0.0)
+            max_pos = self.max_pos.get(name, 1.0)
+            if mode == "pulse":
+                if input_val > threshold:
+                    self._gripper_state[name] = max_pos
+                elif input_val < -threshold:
+                    self._gripper_state[name] = min_pos
+            elif mode == "state":
+                if input_val > threshold:
+                    self._gripper_state[name] = max_pos
+                elif input_val < threshold:
+                    self._gripper_state[name] = min_pos
             else:
-                raise ValueError(f"Unsupported gripper discretization mode '{self.mode}'")
+                raise ValueError(f"Unsupported gripper discretization mode '{mode}'")
 
-            robot_action_out["gripper.pos"] = float(self._gripper_state[name])
+            robot_action_out[f"{GRIPPER_KEY}.pos"] = float(self._gripper_state[name])
             new_action[name] = robot_action_out
 
         new_transition[TransitionKey.ACTION] = new_action
         return new_transition
 
-    def _min_pos(self, name: str) -> float:
-        if isinstance(self.min_pos, dict):
-            return float(self.min_pos[name])
-        return float(self.min_pos)
-
-    def _max_pos(self, name: str) -> float:
-        if isinstance(self.max_pos, dict):
-            return float(self.max_pos[name])
-        return float(self.max_pos)
-
-    def _discretize(self, name: str) -> float:
-        if isinstance(self.max_pos, dict):
-            return float(self.max_pos[name])
-        return float(self.max_pos)
-
     def get_config(self) -> dict[str, Any]:
         return {
+            "discretize": self.discretize,
             "min_pos": self.min_pos,
             "max_pos": self.max_pos,
             "threshold": self.threshold,
@@ -688,7 +639,7 @@ class DiscretizeGripperProcessorStep(ProcessorStep):
         }
 
     def reset(self) -> None:
-        self._gripper_state = {name: self._min_pos(name) for name in self._robot_names}
+        self._gripper_state = {name: self.min_pos.get(name, 0.0) for name in self._robot_names}
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
@@ -697,7 +648,7 @@ class DiscretizeGripperProcessorStep(ProcessorStep):
 
 
 @dataclass
-@_safe_register("to_joint_action_processor")
+@ProcessorStepRegistry.register("to_joint_action_processor")
 class ToJointActionProcessorStep(ProcessorStep):
     """Convert nested task-frame robot actions into nested joint robot actions when needed."""
 
@@ -750,8 +701,8 @@ class ToJointActionProcessorStep(ProcessorStep):
                     raise ValueError(f"IK solution for '{name}' missing joint '{joint_name}'")
                 robot_joint_action[f"{joint_name}.pos"] = float(ik_solution[joint_name])
 
-            if "gripper.pos" in robot_action:
-                robot_joint_action["gripper.pos"] = _to_float(robot_action["gripper.pos"])
+            if f"{GRIPPER_KEY}.pos" in robot_action:
+                robot_joint_action[f"{GRIPPER_KEY}.pos"] = robot_action[f"{GRIPPER_KEY}.pos"]
 
             joint_action[name] = robot_joint_action
             self._virtual_task_pose[name] = bounded_target
@@ -765,7 +716,7 @@ class ToJointActionProcessorStep(ProcessorStep):
             key = frame.action_key_for_axis(axis)
             if key not in robot_action:
                 raise ValueError(f"Missing task-frame action key '{name}.{key}' for joint conversion")
-            task_target.append(_to_float(robot_action[key]))
+            task_target.append(robot_action[key])
         return task_target
 
     def _integrate_relative_axes(
@@ -798,7 +749,7 @@ class ToJointActionProcessorStep(ProcessorStep):
                 if key not in observation:
                     obs_pose = []
                     break
-                obs_pose.append(_to_float(observation[key]))
+                obs_pose.append(observation[key])
             if len(obs_pose) == 6:
                 return obs_pose
 
@@ -819,7 +770,7 @@ class ToJointActionProcessorStep(ProcessorStep):
 
 
 @dataclass
-@_safe_register("mp_vanilla_observation_processor")
+@ProcessorStepRegistry.register("mp_vanilla_observation_processor")
 class VanillaMPObservationProcessorStep(ProcessorStep):
     """Build ``observation.state`` from configured robot modalities and normalize images."""
 
@@ -1108,7 +1059,7 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
 
 
 @dataclass
-@_safe_register("joints_to_ee_observation")
+@ProcessorStepRegistry.register("joints_to_ee_observation")
 class JointsToEEObservation(ProcessorStep):
     """Append deterministic end-effector pose channels from joint observations."""
 
@@ -1188,7 +1139,7 @@ class JointsToEEObservation(ProcessorStep):
 
 
 @dataclass
-@_safe_register("relative_frame_observation")
+@ProcessorStepRegistry.register("relative_frame_observation")
 class RelativeFrameObservationProcessor(ProcessorStep):
     """Re-express absolute EE pose channels relative to a per-episode reference pose."""
 
@@ -1261,7 +1212,7 @@ class RelativeFrameObservationProcessor(ProcessorStep):
 
 
 @dataclass
-@_safe_register("relative_frame_action")
+@ProcessorStepRegistry.register("relative_frame_action")
 class RelativeFrameActionProcessor(ProcessorStep):
     """Pass-through placeholder for relative action transforms (currently identity)."""
 
@@ -1293,7 +1244,7 @@ class RelativeFrameActionProcessor(ProcessorStep):
 
 
 @dataclass
-@_safe_register("to_flat_action")
+@ProcessorStepRegistry.register("to_flat_action")
 class ToFlatActionProcessorStep(ProcessorStep):
     """Flatten keyed robot actions to the env-facing robot action tensor."""
 
