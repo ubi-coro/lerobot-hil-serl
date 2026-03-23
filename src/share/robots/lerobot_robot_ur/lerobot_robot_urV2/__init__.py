@@ -1,4 +1,4 @@
-from .config_ur import URConfig
-from .ur import UR
+from .config_ur import URV2Config
+from .urv2 import URV2
 
-__all__ = ["URConfig", "UR"]
+__all__ = ["URV2Config", "URV2"]

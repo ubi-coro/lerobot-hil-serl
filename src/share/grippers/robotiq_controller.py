@@ -119,7 +119,7 @@ class RTDERobotiqController(mp.Process):
             self.stop_wait()
 
     def start_wait(self):
-        self.ready_event.wait(5)
+        self.ready_event.wait()
         assert self.is_alive()
 
     def stop_wait(self):

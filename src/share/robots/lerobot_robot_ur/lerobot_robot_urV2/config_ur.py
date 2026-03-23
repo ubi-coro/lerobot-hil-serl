@@ -20,15 +20,21 @@ from typing import Literal, Optional, Sequence
 
 from lerobot.cameras import CameraConfig
 from lerobot.robots import RobotConfig
-from lerobot.robots.ur.config_tf_controller import TaskFrameControllerConfig
 
-
-@RobotConfig.register_subclass("ur")
+@RobotConfig.register_subclass("urv2")
 @dataclass
-class URConfig(RobotConfig):
+class URV2Config(RobotConfig):
     robot_ip: str
     model: str = "ur5e"
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
+
+    # gripper
+    use_gripper: bool = False  # attempts to initialize gripper from RTDEControlInterface
+    gripper_frequency: float = 50.0
+    gripper_vel: float = 1.0  # [0-1]
+    gripper_force: float = 1.0  # [0-1]
+    gripper_soft_real_time: bool = False
+    gripper_rt_core: int = 4
 
     # controller parameters
     frequency: float = 500.0
@@ -51,9 +57,9 @@ class URConfig(RobotConfig):
 
     # deadband
     deadband_pos: float = 0.001  # [m/s]
-    deadband_rot: float = 0.01  # [rad/s]
-    leak_rate_pos: float = 5.0  # [1/s]
-    leak_rate_rot: float = 5.0  # [1/s]
+    deadband_rot: float = 0.003  # [rad/s]
+    leak_rate_pos: float = 50.0  # [1/m]
+    leak_rate_rot: float = 15.0  # [1/s]
 
     # contact-aware scaling of wrench limits
     compliance_safety_mode: Literal["adaptive_wrench_limits", "reference_limits"] = "adaptive_limits"

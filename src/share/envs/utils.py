@@ -20,9 +20,9 @@ DELTA_ROTATION_ACTION_NAMES = {
     "delta_rx",
     "delta_ry",
     "delta_rz",
-    "wx.vel",
-    "wy.vel",
-    "wz.vel",
+    "rx.vel",
+    "ry.vel",
+    "rz.vel",
 }
 DELTA_AUXILIARY_ACTION_NAMES = {
     "gripper",

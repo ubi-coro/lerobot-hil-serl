@@ -24,30 +24,26 @@ from .robot import Robot
 
 
 def make_robot_from_config(config: RobotConfig) -> Robot:
-    return get_robot_cls_from_config(config)(config)
-
-
-def get_robot_cls_from_config(config: RobotConfig) -> Type[Robot]:
     if config.type == "koch_follower":
         from .koch_follower import KochFollower
 
-        return KochFollower
+        return KochFollower(config)
     elif config.type == "omx_follower":
         from .omx_follower import OmxFollower
 
-        return OmxFollower
+        return OmxFollower(config)
     elif config.type == "so100_follower":
         from .so_follower import SO100Follower
 
-        return SO100Follower
+        return SO100Follower(config)
     elif config.type == "so101_follower":
         from .so_follower import SO101Follower
 
-        return SO101Follower
+        return SO101Follower(config)
     elif config.type == "lekiwi":
         from .lekiwi import LeKiwi
 
-        return LeKiwi
+        return LeKiwi(config)
     elif config.type == "hope_jr_hand":
         from .hope_jr import HopeJrHand
 
@@ -55,19 +51,19 @@ def get_robot_cls_from_config(config: RobotConfig) -> Type[Robot]:
     elif config.type == "hope_jr_arm":
         from .hope_jr import HopeJrArm
 
-        return HopeJrArm
+        return HopeJrArm(config)
     elif config.type == "bi_so_follower":
         from .bi_so_follower import BiSOFollower
 
-        return BiSOFollower
+        return BiSOFollower(config)
     elif config.type == "reachy2":
         from .reachy2 import Reachy2Robot
 
-        return Reachy2Robot
+        return Reachy2Robot(config)
     elif config.type == "openarm_follower":
         from .openarm_follower import OpenArmFollower
 
-        return OpenArmFollower
+        return OpenArmFollower(config)
     elif config.type == "bi_openarm_follower":
         from .bi_openarm_follower import BiOpenArmFollower
 
@@ -75,15 +71,15 @@ def get_robot_cls_from_config(config: RobotConfig) -> Type[Robot]:
     elif config.type == "viperx":
         from .viperx import ViperX
 
-        return ViperX
+        return ViperX(config)
     elif config.type == "ur":
         from .ur import TF_UR
 
-        return TF_UR
+        return TF_UR(config)
     elif config.type == "mock_robot":
         from tests.mocks.mock_robot import MockRobot
 
-        return MockRobot
+        return MockRobot(config)
     else:
         try:
             return cast(Robot, make_device_from_device_class(config))

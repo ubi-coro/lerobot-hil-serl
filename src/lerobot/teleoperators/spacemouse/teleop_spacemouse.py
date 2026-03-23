@@ -109,7 +109,7 @@ class SpaceMouse(Teleoperator, HasTeleopEvents):
 
     @property
     def action_features(self) -> dict[str, type]:
-        return {f"{ax}.vel": float for ax in ["x", "y", "z", "wx", "wy", "wz"]}
+        return {f"{ax}.vel": float for ax in ["x", "y", "z", "rx", "ry", "rz"]}
 
     @property
     def feedback_features(self) -> dict[str, type]:

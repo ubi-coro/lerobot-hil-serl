@@ -142,7 +142,7 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
             if axis in absolute_rot_axes:
                 continue
 
-            if control_mode in {ControlMode.VEL, ControlMode.FORCE}:
+            if control_mode in {ControlMode.VEL, ControlMode.WRENCH}:
                 values.append(source_pose[axis])
             elif axis < 3 or policy_mode == PolicyMode.RELATIVE:
                 values.append(source_pose[axis])
@@ -336,7 +336,7 @@ class InterventionActionProcessorStep(ProcessorStep):
 
             value = raw[cursor]
             cursor += 1
-            if frame.control_mode[axis] in {ControlMode.VEL, ControlMode.FORCE}:
+            if frame.control_mode[axis] in {ControlMode.VEL, ControlMode.WRENCH}:
                 value = self._bound_differential_axis(frame, axis, value)
 
             full_target[axis] = float(value)

@@ -178,8 +178,7 @@ class ManipulationPrimitiveNet(gym.Env):
 
         # 5) Build info
         info = processed_transition.get(TransitionKey.INFO, {})
-        info["primitive_step"] = self._primitive_step_count
-        info["episode_step"] = self._episode_step_count
+        info["step"] = self._primitive_step_count
         info["transition_from"] = active
         info["transition_to"] = active
         info["transition_reason"] = None

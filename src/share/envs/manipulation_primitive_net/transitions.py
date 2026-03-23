@@ -5,6 +5,8 @@ import numpy as np
 
 from draccus import ChoiceRegistry
 
+from lerobot.teleoperators import TeleopEvents
+
 
 @dataclass
 class TransitionOutcome:
@@ -83,7 +85,7 @@ class Always(Transition):
 @Transition.register_subclass("on_success")
 @dataclass
 class OnSuccess(Transition):
-    success_key: str = "success"
+    success_key: str = TeleopEvents.SUCCESS
 
     def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
         return TransitionOutcome(

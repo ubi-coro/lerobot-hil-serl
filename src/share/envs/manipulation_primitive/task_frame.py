@@ -23,7 +23,7 @@ class ControlMode(IntEnum):
 
     POS = 0
     VEL = 1
-    FORCE = 2
+    WRENCH = 2
 
 
 TASK_FRAME_AXIS_NAMES = ["x", "y", "z", "wx", "wy", "wz"]
@@ -36,8 +36,8 @@ class TaskFrame:
     policy_mode: list[PolicyMode | None] = field(default_factory=lambda: 6 * [None])
     control_mode: list[ControlMode] = field(default_factory=lambda: 6 * [ControlMode.VEL])
     origin: list[float] | None = None
-    kp: list[float] | None = None
-    kd: list[float] | None = None
+    kp: list[float] = field(default_factory=lambda: [2500, 2500, 2500, 100, 100, 100])
+    kd: list[float] = field(default_factory=lambda: [960, 960, 320, 6, 6, 6])
     min_pose: list[float] | None = None  # 6-vector: min xyz (m), min extrinsic euler (rad)
     max_pose: list[float] | None = None  # 6-vector: max xyz (m), max extrinsic euler (rad)
 
@@ -54,9 +54,13 @@ class TaskFrame:
             raise ValueError("kp must have the same length as target")
         if self.kd is not None and len(self.kd) != width:
             raise ValueError("kd must have the same length as target")
-        if self.min_pose is not None and len(self.min_pose) != width:
+        if self.min_pose is None:
+            self.min_pose = [float("-inf")] * 6
+        if len(self.min_pose) != width:
             raise ValueError("min_pose must have the same length as target")
-        if self.max_pose is not None and len(self.max_pose) != width:
+        if self.max_pose is None:
+            self.max_pose = [float("inf")] * 6
+        if len(self.max_pose) != width:
             raise ValueError("max_pose must have the same length as target")
 
         if self.space == ControlSpace.TASK:
@@ -148,57 +152,6 @@ class TaskFrame:
             feature_keys[f"{axis_name}.{suffix}"] = float
         return feature_keys
 
-    def to_task_frame_command(self):
-        """Convert the shared task frame into the UR controller command format."""
-        from lerobot.robots.ur.tf_controller import AxisMode, TaskFrameCommand
-
-        if self.space != ControlSpace.TASK:
-            raise ValueError("Only TASK-space frames can be converted to a UR task-frame command")
-
-        default = TaskFrameCommand.make_default_cmd()
-        return TaskFrameCommand(
-            cmd=default.cmd,
-            T_WF=list(self.origin) if self.origin is not None else list(default.T_WF),
-            mode=[
-                {
-                    ControlMode.POS: AxisMode.POS,
-                    ControlMode.VEL: AxisMode.PURE_VEL,
-                    ControlMode.FORCE: AxisMode.FORCE,
-                }[mode]
-                for mode in self.control_mode
-            ],
-            target=list(self.target),
-            kp=list(self.kp) if self.kp is not None else list(default.kp),
-            kd=list(self.kd) if self.kd is not None else list(default.kd),
-            max_pose_rpy=list(self.max_pose) if self.max_pose is not None else list(default.max_pose_rpy),
-            min_pose_rpy=list(self.min_pose) if self.min_pose is not None else list(default.min_pose_rpy),
-        )
-
-    @classmethod
-    def from_task_frame_command(cls, command) -> TaskFrame:
-        """Convert a UR controller command into the shared task-frame representation."""
-        from lerobot.robots.ur.tf_controller import AxisMode
-
-        return cls(
-            space=ControlSpace.TASK,
-            origin=list(command.T_WF) if command.T_WF is not None else None,
-            target=list(command.target) if command.target is not None else 6 * [0.0],
-            policy_mode=6 * [None],
-            control_mode=[
-                {
-                    AxisMode.POS: ControlMode.POS,
-                    AxisMode.IMPEDANCE_VEL: ControlMode.VEL,
-                    AxisMode.PURE_VEL: ControlMode.VEL,
-                    AxisMode.FORCE: ControlMode.FORCE,
-                }[mode]
-                for mode in command.mode
-            ] if command.mode is not None else 6 * [ControlMode.VEL],
-            kp=list(command.kp) if command.kp is not None else None,
-            kd=list(command.kd) if command.kd is not None else None,
-            min_pose=list(command.min_pose_rpy) if command.min_pose_rpy is not None else None,
-            max_pose=list(command.max_pose_rpy) if command.max_pose_rpy is not None else None,
-        )
-
     def to_dict(self) -> dict:
         """Serialize to a JSON-friendly dictionary."""
         return {
@@ -249,31 +202,3 @@ class TaskFrame:
     def max_target(self, value: list[float] | None) -> None:
         """Set upper task-frame bounds using canonical alias."""
         self.max_pose = value
-
-
-@dataclass(slots=True)
-class PrimitiveGraphConfig:
-    """Serializable primitive graph config that can be loaded from JSON/YAML."""
-
-    start_primitive_id: str
-    nodes: list
-
-    def __post_init__(self) -> None:
-        """Ensure primitive references and transitions are valid."""
-        node_ids = {node.primitive_id for node in self.nodes}
-        if self.start_primitive_id not in node_ids:
-            raise ValueError("start_primitive_id must reference an existing primitive_id")
-
-        for node in self.nodes:
-            for _, target in node.transitions.items():
-                if target not in node_ids:
-                    raise ValueError(
-                        f"primitive '{node.primitive_id}' has transition to unknown primitive '{target}'"
-                    )
-
-    def node_by_id(self, primitive_id: str):
-        """Return the primitive node matching ``primitive_id``."""
-        for node in self.nodes:
-            if node.primitive_id == primitive_id:
-                return node
-        raise KeyError(f"unknown primitive_id '{primitive_id}'")

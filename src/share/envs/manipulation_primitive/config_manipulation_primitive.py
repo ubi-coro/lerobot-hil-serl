@@ -187,8 +187,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
             action_pipeline_steps.append(AddKeyboardEventsAsInfoStep(mapping=self.processor.events.key_mapping))
 
         if self.processor.events.foot_switch_mapping:
-            action_pipeline_steps.append(
-                AddFootswitchEventsAsInfoStep(mapping=self.processor.events.foot_switch_mapping))
+            action_pipeline_steps.append(AddFootswitchEventsAsInfoStep(mapping=self.processor.events.foot_switch_mapping))
 
         try:
             action_pipeline_steps.append(AddTeleopEventsAsInfoStep(teleoperators=teleop_dict))
@@ -392,7 +391,7 @@ class ManipulationPrimitiveConfig(EnvConfig):
 
             # ENV-101: learnable VEL/FORCE axes require delta teleoperator input.
             for axis in frame.learnable_axis_indices:
-                if frame.control_mode[axis] in {ControlMode.VEL, ControlMode.FORCE} and not is_delta_teleoperator[name]:
+                if frame.control_mode[axis] in {ControlMode.VEL, ControlMode.WRENCH} and not is_delta_teleoperator[name]:
                     raise ValueError(
                         "Adaptive task-frame axes with VEL/FORCE control require a delta teleoperator. "
                         f"Got robot='{name}', axis={axis}, control_mode={frame.control_mode[axis].name}, "
@@ -417,8 +416,9 @@ class ManipulationPrimitiveConfig(EnvConfig):
                     )
 
             # ENV-102: TASK-space with absolute-joint teleop or joint-only robot requires kinematics.
-            requires_kinematics = frame.space == ControlSpace.TASK and (
-                not is_delta_teleoperator[name] or not is_task_frame_robot[name]
+            requires_kinematics = (
+                    frame.space == ControlSpace.TASK and
+                    (not is_delta_teleoperator[name] or not is_task_frame_robot[name])
             )
             if requires_kinematics and not self.processor.kinematics.enable[name]:
                 raise ValueError(

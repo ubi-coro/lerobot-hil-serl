@@ -5,7 +5,7 @@ import os
 import time
 import enum
 import multiprocessing as mp
-from dataclasses import dataclass, asdict, replace
+from dataclasses import dataclass, asdict, replace, field
 from multiprocessing.managers import SharedMemoryManager
 from typing import Optional
 
@@ -39,25 +39,11 @@ class TaskFrameCommand(TaskFrame):
     the controller converts them to rotation vectors before use.
     """
     cmd: Command = Command.SET
-    kp: list[float] | None = None
-    kd: list[float] | None = None
 
     @property
     def delta_mode(self) -> list[DeltaMode]:
         """Per-axis absolute/relative interpretation derived from ``policy_mode``."""
         return [DeltaMode.RELATIVE if m  == PolicyMode.RELATIVE else DeltaMode.ABSOLUTE for m in self.policy_mode]
-        
-    def __post_init__(self):
-        width = len(self.target)
-        if self.kp is None:
-            self.kp = [300.0] * width
-        if len(self.kp) != width:
-            raise ValueError("kp must have the same length as target")
-        if self.kd is None:
-            self.kd = [20.0] * width
-        if len(self.kd) != width:
-            raise ValueError("kd must have the same length as target")
-        return super().__post_init__()
 
     def to_queue_dict(self):
         """Convert the command to a queue-friendly dict of NumPy arrays and ints.
@@ -69,8 +55,9 @@ class TaskFrameCommand(TaskFrame):
         try:
             d["cmd"] = self.cmd.value
             d["space"] = np.asarray(self.space).astype(np.int8)
-            d["control_mode"] = np.asarray(self.control_mode).astype(np.int8)
-            d["delta_mode"] = np.asarray(self.delta_mode).astype(np.int8)
+            d["control_mode"] = np.array([int(m) if m is not None else -1 for m in self.control_mode])
+            d["policy_mode"] = np.array([int(m) if m is not None else -1 for m in self.policy_mode])
+            d["delta_mode"] = np.array([int(m) if m is not None else -1 for m in self.delta_mode])
             d["target"] = np.asarray(self.target).astype(np.float64)
             d["origin"] = np.asarray(self.origin).astype(np.float64)
             d["origin"][3:6] = R.from_euler("xyz", d["origin"][3:6], degrees=False).as_rotvec()
@@ -79,8 +66,19 @@ class TaskFrameCommand(TaskFrame):
             d["kp"] = np.asarray(self.kp).astype(np.float64)
             d["kd"] = np.asarray(self.kd).astype(np.float64)
         except Exception as e:
-            print(f"TaskFrameCommand seems to be missing fields: {e}")
+            raise ValueError(f"TaskFrameCommand seems to be missing fields: {e}")
         return d
+
+    def to_robot_action(self):
+        action_dict = {}
+        for i, ax in enumerate(["x", "y", "z", "rx", "ry", "rz"]):
+            if self.control_mode[i] == ControlMode.POS:
+                action_dict[f"{ax}.ee_pos"] = self.target[i]
+            elif self.control_mode[i] == ControlMode.VEL:
+                action_dict[f"{ax}.ee_vel"] = self.target[i]
+            elif self.control_mode[i] == ControlMode.WRENCH:
+                action_dict[f"{ax}.ee_wrench"] = self.target[i]
+        return action_dict
     
 
 # --- timing helpers ---
@@ -459,8 +457,8 @@ class RTDETaskFrameController(mp.Process):
                         pose_F = self.read_current_state(rtde_r)["ActualTCPPose"]
 
                         # modes: 6×int8 each
-                        new_control_mode = single["control_mode"]
-                        new_delta_mode = single["delta_mode"]
+                        new_control_mode = [m if m >= 0 else None for m in single["control_mode"]]
+                        new_delta_mode = [m if m >= 0 else None for m in single["delta_mode"]]
 
                         # reset virtual position when switching to delta position control
                         for i in range(6):
@@ -601,7 +599,6 @@ class RTDETaskFrameController(mp.Process):
 
                 for i in range(6):
                     control_mode_i = ControlMode(self.control_mode[i])
-                    delta_mode_i = DeltaMode(self.delta_mode[i])
 
                     if control_mode_i == ControlMode.WRENCH:
                         wrench_F[i] = float(self.target[i])  # directly obey commanded force
@@ -699,6 +696,8 @@ class RTDETaskFrameController(mp.Process):
                         + f" gc_count={gc_counts}"
                     )
 
+                if not self.ready_event.is_set():
+                    self.ready_event.set()
                 # end of while keep_running
         finally:
             # cleanup: exit force‐mode, disconnect RTDE

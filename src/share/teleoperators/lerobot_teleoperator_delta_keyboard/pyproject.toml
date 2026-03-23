@@ -3,7 +3,7 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lerobot_robot_urV2"
+name = "lerobot_teleoperator_delta_keyboard"
 version = "0.0.4"
 description = "LeRobot XArm integration"
 readme = "README.md"
@@ -23,5 +23,5 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["lerobot_robot_urV2"]
+include = ["lerobot_teleoperator_delta_keyboard"]
 exclude = ["*.egg-info"]

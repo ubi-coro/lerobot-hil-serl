@@ -29,7 +29,6 @@ from torch import Tensor
 from tqdm import tqdm
 
 from lerobot.configs.types import PipelineFeatureType, PolicyFeature
-from lerobot.teleoperators.teleoperator import Teleoperator
 from lerobot.teleoperators.utils import TeleopEvents
 
 from lerobot.processor.core import EnvTransition, PolicyAction, TransitionKey
@@ -164,7 +163,7 @@ class AddTeleopActionAsComplimentaryDataStep(ProcessorStep):
         teleop_device: The teleoperator instance to get the action from.
     """
 
-    teleoperators: dict[str, Teleoperator] = field(default_factory=dict)
+    teleoperators: dict[str, "Teleoperator"] = field(default_factory=dict)
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         """Applies the `complementary_data` method to the transition's data."""
@@ -206,7 +205,7 @@ class AddTeleopEventsAsInfoStep(InfoProcessorStep):
                        `HasTeleopEvents` protocol.
     """
 
-    teleoperators: dict[str, Teleoperator] = field(default_factory=dict)
+    teleoperators: dict[str, "Teleoperator"] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validates that the provided teleoperator supports events after initialization."""
@@ -242,21 +241,43 @@ class AddFootswitchEventsAsInfoStep(InfoProcessorStep):
     mapping: dict[tuple[TeleopEvents], dict] = field(default_factory=dict)
 
     def __post_init__(self):
-        self._foot_switch_threads = dict()
+        self._foot_switch_threads = {}
+        self._require_release = {}  # event_name -> bool
 
         for events, params in self.mapping.items():
-            self._foot_switch_threads[events] = FootSwitchHandler(
+            handler = FootSwitchHandler(
                 device_path=f'/dev/input/event{params["device"]}',
                 toggle=bool(params["toggle"]),
-                event_names=events
+                event_names=events,
             )
-            self._foot_switch_threads[events].start()
+            self._foot_switch_threads[events] = handler
+            handler.start()
+
+            # Initialize all known events as armed
+            for event_name in events:
+                self._require_release[event_name] = False
 
     def info(self, info: dict) -> dict:
         new_info = dict(info)
+
         for handler in self._foot_switch_threads.values():
             for event_name, event_value in handler.events.items():
-                new_info[event_name] = new_info.get(event_name, False) | event_value
+                if event_name not in new_info:
+                    new_info[event_name] = False
+
+                event_value = bool(event_value)
+
+                # After reset, require observing one False before allowing True again
+                if self._require_release.get(event_name, False):
+                    if not event_value:
+                        # Foot was released -> re-arm this event
+                        self._require_release[event_name] = False
+                    # Suppress event while waiting for release
+                    continue
+
+                if event_value:
+                    new_info[event_name] = new_info.get(event_name, False) or True
+
         return new_info
 
     def transform_features(
@@ -267,6 +288,10 @@ class AddFootswitchEventsAsInfoStep(InfoProcessorStep):
     def reset(self) -> None:
         for handler in self._foot_switch_threads.values():
             handler.reset()
+
+        # After reset, require pedal release before any event can become True again
+        for event_name in self._require_release:
+            self._require_release[event_name] = True
 
     def __del__(self):
         for handler in self._foot_switch_threads.values():
@@ -785,7 +810,7 @@ class InterventionActionProcessorStep(ProcessorStep):
                               `success` event is received.
     """
 
-    teleoperators: dict[str, Teleoperator]
+    teleoperators: dict[str, "Teleoperator"]
     use_gripper: dict[str, bool]
     terminate_on_success: dict[str, bool]
 

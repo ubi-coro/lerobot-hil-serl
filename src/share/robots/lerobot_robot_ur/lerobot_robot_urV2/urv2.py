@@ -17,6 +17,7 @@ and send orders to its motors.
 """
 import logging
 import time
+from dataclasses import asdict
 from functools import cached_property
 from multiprocessing.managers import SharedMemoryManager
 from typing import Any
@@ -24,19 +25,19 @@ from typing import Any
 from lerobot.cameras import make_cameras_from_configs
 from lerobot.processor.hil_processor import GRIPPER_KEY
 from lerobot.robots import Robot
-from lerobot.robots.ur import URConfig
 from share.grippers.robotiq_controller import RTDERobotiqController
-from lerobot.robots.ur.tf_controller import TaskFrameCommand, RTDETFFController, AxisMode
-from lerobot.robots.ur.tf_mock_controller import RTDETFFMockController
 from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnectedError
-from share.envs.manipulation_primitive.task_frame import TaskFrame
+from share.envs.manipulation_primitive.task_frame import TaskFrame, ControlMode
+from share.robots.lerobot_robot_ur.lerobot_robot_urV2.tf_controller import RTDETaskFrameController, TaskFrameCommand
+from share.robots.lerobot_robot_ur.lerobot_robot_urV2.config_ur import URV2Config
+from share.robots.lerobot_robot_ur.lerobot_robot_urV2.tf_mock_controller import RTDETFFMockController
 
 logger = logging.getLogger(__name__)
 
 
-class UR(Robot):
+class URV2(Robot):
 
-    config_class = URConfig
+    config_class = URV2Config
     name = "ur"
 
     joint_names = state_names = [
@@ -48,12 +49,12 @@ class UR(Robot):
         "wrist_3_joint",
     ]
 
-    def __init__(self, config: URConfig):
+    def __init__(self, config: URV2Config):
         # super().__init__(config)  # we avoid super's init because we dont have or want a calibration dir
         self.config = config
         self.robot_type = self.name
         self.id = config.id
-        self.task_frame = TaskFrameCommand.make_default_cmd()
+        self.task_frame = TaskFrameCommand()
 
         self.shm = SharedMemoryManager()
         self.shm.start()
@@ -62,7 +63,7 @@ class UR(Robot):
         if config.mock:
             self.controller = RTDETFFMockController(config)
         else:
-            self.controller = RTDETFFController(config)
+            self.controller = RTDETaskFrameController(config)
 
         if self.config.use_gripper:
             self.gripper = RTDERobotiqController(
@@ -230,16 +231,16 @@ class UR(Robot):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"]):
-            if f"{ax}.pos" in action:
-                self.task_frame.target[i] = action[f"{ax}.pos"]
-                self.task_frame.mode[i] = AxisMode.POS
-            elif f"{ax}.vel" in action:
-                self.task_frame.target[i] = action[f"{ax}.vel"]
-                self.task_frame.mode[i] = AxisMode.PURE_VEL
-            elif f"{ax}.wrench" in action:
-                self.task_frame.target[i] = action[f"{ax}.wrench"]
-                self.task_frame.mode[i] = AxisMode.FORCE
+        for i, ax in enumerate(["x", "y", "z", "rx", "ry", "rz"]):
+            if f"{ax}.ee_pos" in action:
+                self.task_frame.target[i] = action[f"{ax}.ee_pos"]
+                self.task_frame.control_mode[i] = ControlMode.POS
+            elif f"{ax}.ee_vel" in action:
+                self.task_frame.target[i] = action[f"{ax}.ee_vel"]
+                self.task_frame.control_mode[i] = ControlMode.VEL
+            elif f"{ax}.ee_wrench" in action:
+                self.task_frame.target[i] = action[f"{ax}.ee_wrench"]
+                self.task_frame.control_mode[i] = ControlMode.WRENCH
 
         if self.gripper is not None and f"{GRIPPER_KEY}.pos" in action:
             self.send_gripper_action(action[f"{GRIPPER_KEY}.pos"])
@@ -252,10 +253,10 @@ class UR(Robot):
         self.gripper.move(gripper_action, vel=self.config.gripper_vel, force=self.config.gripper_force)
 
     def set_task_frame(self, new_task_frame: TaskFrameCommand | TaskFrame):
-        if isinstance(new_task_frame, TaskFrame):
-            self.task_frame = new_task_frame.to_task_frame_command()
-            return
-        self.task_frame = new_task_frame
+        if isinstance(new_task_frame, TaskFrame) and not isinstance(new_task_frame, TaskFrameCommand):
+            self.task_frame = TaskFrameCommand(**asdict(new_task_frame))
+        else:
+            self.task_frame = new_task_frame
 
     def disconnect(self):
         if not self.is_connected:

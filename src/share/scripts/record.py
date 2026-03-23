@@ -181,9 +181,6 @@ def record_loop(
                 robot_type=mp_net.config.type
             )
         else:
-            # Permanently set the intervention flag to stay in control
-            info[TeleopEvents.IS_INTERVENTION] = True
-
             # Dummy action, expected to be overwritten by teleop action
             action = torch.tensor([0.0] * mp_net.action_dim, dtype=torch.float32)
 
