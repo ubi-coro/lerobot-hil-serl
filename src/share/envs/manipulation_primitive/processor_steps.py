@@ -758,6 +758,7 @@ class ToJointActionProcessorStep(ProcessorStep):
         return features
 
 
+
 @dataclass
 @ProcessorStepRegistry.register("mp_vanilla_observation_processor")
 class VanillaMPObservationProcessorStep(ProcessorStep):
@@ -1043,7 +1044,6 @@ class JointsToEEObservation(ProcessorStep):
 
         new_transition = transition.copy()
         new_observation = dict(observation)
-        axis_names = ["x", "y", "z", "wx", "wy", "wz"]
 
         for robot_name, solver in self.kinematics.items():
             joints = self.motor_names.get(robot_name, [])
