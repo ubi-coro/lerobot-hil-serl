@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from multiprocessing.managers import SharedMemoryManager
 from typing import Literal, Optional, Sequence
 
+import numpy as np
+
 from lerobot.cameras import CameraConfig
 from lerobot.robots import RobotConfig
 
