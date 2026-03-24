@@ -3,11 +3,10 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 from pprint import pformat
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
-from torch.autograd.profiler import record_function, profile, ProfilerActivity
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
@@ -15,31 +14,20 @@ from lerobot.configs import parser
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets.image_writer import safe_stop_image_writer
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.datasets.video_utils import VideoEncodingManager
-from lerobot.envs.configs import ResetConfig, HILSerlProcessorConfig
-from lerobot.envs.robot_env import RobotEnv
 from lerobot.envs.utils import env_to_dataset_features
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.processor import (
     PolicyAction,
     PolicyProcessorPipeline,
-    RobotProcessorPipeline,
-    create_transition,
     TransitionKey
 )
 from lerobot.processor.rename_processor import rename_stats
-from lerobot.rl.gym_manipulator import step_env_and_process_transition
 from share.configs.record import RecordConfig
 from lerobot.teleoperators import TeleopEvents
-from lerobot.utils.constants import ACTION, REWARD, DONE, CHECKPOINTS_DIR, LAST_CHECKPOINT_LINK
-from lerobot.utils.control_utils import (
-    predict_action,
-    sanity_check_dataset_name,
-    sanity_check_dataset_robot_compatibility,
-)
+from lerobot.utils.constants import ACTION, REWARD, DONE
+from lerobot.utils.control_utils import predict_action
 from lerobot.utils.robot_utils import precise_sleep
-from lerobot.utils.transition import Transition
 from lerobot.utils.utils import (
     get_safe_torch_device,
     init_logging,
@@ -47,8 +35,9 @@ from lerobot.utils.utils import (
 )
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import ManipulationPrimitiveNet
-from share.utils.control_utils import MPNetStepCounter
 from share.utils.video_utils import MultiVideoEncodingManager
+
+init_logging()
 
 """ --------------- record_loop() data flow --------------------------
        [ Robot ]
@@ -88,6 +77,9 @@ def make_policies_and_datasets(cfg: RecordConfig):
     for name, p in cfg.env.primitives.items():
         if p.is_adaptive:
 
+            if name == cfg.env.reset_primitive:
+                continue
+
             # 1) dataset
             root = Path(cfg.dataset.root) / name
             repo_id = f"{cfg.dataset.repo_id}-{name}"
@@ -109,7 +101,7 @@ def make_policies_and_datasets(cfg: RecordConfig):
                     repo_id,
                     cfg.env.fps,
                     root=root,
-                    features=p.features,
+                    features=env_to_dataset_features(p.features),
                     robot_type=cfg.env.type,
                     use_videos=cfg.dataset.video,
                     image_writer_processes=cfg.dataset.num_image_writer_processes,
@@ -119,6 +111,12 @@ def make_policies_and_datasets(cfg: RecordConfig):
                 )
 
             # 2) policy
+            if p.policy is None:
+                policies[name] = None
+                preprocessors[name] = None
+                postprocessors[name] = None
+                continue
+
             if p.policy.pretrained_path is not None:
                 cli_overrides = parser.get_cli_overrides("policy")
                 p.policy = PreTrainedConfig.from_pretrained(p.policy.pretrained_path)  # , cli_overrides=cli_overrides)
@@ -148,7 +146,6 @@ def record_loop(
     policies: dict[str, PreTrainedPolicy],
     preprocessors: dict[str, PolicyProcessorPipeline[dict[str, Any], dict[str, Any]]],
     postprocessors: dict[str, PolicyProcessorPipeline[PolicyAction, PolicyAction]],
-    single_task: str | None = None,
     display_data: bool = False,
     display_compressed_images: bool = False,
     interactive: bool = False
@@ -159,6 +156,10 @@ def record_loop(
     info = transition.get(TransitionKey.INFO, {})
     if info.get(TeleopEvents.STOP_RECORDING, False):
         return info
+
+    # get task description
+    task = mp_net.config.primitives[mp_net.active_primitive].task_description
+    task = mp_net.active_primitive if task is None else task
 
     sum_reward = 0.0
     while True:
@@ -177,7 +178,7 @@ def record_loop(
                 preprocessor=preprocessors[mp_net.active_primitive],
                 postprocessor=postprocessors[mp_net.active_primitive],
                 use_amp=policy.config.use_amp,
-                task=single_task,
+                task=task,
                 robot_type=mp_net.config.type
             )
         else:
@@ -214,7 +215,7 @@ def record_loop(
                 ACTION: action.squeeze().cpu(),
                 REWARD: np.array([reward], dtype=np.float32),
                 DONE: np.array([done], dtype=bool),
-                "task": single_task
+                "task": task
             }
             dataset.add_frame(frame)
 
@@ -242,13 +243,13 @@ def record_loop(
         precise_sleep(1 / mp_net.config.fps - dt_load)
         dt_loop = time.perf_counter() - start_loop_t
         logging.info(
+            f"[{task}] "
             f"dt_loop: {dt_loop * 1000:5.2f}ms ({1 / dt_loop:3.1f}hz), "
             f"dt_load: {dt_load * 1000:5.2f}ms ({1 / dt_load:3.1f}hz)"
         )
 
 @parser.wrap()
 def record(cfg: RecordConfig) -> LeRobotDataset:
-    init_logging()
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
         init_rerun(session_name="recording", ip=cfg.display_ip, port=cfg.display_port)
@@ -264,6 +265,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
     with MultiVideoEncodingManager(datasets):
         while True:
+            log_say(f"Record episode for {mp_net.active_primitive}", play_sounds=cfg.play_sounds)
 
             dataset = datasets.get(mp_net.active_primitive, None)
 
@@ -275,7 +277,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 postprocessors=postprocessors,
                 display_data=cfg.display_data,
                 display_compressed_images=display_compressed_images,
-                interactive=cfg.interactive
+                interactive=cfg.interactive,
             )
 
             if info.get(TeleopEvents.STOP_RECORDING, False):

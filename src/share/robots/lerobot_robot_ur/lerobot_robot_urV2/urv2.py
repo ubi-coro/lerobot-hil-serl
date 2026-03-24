@@ -27,7 +27,7 @@ from lerobot.processor.hil_processor import GRIPPER_KEY
 from lerobot.robots import Robot
 from share.grippers.robotiq_controller import RTDERobotiqController
 from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnectedError
-from share.envs.manipulation_primitive.task_frame import TaskFrame, ControlMode
+from share.envs.manipulation_primitive.task_frame import TaskFrame, ControlMode, TASK_FRAME_AXIS_NAMES
 from share.robots.lerobot_robot_ur.lerobot_robot_urV2.tf_controller import RTDETaskFrameController, TaskFrameCommand
 from share.robots.lerobot_robot_ur.lerobot_robot_urV2.config_ur import URV2Config
 
@@ -82,7 +82,7 @@ class URV2(Robot):
     @property
     def _motors_ft(self) -> dict[str, type]:
         ft = {}
-        for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"]):
+        for i, ax in enumerate(TASK_FRAME_AXIS_NAMES):
             ft[f"{ax}.ee_pos"] = float
             ft[f"{ax}.ee_vel"] = float
             ft[f"{ax}.ee_wrench"] = float
@@ -188,7 +188,7 @@ class URV2(Robot):
         obs_dict = {}
         controller_data = self.controller.get_robot_state()
 
-        for i, ax in enumerate(["x", "y", "z", "wx", "wy", "wz"]):
+        for i, ax in enumerate(TASK_FRAME_AXIS_NAMES):
             obs_dict[f"{ax}.ee_pos"] = controller_data['ActualTCPPose'][i]
             obs_dict[f"{ax}.ee_vel"] = controller_data['ActualTCPSpeed'][i]
             obs_dict[f"{ax}.ee_wrench"] = controller_data['ActualTCPForce'][i]
@@ -227,7 +227,7 @@ class URV2(Robot):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        for i, ax in enumerate(["x", "y", "z", "rx", "ry", "rz"]):
+        for i, ax in enumerate(TASK_FRAME_AXIS_NAMES):
             if f"{ax}.ee_pos" in action:
                 self.task_frame.target[i] = action[f"{ax}.ee_pos"]
                 self.task_frame.control_mode[i] = ControlMode.POS
