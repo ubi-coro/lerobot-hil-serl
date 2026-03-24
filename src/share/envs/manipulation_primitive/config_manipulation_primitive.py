@@ -31,7 +31,7 @@ from lerobot.processor.hil_processor import (
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 
 from share.envs.manipulation_primitive.env_manipulation_primitive import ManipulationPrimitive
-from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, TaskFrame
+from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, TaskFrame, TASK_FRAME_AXIS_NAMES
 from share.envs.manipulation_primitive.processor_steps import (
     DiscretizeGripperProcessorStep,
     InterventionActionProcessorStep,
@@ -76,25 +76,30 @@ class ObservationConfig:
     add_joint_position_to_observation: bool | dict[str, bool] = True
     add_joint_velocity_to_observation: bool | dict[str, bool] = False
     add_current_to_observation: bool | dict[str, bool] = False
+
     add_ee_pos_to_observation: bool | dict[str, bool] = False
-    ee_pos_axes: list[str] | dict[str, list[str]] | None = None
     add_ee_velocity_to_observation: bool | dict[str, bool] = False
-    ee_velocity_axes: list[str] | dict[str, list[str]] | None = None
     add_ee_wrench_to_observation: bool | dict[str, bool] = False
-    ee_wrench_axes: list[str] | dict[str, list[str]] | None = None
+
+    ee_pos_axes: list[str] | dict[str, list[str]] | None = field(default_factory=lambda: [f"{ax}.ee_pos" for ax in TASK_FRAME_AXIS_NAMES])
+    ee_velocity_axes: list[str] | dict[str, list[str]] | None = field(default_factory=lambda: [f"{ax}.ee_vel" for ax in TASK_FRAME_AXIS_NAMES])
+    ee_wrench_axes: list[str] | dict[str, list[str]] | None = field(default_factory=lambda: [f"{ax}.ee_wrench" for ax in TASK_FRAME_AXIS_NAMES])
+
     stack_frames: int | dict[str, int] = 0
     relative_ee_pos: bool | dict[str, bool] = True
 
 
 @dataclass
 class GripperConfig:
-    """Configuration for gripper control and penalties."""
+    """Configuration for gripper control, discretization, and penalties."""
 
     enable: bool | dict[str, bool] = False
     discretize: bool | dict[str, bool] = False
     threshold: float | dict[str, float] = 0.5
+    mode: Literal["state", "pulse"] | dict[str, Literal["state", "pulse"]] = "state"
     max_pos: float | dict[str, float] = 1.0
     min_pos: float | dict[str, float] = 0.0
+    static_pos: float | dict[str, float] = 0.0
     penalty: float | dict[str, float | None] | None = None
 
 

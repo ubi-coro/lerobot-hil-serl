@@ -16,7 +16,8 @@ from lerobot.processor.hil_processor import TELEOP_ACTION_KEY, GRIPPER_KEY
 from lerobot.processor.pipeline import ProcessorStep, ProcessorStepRegistry
 from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.constants import OBS_IMAGES, OBS_STATE
-from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, PolicyMode, TaskFrame
+from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, PolicyMode, TaskFrame, \
+    TASK_FRAME_AXIS_NAMES
 from share.envs.utils import check_delta_teleoperator
 
 
@@ -288,9 +289,8 @@ class MatchTeleopToPolicyActionProcessorStep(ProcessorStep):
 
         observation = transition.get(TransitionKey.OBSERVATION)
         if isinstance(observation, dict):
-            axis_names = ["x", "y", "z", "wx", "wy", "wz"]
             obs_pose = []
-            for axis_name in axis_names:
+            for axis_name in TASK_FRAME_AXIS_NAMES:
                 key = f"{name}.{axis_name}.ee_pos"
                 if key not in observation:
                     obs_pose = []
@@ -567,18 +567,8 @@ class DiscretizeGripperProcessorStep(ProcessorStep):
     _gripper_state: dict[str, float] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
-        min_keys = set(self.min_pos.keys()) if isinstance(self.min_pos, dict) else set()
-        max_keys = set(self.max_pos.keys()) if isinstance(self.max_pos, dict) else set()
-        if min_keys and max_keys and min_keys != max_keys:
-            raise ValueError("DiscretizeGripperProcessorStep requires min_pos and max_pos to have the same robot keys")
-
-        if min_keys:
-            self._robot_names = sorted(min_keys)
-        elif max_keys:
-            self._robot_names = sorted(max_keys)
-        else:
-            self._robot_names = []
-
+        all_robot_keys = set(self.enable) | set(self.min_pos) | set(self.max_pos) | set(self.threshold) | set(self.mode)
+        self._robot_names = sorted(all_robot_keys)
         self.reset()
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
@@ -742,9 +732,8 @@ class ToJointActionProcessorStep(ProcessorStep):
 
         observation = transition.get(TransitionKey.OBSERVATION)
         if isinstance(observation, dict):
-            axis_names = ["x", "y", "z", "wx", "wy", "wz"]
             obs_pose = []
-            for axis_name in axis_names:
+            for axis_name in TASK_FRAME_AXIS_NAMES:
                 key = f"{name}.{axis_name}.ee_pos"
                 if key not in observation:
                     obs_pose = []
@@ -772,20 +761,29 @@ class ToJointActionProcessorStep(ProcessorStep):
 @dataclass
 @ProcessorStepRegistry.register("mp_vanilla_observation_processor")
 class VanillaMPObservationProcessorStep(ProcessorStep):
-    """Build ``observation.state`` from configured robot modalities and normalize images."""
+    """Build ``observation.state`` from normalized per-robot modality config.
+
+    All boolean, axis-selection, and frame-stacking settings are expected to be
+    per-robot dicts, matching the normalized manipulation-primitive config.
+    """
 
     device: str = "cpu"
-    gripper_enable: bool | dict[str, bool] = False
-    add_joint_position_to_observation: bool | dict[str, bool] = True
-    add_joint_velocity_to_observation: bool | dict[str, bool] = False
-    add_current_to_observation: bool | dict[str, bool] = False
-    add_ee_pos_to_observation: bool | dict[str, bool] = False
-    ee_pos_axes: list[str] | dict[str, list[str]] | None = None
-    add_ee_velocity_to_observation: bool | dict[str, bool] = False
-    ee_velocity_axes: list[str] | dict[str, list[str]] | None = None
-    add_ee_wrench_to_observation: bool | dict[str, bool] = False
-    ee_wrench_axes: list[str] | dict[str, list[str]] | None = None
-    stack_frames: int | dict[str, int] = 0
+
+    gripper_enable: dict[str, bool] = field(default_factory=dict)
+    add_joint_position_to_observation: dict[str, bool] = field(default_factory=dict)
+    add_joint_velocity_to_observation: dict[str, bool] = field(default_factory=dict)
+    add_current_to_observation: dict[str, bool] = field(default_factory=dict)
+
+    add_ee_pos_to_observation: dict[str, bool] = field(default_factory=dict)
+    ee_pos_axes: dict[str, list[str]] = field(default_factory=dict)
+
+    add_ee_velocity_to_observation: dict[str, bool] = field(default_factory=dict)
+    ee_velocity_axes: dict[str, list[str]] = field(default_factory=dict)
+
+    add_ee_wrench_to_observation: dict[str, bool] = field(default_factory=dict)
+    ee_wrench_axes: dict[str, list[str]] = field(default_factory=dict)
+
+    stack_frames: dict[str, int] = field(default_factory=dict)
 
     _prev_obs: dict[str, dict[str, float]] = field(default_factory=dict, init=False)
     _state_buffer: deque[torch.Tensor] = field(init=False)
@@ -805,6 +803,7 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
         if state_values:
             state_tensor = torch.tensor(state_values, dtype=torch.float32)
             stack_frames = self._resolved_stack_frames()
+
             if stack_frames > 1:
                 if not self._state_buffer:
                     for _ in range(stack_frames):
@@ -812,119 +811,148 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
                 else:
                     self._state_buffer.append(state_tensor)
                 state_tensor = torch.cat(list(self._state_buffer), dim=-1)
+
             new_observation[OBS_STATE] = state_tensor
 
         for key, value in observation.items():
-            if "image" not in key:
-                continue
-            new_observation[key] = self._process_image(value)
+            if "image" in key:
+                new_observation[key] = self._process_image(value)
 
         new_transition[TransitionKey.OBSERVATION] = new_observation
         return new_transition
 
     def _collect_state_values(self, observation: dict[str, Any]) -> list[float]:
         values: list[float] = []
-        robot_names = self._robot_names(observation)
-        axis_names = ["x", "y", "z", "wx", "wy", "wz"]
 
-        for name in sorted(robot_names):
-            if self._enabled(self.add_joint_position_to_observation, name):
-                values.extend(self._collect_joint_channel(observation, name, "pos"))
+        for name in sorted(self._robot_names(observation)):
+            if self._is_enabled(self.add_joint_position_to_observation, name):
+                values.extend(self._joint_values(observation, name, "pos"))
 
-            if self._enabled(self.add_joint_velocity_to_observation, name):
-                joint_vel = self._collect_joint_channel(observation, name, "vel")
-                if not joint_vel:
-                    pos_keys = self._joint_keys(observation, name, "pos")
-                    joint_vel = self._differentiate(name, observation, pos_keys)
-                values.extend(joint_vel)
+            if self._is_enabled(self.add_joint_velocity_to_observation, name):
+                vals = self._joint_values(observation, name, "vel")
+                if not vals:
+                    vals = self._differentiate(name, observation, self._joint_keys(observation, name, "pos"))
+                values.extend(vals)
 
-            if self._enabled(self.add_current_to_observation, name):
-                values.extend(self._collect_joint_channel(observation, name, "current"))
+            if self._is_enabled(self.add_current_to_observation, name):
+                values.extend(self._joint_values(observation, name, "current"))
 
-            if self._enabled(self.add_ee_pos_to_observation, name):
+            if self._is_enabled(self.add_ee_pos_to_observation, name):
                 values.extend(
-                    self._collect_ee_channel(
+                    self._ee_values(
                         observation,
                         name,
-                        self._selected_axes(self.ee_pos_axes, name, axis_names),
-                        "ee_pos",
+                        self._axes(self.ee_pos_axes, name, ".ee_pos"),
                     )
                 )
 
-            if self._enabled(self.add_ee_velocity_to_observation, name):
-                selected_axes = self._selected_axes(self.ee_velocity_axes, name, axis_names)
-                ee_vel = self._collect_ee_channel(observation, name, selected_axes, "ee_vel")
-                if not ee_vel:
-                    ee_pos_keys = [f"{name}.{axis}.ee_pos" for axis in selected_axes]
-                    ee_vel = self._differentiate(name, observation, ee_pos_keys)
-                values.extend(ee_vel)
+            if self._is_enabled(self.add_ee_velocity_to_observation, name):
+                axes = self._axes(self.ee_velocity_axes, name, ".ee_vel")
+                vals = self._ee_values(observation, name, axes)
+                if not vals:
+                    vals = self._differentiate(
+                        name,
+                        observation,
+                        [f"{name}.{axis}.ee_pos" for axis in axes],
+                    )
+                values.extend(vals)
 
-            if self._enabled(self.add_ee_wrench_to_observation, name):
+            if self._is_enabled(self.add_ee_wrench_to_observation, name):
                 values.extend(
-                    self._collect_ee_channel(
+                    self._ee_values(
                         observation,
                         name,
-                        self._selected_axes(self.ee_wrench_axes, name, axis_names),
-                        "ee_wrench",
+                        self._axes(self.ee_wrench_axes, name, ".ee_wrench"),
                     )
                 )
 
-            if self._enabled(self.gripper_enable, name):
-                gripper_key = f"{name}.gripper.pos"
-                if gripper_key in observation:
-                    values.append(self._to_float(observation[gripper_key]))
+            if self._is_enabled(self.gripper_enable, name):
+                key = f"{name}.gripper.pos"
+                if key in observation:
+                    values.append(self._to_float(observation[key]))
 
         self._update_prev_obs(observation)
         return values
 
     def _process_image(self, image: Any) -> torch.Tensor:
-        if isinstance(image, torch.Tensor):
-            img = image
-        else:
-            img = torch.from_numpy(np.asarray(image))
+        img = image if isinstance(image, torch.Tensor) else torch.from_numpy(np.asarray(image))
 
         if img.ndim == 3:
             h, w, c = img.shape
-            if c < h and c < w:  # to channel first
+            if c < h and c < w:
                 img = einops.rearrange(img, "h w c -> c h w")
         elif img.ndim == 4:
             _, h, w, c = img.shape
-            if c < h and c < w:  # to channel first
+            if c < h and c < w:
                 img = einops.rearrange(img, "b h w c -> b c h w")
         else:
             raise ValueError(f"Expected image tensor with 3 or 4 dimensions, got shape {tuple(img.shape)}")
 
-        if img.dtype != torch.float32:
-            img = img.to(torch.float32)
+        img = img.to(torch.float32)
         return img / 255.0 if img.max() > 1.0 else img
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        new_features = {ft: dict(bucket) for ft, bucket in features.items()}
+        obs_features = new_features.get(PipelineFeatureType.OBSERVATION, {})
+
+        state_dim = 0
+        for name in sorted(self._robot_names(obs_features)):
+            if self._is_enabled(self.add_joint_position_to_observation, name):
+                state_dim += len(self._joint_keys(obs_features, name, "pos"))
+
+            if self._is_enabled(self.add_joint_velocity_to_observation, name):
+                vel_keys = self._joint_keys(obs_features, name, "vel")
+                state_dim += len(vel_keys) if vel_keys else len(self._joint_keys(obs_features, name, "pos"))
+
+            if self._is_enabled(self.add_current_to_observation, name):
+                state_dim += len(self._joint_keys(obs_features, name, "current"))
+
+            if self._is_enabled(self.add_ee_pos_to_observation, name):
+                state_dim += len(self._ee_keys(obs_features, name, self._axes(self.ee_pos_axes, name, ".ee_pos")))
+
+            if self._is_enabled(self.add_ee_velocity_to_observation, name):
+                filter_vel = self._axes(self.ee_velocity_axes, name, ".ee_vel")
+                filter_pos = self._axes(self.ee_pos_axes, name, ".ee_pos")
+                vel_keys = self._ee_keys(obs_features, name, filter_vel)
+                state_dim += len(vel_keys) if vel_keys else len(self._ee_keys(obs_features, name, filter_pos))
+
+            if self._is_enabled(self.add_ee_wrench_to_observation, name):
+                state_dim += len(self._ee_keys(obs_features, name, self._axes(self.ee_wrench_axes, name, ".ee_wrench")))
+
+            if self._is_enabled(self.gripper_enable, name) and f"{name}.gripper.pos" in obs_features:
+                state_dim += 1
+
+        if state_dim > 0:
+            obs_features[OBS_STATE] = PolicyFeature(
+                type=FeatureType.STATE,
+                shape=(state_dim * self._resolved_stack_frames(),),
+            )
+
+        for name, feature in obs_features.items():
+            if feature.type == FeatureType.VISUAL:
+                h, w, c = feature.shape
+                if c < h and c < w:
+                    obs_features[name].shape = (c, h, w)
+
+        return new_features
 
     @staticmethod
     def _robot_names(observation: dict[str, Any]) -> set[str]:
-        names: set[str] = set()
-        for key in observation:
-            if key.startswith(OBS_IMAGES):
-                continue
-            if "." in key:
-                names.add(key.split(".", 1)[0])
-        return names
+        return {
+            key.split(".", 1)[0]
+            for key in observation
+            if "." in key and not key.startswith(OBS_IMAGES)
+        }
 
     @staticmethod
-    def _enabled(flag: bool | dict[str, bool], name: str) -> bool:
-        if isinstance(flag, dict):
-            return bool(flag.get(name, False))
-        return bool(flag)
+    def _is_enabled(flag_dict: dict[str, bool], name: str) -> bool:
+        return bool(flag_dict.get(name, False))
 
     @staticmethod
-    def _selected_axes(
-        axes: list[str] | dict[str, list[str]] | None,
-        name: str,
-        default_axes: list[str],
-    ) -> list[str]:
-        if axes is None:
-            return list(default_axes)
-        if isinstance(axes, dict):
-            return list(axes.get(name, default_axes))
-        return list(axes)
+    def _axes(axis_dict: dict[str, list[str]], name: str, suffix: str = ".pos") -> list[str]:
+        return list(axis_dict.get(name, [f"{ax}{suffix}" for ax in TASK_FRAME_AXIS_NAMES]))
 
     @staticmethod
     def _to_float(value: Any) -> float:
@@ -943,119 +971,53 @@ class VanillaMPObservationProcessorStep(ProcessorStep):
             and ".gripper." not in key
         ]
 
-    def _collect_joint_channel(self, observation: dict[str, Any], robot_name: str, suffix: str) -> list[float]:
+    def _joint_values(self, observation: dict[str, Any], robot_name: str, suffix: str) -> list[float]:
         return [self._to_float(observation[key]) for key in self._joint_keys(observation, robot_name, suffix)]
 
-    def _collect_ee_channel(
+    @staticmethod
+    def _ee_keys(
+        observation: dict[str, Any],
+        robot_name: str,
+        axis_names: list[str],
+    ) -> list[str]:
+        return [f"{robot_name}.{axis}" for axis in axis_names if f"{robot_name}.{axis}" in observation]
+
+    def _ee_values(
         self,
         observation: dict[str, Any],
         robot_name: str,
         axis_names: list[str],
-        suffix: str,
     ) -> list[float]:
-        values: list[float] = []
-        for axis in axis_names:
-            key = f"{robot_name}.{axis}.{suffix}"
-            if key in observation:
-                values.append(self._to_float(observation[key]))
-        return values
+        return [self._to_float(observation[key]) for key in self._ee_keys(observation, robot_name, axis_names)]
 
     def _differentiate(self, robot_name: str, observation: dict[str, Any], keys: list[str]) -> list[float]:
-        if not keys:
-            return []
         prev = self._prev_obs.get(robot_name, {})
-        return [self._to_float(observation[key]) - prev.get(key, self._to_float(observation[key])) for key in keys if key in observation]
+        return [
+            self._to_float(observation[key]) - prev.get(key, self._to_float(observation[key]))
+            for key in keys
+            if key in observation
+        ]
 
     def _update_prev_obs(self, observation: dict[str, Any]) -> None:
-        robot_names = self._robot_names(observation)
-        for name in robot_names:
+        for name in self._robot_names(observation):
+            prefix = f"{name}."
             self._prev_obs[name] = {
                 key: self._to_float(value)
                 for key, value in observation.items()
-                if key.startswith(f"{name}.") and "image" not in key
+                if key.startswith(prefix) and "image" not in key
             }
+
+    def _resolved_stack_frames(self) -> int:
+        unique = {int(v) for v in self.stack_frames.values()}
+        if not unique:
+            return 1
+        if len(unique) > 1:
+            raise ValueError("VanillaMPObservationProcessorStep requires uniform stack_frames across robots.")
+        return max(1, unique.pop())
 
     def reset(self) -> None:
         self._prev_obs.clear()
         self._state_buffer = deque(maxlen=self._resolved_stack_frames())
-
-    def transform_features(
-        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
-    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
-        new_features = {ft: dict(bucket) for ft, bucket in features.items()}
-        obs_features = new_features.get(PipelineFeatureType.OBSERVATION, {})
-
-        state_dim = 0
-        robot_names = self._robot_names(obs_features)
-        axis_names = ["x", "y", "z", "wx", "wy", "wz"]
-        for name in sorted(robot_names):
-            if self._enabled(self.add_joint_position_to_observation, name):
-                state_dim += len(self._joint_keys(obs_features, name, "pos"))
-            if self._enabled(self.add_joint_velocity_to_observation, name):
-                joint_vel_keys = self._joint_keys(obs_features, name, "vel")
-                state_dim += len(joint_vel_keys) if joint_vel_keys else len(self._joint_keys(obs_features, name, "pos"))
-            if self._enabled(self.add_current_to_observation, name):
-                state_dim += len(self._joint_keys(obs_features, name, "current"))
-            if self._enabled(self.add_ee_pos_to_observation, name):
-                state_dim += len(
-                    self._collect_ee_feature_keys(
-                        obs_features,
-                        name,
-                        "ee_pos",
-                        self._selected_axes(self.ee_pos_axes, name, axis_names),
-                    )
-                )
-            if self._enabled(self.add_ee_velocity_to_observation, name):
-                selected_axes = self._selected_axes(self.ee_velocity_axes, name, axis_names)
-                ee_vel_keys = self._collect_ee_feature_keys(obs_features, name, "ee_vel", selected_axes)
-                state_dim += len(ee_vel_keys) if ee_vel_keys else len(
-                    self._collect_ee_feature_keys(obs_features, name, "ee_pos", selected_axes)
-                )
-            if self._enabled(self.add_ee_wrench_to_observation, name):
-                state_dim += len(
-                    self._collect_ee_feature_keys(
-                        obs_features,
-                        name,
-                        "ee_wrench",
-                        self._selected_axes(self.ee_wrench_axes, name, axis_names),
-                    )
-                )
-            if self._enabled(self.gripper_enable, name) and f"{name}.gripper.pos" in obs_features:
-                state_dim += 1
-
-        if state_dim > 0:
-            obs_features[OBS_STATE] = PolicyFeature(
-                type=FeatureType.STATE,
-                shape=(state_dim * self._resolved_stack_frames(),),
-            )
-
-        # transform to channel first images
-        for name, feature in obs_features.items():
-            if feature.type == FeatureType.VISUAL:
-                h, w, c = feature.shape
-                if c < h and c < w:
-                    obs_features[name].shape = (feature.shape[2], feature.shape[0], feature.shape[1])
-
-        return new_features
-
-    @staticmethod
-    def _collect_ee_feature_keys(
-        observation: dict[str, Any],
-        robot_name: str,
-        suffix: str,
-        axis_names: list[str],
-    ) -> list[str]:
-        return [f"{robot_name}.{axis}.{suffix}" for axis in axis_names if f"{robot_name}.{axis}.{suffix}" in observation]
-
-    def _resolved_stack_frames(self) -> int:
-        if isinstance(self.stack_frames, dict):
-            unique = {int(v) for v in self.stack_frames.values()}
-            if not unique:
-                return 1
-            if len(unique) > 1:
-                raise ValueError("VanillaMPObservationProcessorStep requires uniform stack_frames across robots.")
-            return max(1, unique.pop())
-        return max(1, int(self.stack_frames))
 
 
 @dataclass
@@ -1098,12 +1060,12 @@ class JointsToEEObservation(ProcessorStep):
                     for axis in range(6):
                         axis_values[axis].append(float(pose[axis]))
 
-                for axis, axis_name in enumerate(axis_names):
+                for axis, axis_name in enumerate(TASK_FRAME_AXIS_NAMES):
                     new_observation[f"{robot_name}.{axis_name}.ee_pos"] = torch.tensor(axis_values[axis], dtype=torch.float32)
             else:
                 joint_state = self._extract_joint_state(observation, robot_name, joints, index=None)
                 pose = solver.forward_kinematics(joint_state)
-                for axis, axis_name in enumerate(axis_names):
+                for axis, axis_name in enumerate(TASK_FRAME_AXIS_NAMES):
                     new_observation[f"{robot_name}.{axis_name}.ee_pos"] = float(pose[axis])
 
         new_transition[TransitionKey.OBSERVATION] = new_observation
@@ -1172,7 +1134,7 @@ class RelativeFrameObservationProcessor(ProcessorStep):
             relative_orientation = _euler_xyz_from_rotation(pose_rot * ref_rot.inv())
 
             relative_pose = relative_position + relative_orientation
-            for axis, axis_name in enumerate(axis_names):
+            for axis, axis_name in enumerate(TASK_FRAME_AXIS_NAMES):
                 new_observation[f"{name}.{axis_name}.ee_pos"] = relative_pose[axis]
 
         new_transition[TransitionKey.OBSERVATION] = new_observation
