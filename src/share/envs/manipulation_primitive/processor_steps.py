@@ -567,18 +567,8 @@ class DiscretizeGripperProcessorStep(ProcessorStep):
     _gripper_state: dict[str, float] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
-        min_keys = set(self.min_pos.keys()) if isinstance(self.min_pos, dict) else set()
-        max_keys = set(self.max_pos.keys()) if isinstance(self.max_pos, dict) else set()
-        if min_keys and max_keys and min_keys != max_keys:
-            raise ValueError("DiscretizeGripperProcessorStep requires min_pos and max_pos to have the same robot keys")
-
-        if min_keys:
-            self._robot_names = sorted(min_keys)
-        elif max_keys:
-            self._robot_names = sorted(max_keys)
-        else:
-            self._robot_names = []
-
+        all_robot_keys = set(self.enable) | set(self.min_pos) | set(self.max_pos) | set(self.threshold) | set(self.mode)
+        self._robot_names = sorted(all_robot_keys)
         self.reset()
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
@@ -772,7 +762,11 @@ class ToJointActionProcessorStep(ProcessorStep):
 @dataclass
 @ProcessorStepRegistry.register("mp_vanilla_observation_processor")
 class VanillaMPObservationProcessorStep(ProcessorStep):
-    """Build ``observation.state`` from configured robot modalities and normalize images."""
+    """Build ``observation.state`` from normalized per-robot modality config.
+
+    All boolean, axis-selection, and frame-stacking settings are expected to be
+    per-robot dicts, matching the normalized manipulation-primitive config.
+    """
 
     device: str = "cpu"
 

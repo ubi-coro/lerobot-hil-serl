@@ -91,13 +91,15 @@ class ObservationConfig:
 
 @dataclass
 class GripperConfig:
-    """Configuration for gripper control and penalties."""
+    """Configuration for gripper control, discretization, and penalties."""
 
     enable: bool | dict[str, bool] = False
     discretize: bool | dict[str, bool] = False
     threshold: float | dict[str, float] = 0.5
+    mode: Literal["state", "pulse"] | dict[str, Literal["state", "pulse"]] = "state"
     max_pos: float | dict[str, float] = 1.0
     min_pos: float | dict[str, float] = 0.0
+    static_pos: float | dict[str, float] = 0.0
     penalty: float | dict[str, float | None] | None = None
 
 
